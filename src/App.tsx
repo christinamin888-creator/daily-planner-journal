@@ -2,8 +2,15 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
+import {
+  getDailyPlannerSync,
+  isSupabaseConfigured,
+  upsertDailyPlannerSync,
+} from "./lib/supabase";
 
 const STORAGE_KEY = "daily-planner-journal-v1";
+const SYNC_STATE_KEY = "daily-planner-journal-sync-v1";
+const SYNC_DEBOUNCE_MS = 800;
 
 const CATEGORY_OPTIONS = [
   "学习",
@@ -26,9 +33,21 @@ type PlanItem = {
   note: string;
   completed: boolean;
   createdAt: number;
+  updatedAt?: number;
 };
 
 type PlanBook = Record<string, PlanItem[]>;
+type CloudPayload = {
+  plansByDate: PlanBook;
+  deletedItemIds: string[];
+};
+
+type SyncState = {
+  syncCodeHash: string;
+  clientId: string;
+  cloudVersion: number;
+  deletedItemIds: string[];
+};
 
 type CategoryStyle = {
   emoji: string;
@@ -132,6 +151,144 @@ function savePlanBook(planBook: PlanBook) {
   }
 }
 
+function loadSyncState(): SyncState | null {
+  try {
+    const rawData = window.localStorage.getItem(SYNC_STATE_KEY);
+
+    if (!rawData) {
+      return null;
+    }
+
+    const parsedData = JSON.parse(rawData) as SyncState;
+
+    if (!parsedData?.syncCodeHash || !parsedData?.clientId) {
+      return null;
+    }
+
+    return {
+      syncCodeHash: parsedData.syncCodeHash,
+      clientId: parsedData.clientId,
+      cloudVersion: parsedData.cloudVersion ?? 0,
+      deletedItemIds: parsedData.deletedItemIds ?? [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveSyncState(syncState: SyncState | null) {
+  try {
+    if (!syncState) {
+      window.localStorage.removeItem(SYNC_STATE_KEY);
+      return;
+    }
+
+    window.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify(syncState));
+  } catch {
+    // localStorage may be unavailable in private or restricted browser modes.
+  }
+}
+
+function hasPlans(planBook: PlanBook): boolean {
+  return Object.values(planBook).some((items) => items.length > 0);
+}
+
+function getItemTime(item: PlanItem): number {
+  return item.updatedAt ?? item.createdAt ?? 0;
+}
+
+function normalizePlanBook(planBook: PlanBook): PlanBook {
+  return Object.entries(planBook).reduce<PlanBook>((result, [date, items]) => {
+    result[date] = items.map((item) => ({
+      ...item,
+      date: item.date || date,
+      updatedAt: item.updatedAt ?? item.createdAt ?? Date.now(),
+    }));
+    return result;
+  }, {});
+}
+
+function normalizePayload(payload: unknown): CloudPayload {
+  if (payload && typeof payload === "object" && "plansByDate" in payload) {
+    const cloudPayload = payload as Partial<CloudPayload>;
+
+    return {
+      plansByDate: normalizePlanBook((cloudPayload.plansByDate ?? {}) as PlanBook),
+      deletedItemIds: Array.isArray(cloudPayload.deletedItemIds)
+        ? cloudPayload.deletedItemIds
+        : [],
+    };
+  }
+
+  return {
+    plansByDate: normalizePlanBook((payload ?? {}) as PlanBook),
+    deletedItemIds: [],
+  };
+}
+
+function mergePlanBooks(
+  localPlanBook: PlanBook,
+  cloudPlanBook: PlanBook,
+  deletedItemIds: string[],
+): PlanBook {
+  const deletedSet = new Set(deletedItemIds);
+  const dates = new Set([...Object.keys(localPlanBook), ...Object.keys(cloudPlanBook)]);
+  const merged: PlanBook = {};
+
+  dates.forEach((date) => {
+    const itemMap = new Map<string, PlanItem>();
+
+    [...(localPlanBook[date] ?? []), ...(cloudPlanBook[date] ?? [])].forEach((item) => {
+      if (deletedSet.has(item.id)) {
+        return;
+      }
+
+      const normalizedItem = {
+        ...item,
+        date: item.date || date,
+        updatedAt: item.updatedAt ?? item.createdAt ?? Date.now(),
+      };
+      const existingItem = itemMap.get(item.id);
+
+      if (!existingItem || getItemTime(normalizedItem) >= getItemTime(existingItem)) {
+        itemMap.set(item.id, normalizedItem);
+      }
+    });
+
+    const items = Array.from(itemMap.values()).sort((a, b) => b.createdAt - a.createdAt);
+
+    if (items.length > 0) {
+      merged[date] = items;
+    }
+  });
+
+  return merged;
+}
+
+function createCloudPayload(planBook: PlanBook, deletedItemIds: string[]): CloudPayload {
+  return {
+    plansByDate: normalizePlanBook(planBook),
+    deletedItemIds,
+  };
+}
+
+function uniqueValues(values: string[]): string[] {
+  return Array.from(new Set(values));
+}
+
+function arePlanBooksEqual(firstPlanBook: PlanBook, secondPlanBook: PlanBook): boolean {
+  return JSON.stringify(firstPlanBook) === JSON.stringify(secondPlanBook);
+}
+
+async function hashSyncCode(syncCode: string): Promise<string> {
+  const encodedCode = new TextEncoder().encode(syncCode);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", encodedCode);
+
+  return Array.from(new Uint8Array(hashBuffer))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 function formatDateInput(date: Date): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -195,8 +352,21 @@ function App() {
   const [completedFlashId, setCompletedFlashId] = useState<string | null>(null);
   const [feedbackId, setFeedbackId] = useState<number | null>(null);
   const [isExporting, setIsExporting] = useState<boolean>(false);
+  const [syncState, setSyncState] = useState<SyncState | null>(() => loadSyncState());
+  const [syncCodeInput, setSyncCodeInput] = useState<string>("");
+  const [deletedItemIds, setDeletedItemIds] = useState<string[]>(
+    () => loadSyncState()?.deletedItemIds ?? [],
+  );
+  const [syncStatus, setSyncStatus] = useState<string>(() =>
+    isSupabaseConfigured ? "本地模式" : "本地模式，未配置云同步",
+  );
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const journalRef = useRef<HTMLDivElement | null>(null);
   const feedbackTimer = useRef<number | null>(null);
+  const syncTimer = useRef<number | null>(null);
+  const syncReady = useRef<boolean>(false);
+  const latestPlanBook = useRef<PlanBook>(plansByDate);
+  const latestDeletedItemIds = useRef<string[]>(deletedItemIds);
 
   const plans = plansByDate[selectedDate] ?? [];
   const completedCount = plans.filter((item) => item.completed).length;
@@ -204,15 +374,143 @@ function App() {
 
   useEffect(() => {
     savePlanBook(plansByDate);
+    latestPlanBook.current = plansByDate;
   }, [plansByDate]);
+
+  useEffect(() => {
+    latestDeletedItemIds.current = deletedItemIds;
+  }, [deletedItemIds]);
+
+  useEffect(() => {
+    saveSyncState(syncState ? { ...syncState, deletedItemIds } : null);
+  }, [deletedItemIds, syncState]);
 
   useEffect(() => {
     return () => {
       if (feedbackTimer.current) {
         window.clearTimeout(feedbackTimer.current);
       }
+      if (syncTimer.current) {
+        window.clearTimeout(syncTimer.current);
+      }
     };
   }, []);
+
+  useEffect(() => {
+    if (!syncState) {
+      syncReady.current = false;
+      return;
+    }
+
+    let isCancelled = false;
+
+    const loadCloudData = async () => {
+      if (!isSupabaseConfigured) {
+        setSyncStatus("本地模式，未配置云同步");
+        return;
+      }
+
+      syncReady.current = false;
+      setIsSyncing(true);
+      setSyncStatus("正在读取云端数据...");
+
+      try {
+        const cloudRecord = await getDailyPlannerSync(syncState.syncCodeHash);
+        const cloudPayload = normalizePayload(cloudRecord?.payload);
+        const localPlanBook = normalizePlanBook(latestPlanBook.current);
+        const localHasPlans = hasPlans(localPlanBook);
+        const cloudHasPlans = hasPlans(cloudPayload.plansByDate);
+        const nextDeletedItemIds = uniqueValues([
+          ...syncState.deletedItemIds,
+          ...cloudPayload.deletedItemIds,
+        ]);
+        const mergedPlanBook =
+          localHasPlans && cloudHasPlans
+            ? mergePlanBooks(localPlanBook, cloudPayload.plansByDate, nextDeletedItemIds)
+            : cloudHasPlans
+              ? mergePlanBooks({}, cloudPayload.plansByDate, nextDeletedItemIds)
+              : mergePlanBooks(localPlanBook, {}, nextDeletedItemIds);
+
+        if (isCancelled) {
+          return;
+        }
+
+        const currentVersion = Number(cloudRecord?.version ?? 0);
+        setDeletedItemIds(nextDeletedItemIds);
+        setPlansByDate(mergedPlanBook);
+        setSyncState((current) =>
+          current
+            ? {
+                ...current,
+                cloudVersion: currentVersion,
+                deletedItemIds: nextDeletedItemIds,
+              }
+            : current,
+        );
+
+        if (localHasPlans) {
+          const savedRecord = await upsertDailyPlannerSync({
+            syncCodeHash: syncState.syncCodeHash,
+            payload: createCloudPayload(mergedPlanBook, nextDeletedItemIds),
+            version: currentVersion + 1,
+            clientId: syncState.clientId,
+          });
+          const savedVersion = Number(savedRecord?.version ?? currentVersion + 1);
+
+          if (!isCancelled) {
+            setSyncState((current) =>
+              current
+                ? {
+                    ...current,
+                    cloudVersion: savedVersion,
+                    deletedItemIds: nextDeletedItemIds,
+                  }
+                : current,
+            );
+          }
+        }
+
+        if (!isCancelled) {
+          syncReady.current = true;
+          setSyncStatus("已连接云同步");
+        }
+      } catch (error) {
+        if (!isCancelled) {
+          setSyncStatus(error instanceof Error ? error.message : "云端数据读取失败");
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsSyncing(false);
+        }
+      }
+    };
+
+    void loadCloudData();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [syncState?.clientId, syncState?.syncCodeHash]);
+
+  useEffect(() => {
+    if (!syncState || !syncReady.current) {
+      return;
+    }
+
+    if (syncTimer.current) {
+      window.clearTimeout(syncTimer.current);
+    }
+
+    syncTimer.current = window.setTimeout(() => {
+      void pushToCloud(syncState);
+    }, SYNC_DEBOUNCE_MS);
+
+    return () => {
+      if (syncTimer.current) {
+        window.clearTimeout(syncTimer.current);
+      }
+    };
+  }, [deletedItemIds, plansByDate, syncState?.clientId, syncState?.syncCodeHash]);
 
   const updatePlansForSelectedDate = (updater: (current: PlanItem[]) => PlanItem[]) => {
     setPlansByDate((currentBook) => ({
@@ -226,9 +524,121 @@ function App() {
     setEditingId(null);
   };
 
+  const pushToCloud = async (currentSyncState: SyncState) => {
+    if (!isSupabaseConfigured) {
+      setSyncStatus("本地模式，未配置云同步");
+      return;
+    }
+
+    setIsSyncing(true);
+    setSyncStatus("正在同步云端...");
+
+    try {
+      const cloudRecord = await getDailyPlannerSync(currentSyncState.syncCodeHash);
+      const cloudPayload = normalizePayload(cloudRecord?.payload);
+      const nextDeletedItemIds = uniqueValues([
+        ...latestDeletedItemIds.current,
+        ...cloudPayload.deletedItemIds,
+      ]);
+      const mergedPlanBook = mergePlanBooks(
+        latestPlanBook.current,
+        cloudPayload.plansByDate,
+        nextDeletedItemIds,
+      );
+
+      if (!arePlanBooksEqual(latestPlanBook.current, mergedPlanBook)) {
+        setPlansByDate(mergedPlanBook);
+      }
+      if (nextDeletedItemIds.length !== latestDeletedItemIds.current.length) {
+        setDeletedItemIds(nextDeletedItemIds);
+      }
+
+      const currentVersion = Number(cloudRecord?.version ?? currentSyncState.cloudVersion ?? 0);
+      const nextVersion = currentVersion + 1;
+      const savedRecord = await upsertDailyPlannerSync({
+        syncCodeHash: currentSyncState.syncCodeHash,
+        payload: createCloudPayload(mergedPlanBook, nextDeletedItemIds),
+        version: nextVersion,
+        clientId: currentSyncState.clientId,
+      });
+      const savedVersion = Number(savedRecord?.version ?? nextVersion);
+
+      setSyncState((current) =>
+        current
+          ? {
+              ...current,
+              cloudVersion: savedVersion,
+              deletedItemIds: nextDeletedItemIds,
+            }
+          : current,
+      );
+      setSyncStatus("已同步到云端");
+    } catch (error) {
+      setSyncStatus(error instanceof Error ? error.message : "云同步失败");
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handleConnectSyncCode = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!isSupabaseConfigured) {
+      setSyncStatus("Supabase 环境变量未配置，当前只能本地保存");
+      return;
+    }
+
+    const nextSyncCode = syncCodeInput.trim();
+
+    if (nextSyncCode.length < 4) {
+      setSyncStatus("同步码至少输入 4 位");
+      return;
+    }
+
+    setIsSyncing(true);
+    setSyncStatus("正在连接同步码...");
+
+    try {
+      const syncCodeHash = await hashSyncCode(nextSyncCode);
+
+      if (syncState && syncState.syncCodeHash !== syncCodeHash) {
+        const shouldSwitch = window.confirm("切换同步码后，会把当前本地计划合并到新的同步码下。继续吗？");
+
+        if (!shouldSwitch) {
+          setSyncStatus("已取消切换同步码");
+          return;
+        }
+      }
+
+      const nextSyncState: SyncState = {
+        syncCodeHash,
+        clientId: syncState?.clientId ?? createId(),
+        cloudVersion: 0,
+        deletedItemIds: syncState?.syncCodeHash === syncCodeHash ? deletedItemIds : [],
+      };
+
+      syncReady.current = false;
+      setDeletedItemIds(nextSyncState.deletedItemIds);
+      setSyncState(nextSyncState);
+      setSyncCodeInput("");
+    } catch {
+      setSyncStatus("同步码处理失败");
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handleDisconnectSync = () => {
+    syncReady.current = false;
+    setSyncState(null);
+    setDeletedItemIds([]);
+    setSyncStatus("已切回本地模式");
+  };
+
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const title = form.title.trim();
+    const updatedAt = Date.now();
 
     if (!title) {
       return;
@@ -243,6 +653,7 @@ function App() {
                 title,
                 category: form.category,
                 note: form.note.trim(),
+                updatedAt,
               }
             : item,
         ),
@@ -258,7 +669,8 @@ function App() {
       category: form.category,
       note: form.note.trim(),
       completed: false,
-      createdAt: Date.now(),
+      createdAt: updatedAt,
+      updatedAt,
     };
 
     updatePlansForSelectedDate((currentPlans) => [nextPlan, ...currentPlans]);
@@ -276,6 +688,7 @@ function App() {
 
   const handleDelete = (id: string) => {
     updatePlansForSelectedDate((currentPlans) => currentPlans.filter((item) => item.id !== id));
+    setDeletedItemIds((current) => uniqueValues([...current, id]));
     if (editingId === id) {
       resetForm();
     }
@@ -304,6 +717,7 @@ function App() {
           ? {
               ...item,
               completed: !item.completed,
+              updatedAt: Date.now(),
             }
           : item,
       ),
@@ -322,6 +736,7 @@ function App() {
     }
 
     updatePlansForSelectedDate(() => []);
+    setDeletedItemIds((current) => uniqueValues([...current, ...plans.map((item) => item.id)]));
     resetForm();
   };
 
@@ -420,6 +835,45 @@ function App() {
 
         <section className="grid gap-6 lg:grid-cols-[minmax(280px,360px)_1fr]">
           <aside className="h-fit rounded-[2rem] border border-white/80 bg-white/80 p-5 shadow-sticker backdrop-blur">
+            <form
+              className="mb-5 rounded-[1.5rem] border border-dashed border-violet-200 bg-violet-50/70 p-4"
+              onSubmit={handleConnectSyncCode}
+            >
+              <label className="mb-2 block text-sm font-black text-[#6f5d78]" htmlFor="sync-code">
+                个人同步码
+              </label>
+              <div className="flex flex-col gap-2 sm:flex-row lg:flex-col">
+                <input
+                  className="min-w-0 flex-1 rounded-2xl border border-violet-100 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                  id="sync-code"
+                  maxLength={64}
+                  placeholder={syncState ? "输入新同步码可切换" : "输入同步码开启云同步"}
+                  type="password"
+                  value={syncCodeInput}
+                  onChange={(event) => setSyncCodeInput(event.target.value)}
+                />
+                <button
+                  className="rounded-2xl bg-[#9f8cff] px-4 py-3 text-sm font-black text-white shadow-sm shadow-violet-200 transition hover:bg-[#8f7af2] disabled:opacity-50"
+                  disabled={isSyncing || !syncCodeInput.trim()}
+                  type="submit"
+                >
+                  {syncState ? "连接" : "同步"}
+                </button>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs font-bold text-[#76687f]">
+                <span>{isSyncing ? "同步中..." : syncStatus}</span>
+                {syncState ? (
+                  <button
+                    className="rounded-full bg-white/80 px-3 py-1 text-[#7a6b84] transition hover:bg-white"
+                    type="button"
+                    onClick={handleDisconnectSync}
+                  >
+                    本地模式
+                  </button>
+                ) : null}
+              </div>
+            </form>
+
             <div className="mb-5">
               <div className="mb-2 flex items-center justify-between text-sm font-bold text-[#6b5d74]">
                 <span>已完成 {completedCount} / {plans.length} 项</span>
