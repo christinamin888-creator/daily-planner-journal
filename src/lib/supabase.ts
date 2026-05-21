@@ -49,23 +49,6 @@ async function callRpc<T>(functionName: string, payload: RpcPayload): Promise<T 
   return data as T;
 }
 
-async function tryRpcSignatures<T>(
-  functionName: string,
-  payloads: RpcPayload[],
-): Promise<T | null> {
-  let lastError: unknown;
-
-  for (const payload of payloads) {
-    try {
-      return await callRpc<T>(functionName, payload);
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error("Supabase 同步失败");
-}
-
 function firstRecord(data: unknown): DailyPlannerSyncRecord | null {
   if (!data) {
     return null;
@@ -87,11 +70,9 @@ function firstRecord(data: unknown): DailyPlannerSyncRecord | null {
 export async function getDailyPlannerSync(
   syncCodeHash: string,
 ): Promise<DailyPlannerSyncRecord | null> {
-  const data = await tryRpcSignatures<unknown>("get_daily_planner_sync", [
-    { p_sync_code_hash: syncCodeHash },
-    { sync_code_hash: syncCodeHash },
-    { code_hash: syncCodeHash },
-  ]);
+  const data = await callRpc<unknown>("get_daily_planner_sync", {
+    p_sync_code_hash: syncCodeHash,
+  });
 
   return firstRecord(data);
 }
@@ -102,26 +83,11 @@ export async function upsertDailyPlannerSync(params: {
   version: number;
   clientId: string;
 }): Promise<DailyPlannerSyncRecord | null> {
-  const data = await tryRpcSignatures<unknown>("upsert_daily_planner_sync", [
-    {
-      p_sync_code_hash: params.syncCodeHash,
-      p_payload: params.payload,
-      p_version: params.version,
-      p_client_id: params.clientId,
-    },
-    {
-      sync_code_hash: params.syncCodeHash,
-      payload: params.payload,
-      version: params.version,
-      client_id: params.clientId,
-    },
-    {
-      code_hash: params.syncCodeHash,
-      planner_payload: params.payload,
-      planner_version: params.version,
-      client_id: params.clientId,
-    },
-  ]);
+  const data = await callRpc<unknown>("upsert_daily_planner_sync", {
+    p_sync_code_hash: params.syncCodeHash,
+    p_payload: params.payload,
+    p_last_client_id: params.clientId,
+  });
 
   return firstRecord(data);
 }
