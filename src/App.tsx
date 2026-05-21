@@ -3,13 +3,22 @@ import { AnimatePresence, motion } from "framer-motion";
 import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
 import {
-  getDailyPlannerSync,
+  getCurrentSession,
+  getDailyPlannerUserData,
   isSupabaseConfigured,
-  upsertDailyPlannerSync,
+  onAuthStateChange,
+  resetPassword,
+  signIn,
+  signOut,
+  signUp,
+  updatePassword,
+  upsertDailyPlannerUserData,
 } from "./lib/supabase";
+import type { User as SupabaseUser } from "@supabase/supabase-js";
 
 const STORAGE_KEY = "daily-planner-journal-v1";
-const SYNC_STATE_KEY = "daily-planner-journal-sync-v1";
+const LEGACY_SYNC_STATE_KEY = "daily-planner-journal-sync-v1";
+const DELETED_ITEM_IDS_KEY = "daily-planner-journal-deleted-v1";
 const SYNC_DEBOUNCE_MS = 800;
 
 const CATEGORY_OPTIONS = [
@@ -42,11 +51,12 @@ type CloudPayload = {
   deletedItemIds: string[];
 };
 
-type SyncState = {
-  syncCodeHash: string;
-  clientId: string;
-  cloudVersion: number;
-  deletedItemIds: string[];
+type AuthMode = "sign-in" | "sign-up" | "forgot" | "update-password";
+
+type AuthForm = {
+  email: string;
+  password: string;
+  confirmPassword: string;
 };
 
 type CategoryStyle = {
@@ -151,39 +161,28 @@ function savePlanBook(planBook: PlanBook) {
   }
 }
 
-function loadSyncState(): SyncState | null {
+function loadDeletedItemIds(): string[] {
   try {
-    const rawData = window.localStorage.getItem(SYNC_STATE_KEY);
+    const rawDeletedIds = window.localStorage.getItem(DELETED_ITEM_IDS_KEY);
 
-    if (!rawData) {
-      return null;
+    if (rawDeletedIds) {
+      const parsedDeletedIds = JSON.parse(rawDeletedIds);
+      return Array.isArray(parsedDeletedIds) ? parsedDeletedIds : [];
     }
 
-    const parsedData = JSON.parse(rawData) as SyncState;
-
-    if (!parsedData?.syncCodeHash || !parsedData?.clientId) {
-      return null;
-    }
-
-    return {
-      syncCodeHash: parsedData.syncCodeHash,
-      clientId: parsedData.clientId,
-      cloudVersion: parsedData.cloudVersion ?? 0,
-      deletedItemIds: parsedData.deletedItemIds ?? [],
-    };
+    const rawLegacySyncState = window.localStorage.getItem(LEGACY_SYNC_STATE_KEY);
+    const parsedLegacySyncState = rawLegacySyncState ? JSON.parse(rawLegacySyncState) : null;
+    return Array.isArray(parsedLegacySyncState?.deletedItemIds)
+      ? parsedLegacySyncState.deletedItemIds
+      : [];
   } catch {
-    return null;
+    return [];
   }
 }
 
-function saveSyncState(syncState: SyncState | null) {
+function saveDeletedItemIds(deletedItemIds: string[]) {
   try {
-    if (!syncState) {
-      window.localStorage.removeItem(SYNC_STATE_KEY);
-      return;
-    }
-
-    window.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify(syncState));
+    window.localStorage.setItem(DELETED_ITEM_IDS_KEY, JSON.stringify(deletedItemIds));
   } catch {
     // localStorage may be unavailable in private or restricted browser modes.
   }
@@ -280,13 +279,8 @@ function arePlanBooksEqual(firstPlanBook: PlanBook, secondPlanBook: PlanBook): b
   return JSON.stringify(firstPlanBook) === JSON.stringify(secondPlanBook);
 }
 
-async function hashSyncCode(syncCode: string): Promise<string> {
-  const encodedCode = new TextEncoder().encode(syncCode);
-  const hashBuffer = await crypto.subtle.digest("SHA-256", encodedCode);
-
-  return Array.from(new Uint8Array(hashBuffer))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
+function areStringArraysEqual(firstValues: string[], secondValues: string[]): boolean {
+  return JSON.stringify(firstValues) === JSON.stringify(secondValues);
 }
 
 function formatDateInput(date: Date): string {
@@ -310,6 +304,21 @@ function createId(): string {
   }
 
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function hasPasswordRecoveryMarker(): boolean {
+  const queryParams = new URLSearchParams(window.location.search);
+  const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+
+  return (
+    queryParams.get("auth") === "recovery" ||
+    queryParams.get("type") === "recovery" ||
+    hashParams.get("type") === "recovery"
+  );
+}
+
+function cleanAuthUrl() {
+  window.history.replaceState({}, document.title, window.location.pathname);
 }
 
 function SparkleFeedback({ feedbackId }: { feedbackId: number }) {
@@ -352,21 +361,31 @@ function App() {
   const [completedFlashId, setCompletedFlashId] = useState<string | null>(null);
   const [feedbackId, setFeedbackId] = useState<number | null>(null);
   const [isExporting, setIsExporting] = useState<boolean>(false);
-  const [syncState, setSyncState] = useState<SyncState | null>(() => loadSyncState());
-  const [syncCodeInput, setSyncCodeInput] = useState<string>("");
-  const [deletedItemIds, setDeletedItemIds] = useState<string[]>(
-    () => loadSyncState()?.deletedItemIds ?? [],
+  const [deletedItemIds, setDeletedItemIds] = useState<string[]>(() => loadDeletedItemIds());
+  const [currentUser, setCurrentUser] = useState<SupabaseUser | null>(null);
+  const [authMode, setAuthMode] = useState<AuthMode>(() =>
+    hasPasswordRecoveryMarker() ? "update-password" : "sign-in",
   );
-  const [syncStatus, setSyncStatus] = useState<string>(() =>
-    isSupabaseConfigured ? "本地模式" : "本地模式，未配置云同步",
+  const [authForm, setAuthForm] = useState<AuthForm>({
+    email: "",
+    password: "",
+    confirmPassword: "",
+  });
+  const [authStatus, setAuthStatus] = useState<string>(() =>
+    isSupabaseConfigured ? "未登录时仍可本地使用" : "Supabase 环境变量未配置，当前为本地模式",
   );
-  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [cloudStatus, setCloudStatus] = useState<string>(() =>
+    isSupabaseConfigured ? "本地模式" : "Supabase 环境变量未配置，本地模式",
+  );
+  const [isAuthBusy, setIsAuthBusy] = useState<boolean>(false);
+  const [isCloudSaving, setIsCloudSaving] = useState<boolean>(false);
   const journalRef = useRef<HTMLDivElement | null>(null);
   const feedbackTimer = useRef<number | null>(null);
-  const syncTimer = useRef<number | null>(null);
-  const syncReady = useRef<boolean>(false);
+  const cloudTimer = useRef<number | null>(null);
+  const cloudReady = useRef<boolean>(false);
   const latestPlanBook = useRef<PlanBook>(plansByDate);
   const latestDeletedItemIds = useRef<string[]>(deletedItemIds);
+  const currentUserId = currentUser?.id ?? null;
 
   const plans = plansByDate[selectedDate] ?? [];
   const completedCount = plans.filter((item) => item.completed).length;
@@ -382,23 +401,76 @@ function App() {
   }, [deletedItemIds]);
 
   useEffect(() => {
-    saveSyncState(syncState ? { ...syncState, deletedItemIds } : null);
-  }, [deletedItemIds, syncState]);
+    saveDeletedItemIds(deletedItemIds);
+  }, [deletedItemIds]);
 
   useEffect(() => {
     return () => {
       if (feedbackTimer.current) {
         window.clearTimeout(feedbackTimer.current);
       }
-      if (syncTimer.current) {
-        window.clearTimeout(syncTimer.current);
+      if (cloudTimer.current) {
+        window.clearTimeout(cloudTimer.current);
       }
     };
   }, []);
 
   useEffect(() => {
-    if (!syncState) {
-      syncReady.current = false;
+    if (!isSupabaseConfigured) {
+      return;
+    }
+
+    let isMounted = true;
+
+    if (hasPasswordRecoveryMarker()) {
+      setAuthMode("update-password");
+      setAuthStatus("请设置新的登录密码");
+    }
+
+    void getCurrentSession()
+      .then((session) => {
+        if (isMounted) {
+          setCurrentUser(session?.user ?? null);
+        }
+      })
+      .catch((error) => {
+        if (isMounted) {
+          setAuthStatus(error instanceof Error ? error.message : "读取登录状态失败");
+        }
+      });
+
+    const subscription = onAuthStateChange((event, session) => {
+      if (!isMounted) {
+        return;
+      }
+
+      setCurrentUser(session?.user ?? null);
+
+      if (event === "PASSWORD_RECOVERY") {
+        setAuthMode("update-password");
+        setAuthStatus("请设置新的登录密码");
+      }
+
+      if (event === "SIGNED_OUT") {
+        cloudReady.current = false;
+        setCloudStatus("已退出登录，本地模式");
+      }
+    });
+
+    return () => {
+      isMounted = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!currentUserId) {
+      cloudReady.current = false;
+      if (cloudTimer.current) {
+        window.clearTimeout(cloudTimer.current);
+        cloudTimer.current = null;
+      }
+      setCloudStatus(isSupabaseConfigured ? "未登录，本地模式" : "Supabase 环境变量未配置，本地模式");
       return;
     }
 
@@ -406,81 +478,50 @@ function App() {
 
     const loadCloudData = async () => {
       if (!isSupabaseConfigured) {
-        setSyncStatus("本地模式，未配置云同步");
+        setCloudStatus("Supabase 环境变量未配置，本地模式");
         return;
       }
 
-      syncReady.current = false;
-      setIsSyncing(true);
-      setSyncStatus("正在读取云端数据...");
+      cloudReady.current = false;
+      setIsCloudSaving(true);
+      setCloudStatus("正在合并云端数据...");
 
       try {
-        const cloudRecord = await getDailyPlannerSync(syncState.syncCodeHash);
+        const cloudRecord = await getDailyPlannerUserData(currentUserId);
         const cloudPayload = normalizePayload(cloudRecord?.payload);
         const localPlanBook = normalizePlanBook(latestPlanBook.current);
-        const localHasPlans = hasPlans(localPlanBook);
-        const cloudHasPlans = hasPlans(cloudPayload.plansByDate);
         const nextDeletedItemIds = uniqueValues([
-          ...syncState.deletedItemIds,
+          ...latestDeletedItemIds.current,
           ...cloudPayload.deletedItemIds,
         ]);
-        const mergedPlanBook =
-          localHasPlans && cloudHasPlans
-            ? mergePlanBooks(localPlanBook, cloudPayload.plansByDate, nextDeletedItemIds)
-            : cloudHasPlans
-              ? mergePlanBooks({}, cloudPayload.plansByDate, nextDeletedItemIds)
-              : mergePlanBooks(localPlanBook, {}, nextDeletedItemIds);
+        const mergedPlanBook = mergePlanBooks(
+          localPlanBook,
+          cloudPayload.plansByDate,
+          nextDeletedItemIds,
+        );
 
         if (isCancelled) {
           return;
         }
 
-        const currentVersion = Number(cloudRecord?.version ?? 0);
         setDeletedItemIds(nextDeletedItemIds);
         setPlansByDate(mergedPlanBook);
-        setSyncState((current) =>
-          current
-            ? {
-                ...current,
-                cloudVersion: currentVersion,
-                deletedItemIds: nextDeletedItemIds,
-              }
-            : current,
-        );
-
-        if (localHasPlans) {
-          const savedRecord = await upsertDailyPlannerSync({
-            syncCodeHash: syncState.syncCodeHash,
-            payload: createCloudPayload(mergedPlanBook, nextDeletedItemIds),
-            version: currentVersion + 1,
-            clientId: syncState.clientId,
-          });
-          const savedVersion = Number(savedRecord?.version ?? currentVersion + 1);
-
-          if (!isCancelled) {
-            setSyncState((current) =>
-              current
-                ? {
-                    ...current,
-                    cloudVersion: savedVersion,
-                    deletedItemIds: nextDeletedItemIds,
-                  }
-                : current,
-            );
-          }
-        }
+        await upsertDailyPlannerUserData({
+          userId: currentUserId,
+          payload: createCloudPayload(mergedPlanBook, nextDeletedItemIds),
+        });
 
         if (!isCancelled) {
-          syncReady.current = true;
-          setSyncStatus("已连接云同步");
+          cloudReady.current = true;
+          setCloudStatus("已登录，云端数据已合并");
         }
       } catch (error) {
         if (!isCancelled) {
-          setSyncStatus(error instanceof Error ? error.message : "云端数据读取失败");
+          setCloudStatus(error instanceof Error ? error.message : "云端数据读取失败");
         }
       } finally {
         if (!isCancelled) {
-          setIsSyncing(false);
+          setIsCloudSaving(false);
         }
       }
     };
@@ -490,27 +531,27 @@ function App() {
     return () => {
       isCancelled = true;
     };
-  }, [syncState?.clientId, syncState?.syncCodeHash]);
+  }, [currentUserId]);
 
   useEffect(() => {
-    if (!syncState || !syncReady.current) {
+    if (!currentUserId || !cloudReady.current) {
       return;
     }
 
-    if (syncTimer.current) {
-      window.clearTimeout(syncTimer.current);
+    if (cloudTimer.current) {
+      window.clearTimeout(cloudTimer.current);
     }
 
-    syncTimer.current = window.setTimeout(() => {
-      void pushToCloud(syncState);
+    cloudTimer.current = window.setTimeout(() => {
+      void pushToCloud(currentUserId);
     }, SYNC_DEBOUNCE_MS);
 
     return () => {
-      if (syncTimer.current) {
-        window.clearTimeout(syncTimer.current);
+      if (cloudTimer.current) {
+        window.clearTimeout(cloudTimer.current);
       }
     };
-  }, [deletedItemIds, plansByDate, syncState?.clientId, syncState?.syncCodeHash]);
+  }, [currentUserId, deletedItemIds, plansByDate]);
 
   const updatePlansForSelectedDate = (updater: (current: PlanItem[]) => PlanItem[]) => {
     setPlansByDate((currentBook) => ({
@@ -524,17 +565,17 @@ function App() {
     setEditingId(null);
   };
 
-  const pushToCloud = async (currentSyncState: SyncState) => {
+  const pushToCloud = async (userId: string) => {
     if (!isSupabaseConfigured) {
-      setSyncStatus("本地模式，未配置云同步");
+      setCloudStatus("Supabase 环境变量未配置，本地模式");
       return;
     }
 
-    setIsSyncing(true);
-    setSyncStatus("正在同步云端...");
+    setIsCloudSaving(true);
+    setCloudStatus("正在保存到云端...");
 
     try {
-      const cloudRecord = await getDailyPlannerSync(currentSyncState.syncCodeHash);
+      const cloudRecord = await getDailyPlannerUserData(userId);
       const cloudPayload = normalizePayload(cloudRecord?.payload);
       const nextDeletedItemIds = uniqueValues([
         ...latestDeletedItemIds.current,
@@ -549,90 +590,116 @@ function App() {
       if (!arePlanBooksEqual(latestPlanBook.current, mergedPlanBook)) {
         setPlansByDate(mergedPlanBook);
       }
-      if (nextDeletedItemIds.length !== latestDeletedItemIds.current.length) {
+      if (!areStringArraysEqual(nextDeletedItemIds, latestDeletedItemIds.current)) {
         setDeletedItemIds(nextDeletedItemIds);
       }
 
-      const currentVersion = Number(cloudRecord?.version ?? currentSyncState.cloudVersion ?? 0);
-      const nextVersion = currentVersion + 1;
-      const savedRecord = await upsertDailyPlannerSync({
-        syncCodeHash: currentSyncState.syncCodeHash,
+      await upsertDailyPlannerUserData({
+        userId,
         payload: createCloudPayload(mergedPlanBook, nextDeletedItemIds),
-        version: nextVersion,
-        clientId: currentSyncState.clientId,
       });
-      const savedVersion = Number(savedRecord?.version ?? nextVersion);
-
-      setSyncState((current) =>
-        current
-          ? {
-              ...current,
-              cloudVersion: savedVersion,
-              deletedItemIds: nextDeletedItemIds,
-            }
-          : current,
-      );
-      setSyncStatus("已同步到云端");
+      setCloudStatus("已保存到云端");
     } catch (error) {
-      setSyncStatus(error instanceof Error ? error.message : "云同步失败");
+      setCloudStatus(error instanceof Error ? error.message : "云端保存失败");
     } finally {
-      setIsSyncing(false);
+      setIsCloudSaving(false);
     }
   };
 
-  const handleConnectSyncCode = async (event: FormEvent<HTMLFormElement>) => {
+  const handleAuthSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
     if (!isSupabaseConfigured) {
-      setSyncStatus("Supabase 环境变量未配置，当前只能本地保存");
+      setAuthStatus("Supabase 环境变量未配置，当前只能本地使用");
       return;
     }
-
-    const nextSyncCode = syncCodeInput.trim();
-
-    if (nextSyncCode.length < 4) {
-      setSyncStatus("同步码至少输入 4 位");
-      return;
-    }
-
-    setIsSyncing(true);
-    setSyncStatus("正在连接同步码...");
 
     try {
-      const syncCodeHash = await hashSyncCode(nextSyncCode);
+      setIsAuthBusy(true);
+      const email = authForm.email.trim();
+      const password = authForm.password;
 
-      if (syncState && syncState.syncCodeHash !== syncCodeHash) {
-        const shouldSwitch = window.confirm("切换同步码后，会把当前本地计划合并到新的同步码下。继续吗？");
-
-        if (!shouldSwitch) {
-          setSyncStatus("已取消切换同步码");
+      if (authMode === "update-password") {
+        if (password.length < 6) {
+          setAuthStatus("新密码至少 6 位");
           return;
         }
+
+        if (password !== authForm.confirmPassword) {
+          setAuthStatus("两次输入的新密码不一致");
+          return;
+        }
+
+        await updatePassword(password);
+        cleanAuthUrl();
+        setAuthMode("sign-in");
+        setAuthForm((current) => ({ ...current, password: "", confirmPassword: "" }));
+        setAuthStatus("新密码已设置，当前账户已登录");
+        return;
       }
 
-      const nextSyncState: SyncState = {
-        syncCodeHash,
-        clientId: syncState?.clientId ?? createId(),
-        cloudVersion: 0,
-        deletedItemIds: syncState?.syncCodeHash === syncCodeHash ? deletedItemIds : [],
-      };
+      if (!email) {
+        setAuthStatus("请输入邮箱");
+        return;
+      }
 
-      syncReady.current = false;
-      setDeletedItemIds(nextSyncState.deletedItemIds);
-      setSyncState(nextSyncState);
-      setSyncCodeInput("");
-    } catch {
-      setSyncStatus("同步码处理失败");
+      if (authMode === "forgot") {
+        await resetPassword(email);
+        setAuthStatus("重置密码邮件已发送，请查收邮箱");
+        return;
+      }
+
+      if (password.length < 6) {
+        setAuthStatus("密码至少 6 位");
+        return;
+      }
+
+      if (authMode === "sign-up") {
+        await signUp(email, password);
+        setAuthMode("sign-in");
+        setAuthForm({ email, password: "", confirmPassword: "" });
+        setAuthStatus("注册邮件已发送，请先查收邮箱完成验证");
+        return;
+      }
+
+      await signIn(email, password);
+      setAuthForm({ email, password: "", confirmPassword: "" });
+      setAuthStatus("登录成功，正在合并云端数据");
+    } catch (error) {
+      setAuthStatus(error instanceof Error ? error.message : "登录操作失败");
     } finally {
-      setIsSyncing(false);
+      setIsAuthBusy(false);
     }
   };
 
-  const handleDisconnectSync = () => {
-    syncReady.current = false;
-    setSyncState(null);
-    setDeletedItemIds([]);
-    setSyncStatus("已切回本地模式");
+  const handleSignOut = async () => {
+    try {
+      setIsAuthBusy(true);
+      await signOut();
+      cloudReady.current = false;
+      if (cloudTimer.current) {
+        window.clearTimeout(cloudTimer.current);
+        cloudTimer.current = null;
+      }
+      setCurrentUser(null);
+      setAuthMode("sign-in");
+      setAuthStatus("已退出登录，可继续本地使用");
+      setCloudStatus("已退出登录，本地模式");
+    } catch (error) {
+      setAuthStatus(error instanceof Error ? error.message : "退出登录失败");
+    } finally {
+      setIsAuthBusy(false);
+    }
+  };
+
+  const switchAuthMode = (nextMode: AuthMode) => {
+    setAuthMode(nextMode);
+    setAuthForm((current) => ({
+      ...current,
+      password: "",
+      confirmPassword: "",
+    }));
+    setAuthStatus(nextMode === "forgot" ? "输入邮箱接收重置密码邮件" : "未登录时仍可本地使用");
   };
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -835,44 +902,206 @@ function App() {
 
         <section className="grid gap-6 lg:grid-cols-[minmax(280px,360px)_1fr]">
           <aside className="h-fit rounded-[2rem] border border-white/80 bg-white/80 p-5 shadow-sticker backdrop-blur">
-            <form
-              className="mb-5 rounded-[1.5rem] border border-dashed border-violet-200 bg-violet-50/70 p-4"
-              onSubmit={handleConnectSyncCode}
-            >
-              <label className="mb-2 block text-sm font-black text-[#6f5d78]" htmlFor="sync-code">
-                个人同步码
-              </label>
-              <div className="flex flex-col gap-2 sm:flex-row lg:flex-col">
-                <input
-                  className="min-w-0 flex-1 rounded-2xl border border-violet-100 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
-                  id="sync-code"
-                  maxLength={64}
-                  placeholder={syncState ? "输入新同步码可切换" : "输入同步码开启云同步"}
-                  type="password"
-                  value={syncCodeInput}
-                  onChange={(event) => setSyncCodeInput(event.target.value)}
-                />
-                <button
-                  className="rounded-2xl bg-[#9f8cff] px-4 py-3 text-sm font-black text-white shadow-sm shadow-violet-200 transition hover:bg-[#8f7af2] disabled:opacity-50"
-                  disabled={isSyncing || !syncCodeInput.trim()}
-                  type="submit"
-                >
-                  {syncState ? "连接" : "同步"}
-                </button>
+            <section className="mb-5 rounded-[1.5rem] border border-dashed border-violet-200 bg-violet-50/70 p-4">
+              <div className="mb-3 flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-black text-[#6f5d78]">邮箱账号</p>
+                  <p className="mt-1 text-xs font-bold text-[#8a7a94]">
+                    {currentUser && authMode !== "update-password"
+                      ? "云端自动保存已开启"
+                      : "未登录也可继续本地使用"}
+                  </p>
+                </div>
+                <span className="rounded-full bg-white/80 px-3 py-1 text-xs font-black text-violet-700">
+                  {currentUser && authMode !== "update-password" ? "已登录" : "本地模式"}
+                </span>
               </div>
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs font-bold text-[#76687f]">
-                <span>{isSyncing ? "同步中..." : syncStatus}</span>
-                {syncState ? (
+
+              {currentUser && authMode !== "update-password" ? (
+                <div className="space-y-3">
+                  <div className="rounded-2xl bg-white/80 px-4 py-3">
+                    <p className="break-all text-sm font-black text-[#46394f]">
+                      {currentUser.email ?? "已登录账号"}
+                    </p>
+                    <p className="mt-1 text-xs font-bold text-[#76687f]">
+                      {isCloudSaving ? "云端保存中..." : cloudStatus}
+                    </p>
+                  </div>
                   <button
-                    className="rounded-full bg-white/80 px-3 py-1 text-[#7a6b84] transition hover:bg-white"
+                    className="w-full rounded-2xl border border-violet-200 bg-white px-4 py-3 text-sm font-black text-violet-700 transition hover:bg-violet-100 disabled:opacity-50"
+                    disabled={isAuthBusy}
                     type="button"
-                    onClick={handleDisconnectSync}
+                    onClick={handleSignOut}
                   >
-                    本地模式
+                    退出登录
                   </button>
-                ) : null}
-              </div>
-            </form>
+                </div>
+              ) : (
+                <form className="space-y-3" onSubmit={handleAuthSubmit}>
+                  {authMode === "sign-in" || authMode === "sign-up" ? (
+                    <div className="grid grid-cols-2 gap-2 rounded-2xl bg-white/70 p-1">
+                      <button
+                        className={`rounded-[0.9rem] px-3 py-2 text-sm font-black transition ${
+                          authMode === "sign-in"
+                            ? "bg-[#9f8cff] text-white shadow-sm shadow-violet-200"
+                            : "text-[#7a6b84] hover:bg-white"
+                        }`}
+                        type="button"
+                        onClick={() => switchAuthMode("sign-in")}
+                      >
+                        登录
+                      </button>
+                      <button
+                        className={`rounded-[0.9rem] px-3 py-2 text-sm font-black transition ${
+                          authMode === "sign-up"
+                            ? "bg-[#9f8cff] text-white shadow-sm shadow-violet-200"
+                            : "text-[#7a6b84] hover:bg-white"
+                        }`}
+                        type="button"
+                        onClick={() => switchAuthMode("sign-up")}
+                      >
+                        注册
+                      </button>
+                    </div>
+                  ) : null}
+
+                  {authMode === "update-password" ? (
+                    <>
+                      <div>
+                        <label
+                          className="mb-2 block text-sm font-bold text-[#6f5d78]"
+                          htmlFor="new-password"
+                        >
+                          新密码
+                        </label>
+                        <input
+                          className="w-full rounded-2xl border border-violet-100 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                          id="new-password"
+                          minLength={6}
+                          placeholder="至少 6 位"
+                          type="password"
+                          value={authForm.password}
+                          onChange={(event) =>
+                            setAuthForm((current) => ({
+                              ...current,
+                              password: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div>
+                        <label
+                          className="mb-2 block text-sm font-bold text-[#6f5d78]"
+                          htmlFor="confirm-password"
+                        >
+                          确认新密码
+                        </label>
+                        <input
+                          className="w-full rounded-2xl border border-violet-100 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                          id="confirm-password"
+                          minLength={6}
+                          placeholder="再次输入新密码"
+                          type="password"
+                          value={authForm.confirmPassword}
+                          onChange={(event) =>
+                            setAuthForm((current) => ({
+                              ...current,
+                              confirmPassword: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div>
+                        <label
+                          className="mb-2 block text-sm font-bold text-[#6f5d78]"
+                          htmlFor="auth-email"
+                        >
+                          邮箱
+                        </label>
+                        <input
+                          autoComplete="email"
+                          className="w-full rounded-2xl border border-violet-100 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                          id="auth-email"
+                          placeholder="QQ、163、Gmail 等邮箱"
+                          type="email"
+                          value={authForm.email}
+                          onChange={(event) =>
+                            setAuthForm((current) => ({ ...current, email: event.target.value }))
+                          }
+                        />
+                      </div>
+
+                      {authMode === "forgot" ? null : (
+                        <div>
+                          <label
+                            className="mb-2 block text-sm font-bold text-[#6f5d78]"
+                            htmlFor="auth-password"
+                          >
+                            密码
+                          </label>
+                          <input
+                            autoComplete={authMode === "sign-up" ? "new-password" : "current-password"}
+                            className="w-full rounded-2xl border border-violet-100 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                            id="auth-password"
+                            minLength={6}
+                            placeholder="本站登录密码"
+                            type="password"
+                            value={authForm.password}
+                            onChange={(event) =>
+                              setAuthForm((current) => ({
+                                ...current,
+                                password: event.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  <button
+                    className="w-full rounded-2xl bg-[#9f8cff] px-4 py-3 text-sm font-black text-white shadow-sm shadow-violet-200 transition hover:bg-[#8f7af2] disabled:opacity-50"
+                    disabled={isAuthBusy || !isSupabaseConfigured}
+                    type="submit"
+                  >
+                    {isAuthBusy
+                      ? "处理中..."
+                      : authMode === "sign-up"
+                        ? "注册"
+                        : authMode === "forgot"
+                          ? "发送重置邮件"
+                          : authMode === "update-password"
+                            ? "设置新密码"
+                            : "登录"}
+                  </button>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-bold text-[#76687f]">
+                    <span>{authStatus}</span>
+                    {authMode === "sign-in" ? (
+                      <button
+                        className="text-violet-700 underline decoration-violet-300 underline-offset-4"
+                        type="button"
+                        onClick={() => switchAuthMode("forgot")}
+                      >
+                        忘记密码
+                      </button>
+                    ) : null}
+                    {authMode === "forgot" ? (
+                      <button
+                        className="text-violet-700 underline decoration-violet-300 underline-offset-4"
+                        type="button"
+                        onClick={() => switchAuthMode("sign-in")}
+                      >
+                        返回登录
+                      </button>
+                    ) : null}
+                  </div>
+                </form>
+              )}
+            </section>
 
             <div className="mb-5">
               <div className="mb-2 flex items-center justify-between text-sm font-bold text-[#6b5d74]">

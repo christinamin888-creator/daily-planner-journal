@@ -1,11 +1,12 @@
 /// <reference types="vite/client" />
 
-type RpcPayload = Record<string, unknown>;
+import { createClient } from "@supabase/supabase-js";
+import type { AuthChangeEvent, Session, SupabaseClient, User } from "@supabase/supabase-js";
 
-export type DailyPlannerSyncRecord = {
+export type DailyPlannerUserDataRecord = {
+  user_id: string;
   payload: unknown;
-  version?: number;
-  updated_at?: string;
+  updated_at?: string | null;
 };
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
@@ -16,78 +17,155 @@ const supabaseKey = (
 
 export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseKey);
 
-async function callRpc<T>(functionName: string, payload: RpcPayload): Promise<T | null> {
-  if (!supabaseUrl || !supabaseKey) {
+export const supabase =
+  supabaseUrl && supabaseKey
+    ? createClient(supabaseUrl, supabaseKey, {
+        auth: {
+          autoRefreshToken: true,
+          detectSessionInUrl: true,
+          persistSession: true,
+        },
+      })
+    : null;
+
+function getSupabaseClient(): SupabaseClient {
+  if (!supabase) {
     throw new Error("Supabase 环境变量未配置");
   }
 
-  const response = await fetch(`${supabaseUrl}/rest/v1/rpc/${functionName}`, {
-    method: "POST",
-    headers: {
-      apikey: supabaseKey,
-      Authorization: `Bearer ${supabaseKey}`,
-      "Content-Type": "application/json",
+  return supabase;
+}
+
+function getAuthRedirectUrl(mode?: "recovery"): string {
+  if (typeof window === "undefined") {
+    return "https://www.planthenact.com";
+  }
+
+  const url = new URL(window.location.href);
+  url.search = "";
+  url.hash = "";
+
+  if (mode === "recovery") {
+    url.searchParams.set("auth", "recovery");
+  }
+
+  return url.toString();
+}
+
+export async function signUp(email: string, password: string): Promise<User | null> {
+  const { data, error } = await getSupabaseClient().auth.signUp({
+    email,
+    password,
+    options: {
+      emailRedirectTo: getAuthRedirectUrl(),
     },
-    body: JSON.stringify(payload),
   });
 
-  if (response.status === 204) {
-    return null;
+  if (error) {
+    throw new Error(error.message);
   }
 
-  const text = await response.text();
-  const data = text ? JSON.parse(text) : null;
-
-  if (!response.ok) {
-    const message =
-      data && typeof data === "object" && "message" in data
-        ? String(data.message)
-        : "Supabase 同步失败";
-    throw new Error(message);
-  }
-
-  return data as T;
+  return data.user;
 }
 
-function firstRecord(data: unknown): DailyPlannerSyncRecord | null {
-  if (!data) {
-    return null;
-  }
-
-  const record = Array.isArray(data) ? data[0] : data;
-
-  if (!record || typeof record !== "object") {
-    return null;
-  }
-
-  if (!("payload" in record)) {
-    return { payload: record };
-  }
-
-  return record as DailyPlannerSyncRecord;
-}
-
-export async function getDailyPlannerSync(
-  syncCodeHash: string,
-): Promise<DailyPlannerSyncRecord | null> {
-  const data = await callRpc<unknown>("get_daily_planner_sync", {
-    p_sync_code_hash: syncCodeHash,
+export async function signIn(email: string, password: string): Promise<User | null> {
+  const { data, error } = await getSupabaseClient().auth.signInWithPassword({
+    email,
+    password,
   });
 
-  return firstRecord(data);
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return data.user;
 }
 
-export async function upsertDailyPlannerSync(params: {
-  syncCodeHash: string;
+export async function signOut(): Promise<void> {
+  const { error } = await getSupabaseClient().auth.signOut();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+}
+
+export async function resetPassword(email: string): Promise<void> {
+  const { error } = await getSupabaseClient().auth.resetPasswordForEmail(email, {
+    redirectTo: getAuthRedirectUrl("recovery"),
+  });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+}
+
+export async function updatePassword(password: string): Promise<User | null> {
+  const { data, error } = await getSupabaseClient().auth.updateUser({
+    password,
+  });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return data.user;
+}
+
+export async function getCurrentSession(): Promise<Session | null> {
+  const { data, error } = await getSupabaseClient().auth.getSession();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return data.session;
+}
+
+export function onAuthStateChange(
+  callback: (event: AuthChangeEvent, session: Session | null) => void,
+) {
+  const {
+    data: { subscription },
+  } = getSupabaseClient().auth.onAuthStateChange(callback);
+
+  return subscription;
+}
+
+export async function getDailyPlannerUserData(
+  userId: string,
+): Promise<DailyPlannerUserDataRecord | null> {
+  const { data, error } = await getSupabaseClient()
+    .from("daily_planner_user_data")
+    .select("user_id,payload")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return data as DailyPlannerUserDataRecord | null;
+}
+
+export async function upsertDailyPlannerUserData(params: {
+  userId: string;
   payload: unknown;
-  version: number;
-  clientId: string;
-}): Promise<DailyPlannerSyncRecord | null> {
-  const data = await callRpc<unknown>("upsert_daily_planner_sync", {
-    p_sync_code_hash: params.syncCodeHash,
-    p_payload: params.payload,
-    p_last_client_id: params.clientId,
-  });
+}): Promise<DailyPlannerUserDataRecord | null> {
+  const { data, error } = await getSupabaseClient()
+    .from("daily_planner_user_data")
+    .upsert(
+      {
+        user_id: params.userId,
+        payload: params.payload,
+      },
+      { onConflict: "user_id" },
+    )
+    .select("user_id,payload")
+    .maybeSingle();
 
-  return firstRecord(data);
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return data as DailyPlannerUserDataRecord | null;
 }
