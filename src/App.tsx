@@ -41,6 +41,8 @@ type PlanItem = {
   category: Category;
   note: string;
   completed: boolean;
+  targetMinutes?: number;
+  actualMinutes?: number;
   createdAt: number;
   updatedAt?: number;
 };
@@ -71,6 +73,7 @@ type PlanForm = {
   title: string;
   category: Category;
   note: string;
+  targetMinutes: string;
 };
 
 const CATEGORY_STYLES: Record<Category, CategoryStyle> = {
@@ -136,6 +139,7 @@ const emptyForm: PlanForm = {
   title: "",
   category: "学习",
   note: "",
+  targetMinutes: "",
 };
 
 function loadPlanBook(): PlanBook {
@@ -196,11 +200,21 @@ function getItemTime(item: PlanItem): number {
   return item.updatedAt ?? item.createdAt ?? 0;
 }
 
+function normalizeMinutes(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) {
+    return value;
+  }
+
+  return undefined;
+}
+
 function normalizePlanBook(planBook: PlanBook): PlanBook {
   return Object.entries(planBook).reduce<PlanBook>((result, [date, items]) => {
     result[date] = items.map((item) => ({
       ...item,
       date: item.date || date,
+      targetMinutes: normalizeMinutes(item.targetMinutes),
+      actualMinutes: normalizeMinutes(item.actualMinutes),
       updatedAt: item.updatedAt ?? item.createdAt ?? Date.now(),
     }));
     return result;
@@ -281,6 +295,24 @@ function arePlanBooksEqual(firstPlanBook: PlanBook, secondPlanBook: PlanBook): b
 
 function areStringArraysEqual(firstValues: string[], secondValues: string[]): boolean {
   return JSON.stringify(firstValues) === JSON.stringify(secondValues);
+}
+
+function parseOptionalMinutes(value: string): number | null | undefined {
+  const trimmedValue = value.trim();
+
+  if (!trimmedValue) {
+    return undefined;
+  }
+
+  if (!/^[1-9]\d*$/.test(trimmedValue)) {
+    return null;
+  }
+
+  return Number(trimmedValue);
+}
+
+function formatMinutes(minutes: number | undefined): string {
+  return minutes ? `${minutes} 分钟` : "未设置";
 }
 
 function formatDateInput(date: Date): string {
@@ -705,9 +737,15 @@ function App() {
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const title = form.title.trim();
+    const targetMinutes = parseOptionalMinutes(form.targetMinutes);
     const updatedAt = Date.now();
 
     if (!title) {
+      return;
+    }
+
+    if (targetMinutes === null) {
+      window.alert("目标时长请输入正整数分钟，或留空");
       return;
     }
 
@@ -720,6 +758,7 @@ function App() {
                 title,
                 category: form.category,
                 note: form.note.trim(),
+                targetMinutes,
                 updatedAt,
               }
             : item,
@@ -736,6 +775,7 @@ function App() {
       category: form.category,
       note: form.note.trim(),
       completed: false,
+      targetMinutes,
       createdAt: updatedAt,
       updatedAt,
     };
@@ -750,6 +790,7 @@ function App() {
       title: item.title,
       category: item.category,
       note: item.note,
+      targetMinutes: item.targetMinutes ? String(item.targetMinutes) : "",
     });
   };
 
@@ -763,8 +804,25 @@ function App() {
 
   const handleToggle = (id: string) => {
     const targetPlan = plans.find((item) => item.id === id);
+    let nextActualMinutes = targetPlan?.actualMinutes;
 
     if (targetPlan && !targetPlan.completed) {
+      const inputValue = window.prompt(
+        "实际用时（分钟，可留空）",
+        targetPlan.actualMinutes ? String(targetPlan.actualMinutes) : "",
+      );
+
+      if (inputValue !== null) {
+        const actualMinutes = parseOptionalMinutes(inputValue);
+
+        if (actualMinutes === null) {
+          window.alert("实际用时请输入正整数分钟，或留空");
+          return;
+        }
+
+        nextActualMinutes = actualMinutes;
+      }
+
       setCompletedFlashId(id);
       setFeedbackId(Date.now());
 
@@ -784,9 +842,40 @@ function App() {
           ? {
               ...item,
               completed: !item.completed,
+              actualMinutes: nextActualMinutes,
               updatedAt: Date.now(),
             }
           : item,
+      ),
+    );
+  };
+
+  const handleSetActualMinutes = (item: PlanItem) => {
+    const inputValue = window.prompt(
+      "实际用时（分钟，留空可清除）",
+      item.actualMinutes ? String(item.actualMinutes) : "",
+    );
+
+    if (inputValue === null) {
+      return;
+    }
+
+    const actualMinutes = parseOptionalMinutes(inputValue);
+
+    if (actualMinutes === null) {
+      window.alert("实际用时请输入正整数分钟，或留空");
+      return;
+    }
+
+    updatePlansForSelectedDate((currentPlans) =>
+      currentPlans.map((currentItem) =>
+        currentItem.id === item.id
+          ? {
+              ...currentItem,
+              actualMinutes,
+              updatedAt: Date.now(),
+            }
+          : currentItem,
       ),
     );
   };
@@ -1152,6 +1241,28 @@ function App() {
               </div>
 
               <div>
+                <label
+                  className="mb-2 block text-sm font-bold text-[#6f5d78]"
+                  htmlFor="target-minutes"
+                >
+                  目标时长（分钟）
+                </label>
+                <input
+                  className="w-full rounded-2xl border border-pink-100 bg-white px-4 py-3 outline-none transition placeholder:text-[#b8aabd] focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+                  id="target-minutes"
+                  inputMode="numeric"
+                  min={1}
+                  placeholder="可选，填写正整数"
+                  step={1}
+                  type="number"
+                  value={form.targetMinutes}
+                  onChange={(event) =>
+                    setForm((current) => ({ ...current, targetMinutes: event.target.value }))
+                  }
+                />
+              </div>
+
+              <div>
                 <label className="mb-2 block text-sm font-bold text-[#6f5d78]" htmlFor="note">
                   备注
                 </label>
@@ -1334,6 +1445,14 @@ function App() {
                                 {item.note}
                               </p>
                             ) : null}
+                            <div className="mt-3 flex flex-wrap gap-2 text-xs font-black text-[#74667d]">
+                              <span className="rounded-full bg-white/70 px-3 py-1">
+                                目标：{formatMinutes(item.targetMinutes)}
+                              </span>
+                              <span className="rounded-full bg-white/70 px-3 py-1">
+                                实际：{formatMinutes(item.actualMinutes)}
+                              </span>
+                            </div>
                           </div>
                         </div>
 
@@ -1348,6 +1467,15 @@ function App() {
                           >
                             编辑
                           </button>
+                          {item.completed ? (
+                            <button
+                              className="rounded-full bg-white/80 px-3 py-1.5 text-xs font-bold text-sky-700 transition hover:bg-white"
+                              type="button"
+                              onClick={() => handleSetActualMinutes(item)}
+                            >
+                              {item.actualMinutes ? "修改实际用时" : "填写实际用时"}
+                            </button>
+                          ) : null}
                           <button
                             className="rounded-full bg-white/80 px-3 py-1.5 text-xs font-bold text-rose-600 transition hover:bg-white"
                             type="button"
