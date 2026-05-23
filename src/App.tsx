@@ -29,6 +29,8 @@ const CATEGORY_OPTIONS = [
   "购物",
   "创作",
   "休息",
+  "娱乐",
+  "做家务",
   "其他",
 ] as const;
 
@@ -125,6 +127,20 @@ const CATEGORY_STYLES: Record<Category, CategoryStyle> = {
     bg: "bg-indigo-50",
     border: "border-indigo-200",
     caption: "月亮云朵",
+  },
+  娱乐: {
+    emoji: "🎮🎬",
+    accent: "text-amber-700",
+    bg: "bg-amber-50",
+    border: "border-amber-200",
+    caption: "游戏手柄电影",
+  },
+  做家务: {
+    emoji: "🧹🧺",
+    accent: "text-teal-700",
+    bg: "bg-teal-50",
+    border: "border-teal-200",
+    caption: "扫帚洗衣篮",
   },
   其他: {
     emoji: "💗🏷️",
@@ -353,28 +369,33 @@ function cleanAuthUrl() {
   window.history.replaceState({}, document.title, window.location.pathname);
 }
 
-function SparkleFeedback({ feedbackId }: { feedbackId: number }) {
-  const sparkles = ["✨", "⭐", "✦", "🎀", "✧", "💫"];
+function CardCompletionBurst() {
+  const sparkles = ["🎉", "✨", "⭐", "🎀", "🎊", "✦"];
 
   return (
     <motion.div
-      key={feedbackId}
       aria-live="polite"
-      className="pointer-events-none fixed inset-x-0 top-6 z-50 mx-auto flex w-fit items-center gap-2 rounded-full border border-white/80 bg-white/90 px-5 py-3 text-sm font-black text-pink-600 shadow-sticker"
-      initial={{ opacity: 0, y: -18, scale: 0.92 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: -12, scale: 0.96 }}
-      transition={{ duration: 0.28 }}
+      className="pointer-events-none absolute left-1/2 top-[42%] z-20 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-2 rounded-[1.25rem] border border-white/90 bg-white/90 px-5 py-3 text-center text-sm font-black text-pink-600 shadow-sticker backdrop-blur"
+      data-export-ignore="true"
+      initial={{ opacity: 0, y: 8, scale: 0.72, rotate: -2 }}
+      animate={{
+        opacity: [0, 1, 1, 0],
+        y: [8, -8, -4, -16],
+        scale: [0.72, 1.08, 1, 0.94],
+        rotate: [-2, 1, 0, 2],
+      }}
+      exit={{ opacity: 0, scale: 0.92 }}
+      transition={{ duration: 1.45, ease: "easeOut", times: [0, 0.18, 0.78, 1] }}
     >
-      <span>完成啦</span>
-      <span className="flex gap-1">
+      <span className="whitespace-nowrap text-base">完成啦！</span>
+      <span className="flex gap-1 text-lg">
         {sparkles.map((sparkle, index) => (
           <motion.span
             aria-hidden="true"
             className="inline-block"
             key={`${sparkle}-${index}`}
-            animate={{ y: [0, -8, 0], rotate: [0, 10, -8, 0] }}
-            transition={{ duration: 0.65, delay: index * 0.05 }}
+            animate={{ y: [0, -10, 0], rotate: [0, 14, -10, 0], scale: [1, 1.2, 1] }}
+            transition={{ duration: 0.8, delay: index * 0.06 }}
           >
             {sparkle}
           </motion.span>
@@ -391,7 +412,9 @@ function App() {
   const [form, setForm] = useState<PlanForm>(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [completedFlashId, setCompletedFlashId] = useState<string | null>(null);
-  const [feedbackId, setFeedbackId] = useState<number | null>(null);
+  const [actualEditId, setActualEditId] = useState<string | null>(null);
+  const [actualMinutesDraft, setActualMinutesDraft] = useState<string>("");
+  const [actualMinutesError, setActualMinutesError] = useState<string>("");
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [deletedItemIds, setDeletedItemIds] = useState<string[]>(() => loadDeletedItemIds());
   const [currentUser, setCurrentUser] = useState<SupabaseUser | null>(null);
@@ -800,31 +823,52 @@ function App() {
     if (editingId === id) {
       resetForm();
     }
+    if (actualEditId === id) {
+      setActualEditId(null);
+      setActualMinutesDraft("");
+      setActualMinutesError("");
+    }
+  };
+
+  const startActualMinutesEdit = (item: PlanItem) => {
+    setActualEditId(item.id);
+    setActualMinutesDraft(item.actualMinutes ? String(item.actualMinutes) : "");
+    setActualMinutesError("");
+  };
+
+  const cancelActualMinutesEdit = () => {
+    setActualEditId(null);
+    setActualMinutesDraft("");
+    setActualMinutesError("");
+  };
+
+  const saveActualMinutes = (id: string) => {
+    const actualMinutes = parseOptionalMinutes(actualMinutesDraft);
+
+    if (actualMinutes === null) {
+      setActualMinutesError("请输入正整数分钟，或留空");
+      return;
+    }
+
+    updatePlansForSelectedDate((currentPlans) =>
+      currentPlans.map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              actualMinutes,
+              updatedAt: Date.now(),
+            }
+          : item,
+      ),
+    );
+    cancelActualMinutesEdit();
   };
 
   const handleToggle = (id: string) => {
     const targetPlan = plans.find((item) => item.id === id);
-    let nextActualMinutes = targetPlan?.actualMinutes;
 
     if (targetPlan && !targetPlan.completed) {
-      const inputValue = window.prompt(
-        "实际用时（分钟，可留空）",
-        targetPlan.actualMinutes ? String(targetPlan.actualMinutes) : "",
-      );
-
-      if (inputValue !== null) {
-        const actualMinutes = parseOptionalMinutes(inputValue);
-
-        if (actualMinutes === null) {
-          window.alert("实际用时请输入正整数分钟，或留空");
-          return;
-        }
-
-        nextActualMinutes = actualMinutes;
-      }
-
       setCompletedFlashId(id);
-      setFeedbackId(Date.now());
 
       if (feedbackTimer.current) {
         window.clearTimeout(feedbackTimer.current);
@@ -832,8 +876,11 @@ function App() {
 
       feedbackTimer.current = window.setTimeout(() => {
         setCompletedFlashId(null);
-        setFeedbackId(null);
-      }, 950);
+      }, 1500);
+    }
+
+    if (targetPlan?.completed && actualEditId === id) {
+      cancelActualMinutesEdit();
     }
 
     updatePlansForSelectedDate((currentPlans) =>
@@ -842,40 +889,9 @@ function App() {
           ? {
               ...item,
               completed: !item.completed,
-              actualMinutes: nextActualMinutes,
               updatedAt: Date.now(),
             }
           : item,
-      ),
-    );
-  };
-
-  const handleSetActualMinutes = (item: PlanItem) => {
-    const inputValue = window.prompt(
-      "实际用时（分钟，留空可清除）",
-      item.actualMinutes ? String(item.actualMinutes) : "",
-    );
-
-    if (inputValue === null) {
-      return;
-    }
-
-    const actualMinutes = parseOptionalMinutes(inputValue);
-
-    if (actualMinutes === null) {
-      window.alert("实际用时请输入正整数分钟，或留空");
-      return;
-    }
-
-    updatePlansForSelectedDate((currentPlans) =>
-      currentPlans.map((currentItem) =>
-        currentItem.id === item.id
-          ? {
-              ...currentItem,
-              actualMinutes,
-              updatedAt: Date.now(),
-            }
-          : currentItem,
       ),
     );
   };
@@ -893,6 +909,7 @@ function App() {
 
     updatePlansForSelectedDate(() => []);
     setDeletedItemIds((current) => uniqueValues([...current, ...plans.map((item) => item.id)]));
+    cancelActualMinutesEdit();
     resetForm();
   };
 
@@ -961,7 +978,6 @@ function App() {
 
   return (
     <main className="min-h-screen bg-[#fff8ef] bg-[linear-gradient(180deg,#fff8ef_0%,#f6f1ff_48%,#edf8ff_100%)] px-4 py-6 text-[#46394f] sm:px-6 lg:px-8">
-      <AnimatePresence>{feedbackId ? <SparkleFeedback feedbackId={feedbackId} /> : null}</AnimatePresence>
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
         <header className="flex flex-col gap-4 rounded-[2rem] border border-white/80 bg-white/70 p-5 shadow-sticker backdrop-blur md:flex-row md:items-center md:justify-between">
           <div>
@@ -1389,6 +1405,9 @@ function App() {
                         transition={{ duration: 0.42, ease: "easeOut" }}
                       >
                         <div className="absolute -right-5 -top-5 h-16 w-16 rounded-full border-8 border-white/60 bg-white/30" />
+                        <AnimatePresence>
+                          {completedFlashId === item.id ? <CardCompletionBurst /> : null}
+                        </AnimatePresence>
                         <div className="relative flex gap-3">
                           <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-white/80 bg-white text-2xl shadow-sm">
                             <span aria-label={style.caption} role="img">
@@ -1468,13 +1487,68 @@ function App() {
                             编辑
                           </button>
                           {item.completed ? (
-                            <button
-                              className="rounded-full bg-white/80 px-3 py-1.5 text-xs font-bold text-sky-700 transition hover:bg-white"
-                              type="button"
-                              onClick={() => handleSetActualMinutes(item)}
-                            >
-                              {item.actualMinutes ? "修改实际用时" : "填写实际用时"}
-                            </button>
+                            actualEditId === item.id ? (
+                              <form
+                                className="flex w-full flex-col gap-2 rounded-[1rem] bg-white/70 p-3 sm:flex-row sm:items-end"
+                                onSubmit={(event) => {
+                                  event.preventDefault();
+                                  saveActualMinutes(item.id);
+                                }}
+                              >
+                                <label
+                                  className="min-w-0 flex-1 text-xs font-black text-[#6c5e75]"
+                                  htmlFor={`actual-minutes-${item.id}`}
+                                >
+                                  实际用时（分钟）
+                                  <input
+                                    className="mt-1 w-full rounded-xl border border-sky-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition placeholder:text-[#b8aabd] focus:border-sky-300 focus:ring-4 focus:ring-sky-100"
+                                    id={`actual-minutes-${item.id}`}
+                                    inputMode="numeric"
+                                    min={1}
+                                    pattern="[1-9][0-9]*"
+                                    placeholder="留空表示未设置"
+                                    step={1}
+                                    type="text"
+                                    value={actualMinutesDraft}
+                                    onChange={(event) => {
+                                      const nextValue = event.target.value;
+                                      if (nextValue === "" || /^[1-9]\d*$/.test(nextValue)) {
+                                        setActualMinutesDraft(nextValue);
+                                      }
+                                      setActualMinutesError("");
+                                    }}
+                                  />
+                                </label>
+                                <div className="flex flex-wrap gap-2">
+                                  <button
+                                    className="rounded-full bg-sky-100 px-3 py-2 text-xs font-black text-sky-700 transition hover:bg-sky-200"
+                                    type="submit"
+                                  >
+                                    保存
+                                  </button>
+                                  <button
+                                    className="rounded-full bg-white px-3 py-2 text-xs font-bold text-[#6c5e75] transition hover:bg-slate-50"
+                                    type="button"
+                                    onClick={cancelActualMinutesEdit}
+                                  >
+                                    取消
+                                  </button>
+                                </div>
+                                {actualMinutesError ? (
+                                  <p className="w-full text-xs font-bold text-rose-600">
+                                    {actualMinutesError}
+                                  </p>
+                                ) : null}
+                              </form>
+                            ) : (
+                              <button
+                                className="rounded-full bg-white/80 px-3 py-1.5 text-xs font-bold text-sky-700 transition hover:bg-white"
+                                type="button"
+                                onClick={() => startActualMinutesEdit(item)}
+                              >
+                                {item.actualMinutes ? "修改实际用时" : "填写实际用时"}
+                              </button>
+                            )
                           ) : null}
                           <button
                             className="rounded-full bg-white/80 px-3 py-1.5 text-xs font-bold text-rose-600 transition hover:bg-white"
