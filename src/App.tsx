@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
@@ -104,6 +105,26 @@ type CompletionVariant = {
   fromX: number;
   fromY: number;
   rotate: number;
+};
+
+type ExportTemplate = {
+  id: string;
+  audience: string;
+  name: string;
+  title: string;
+  subtitle: string;
+  motif: string;
+  footer: string;
+  background: string;
+  paper: string;
+  card: string;
+  accent: string;
+  accentSoft: string;
+  ink: string;
+  muted: string;
+  border: string;
+  checkbox: string;
+  layout: "cute-grid" | "clean-list" | "research" | "journal" | "executive";
 };
 
 const CATEGORY_STYLES: Record<BuiltInCategory, CategoryStyle> = {
@@ -233,6 +254,313 @@ const COMPLETION_VARIANTS: CompletionVariant[] = [
     fromX: 6,
     fromY: -8,
     rotate: -2,
+  },
+];
+
+const EXPORT_TEMPLATES: ExportTemplate[] = [
+  {
+    id: "primary-bow",
+    audience: "小学生",
+    name: "粉色蝴蝶结",
+    title: "加油呀 今日计划",
+    subtitle: "今天也要开开心心完成小目标呀！",
+    motif: "🎀 🐰 ⭐ 🍓 🌈",
+    footer: "加油！今天一定很棒！",
+    background: "linear-gradient(135deg, #ffe5f0 0%, #fff7fb 48%, #e9f7ff 100%)",
+    paper: "#fffaf6",
+    card: "rgba(255,255,255,0.84)",
+    accent: "#ef5f9a",
+    accentSoft: "#ffd7e8",
+    ink: "#3f3146",
+    muted: "#8a6e82",
+    border: "#ffb9d8",
+    checkbox: "#ef5f9a",
+    layout: "cute-grid",
+  },
+  {
+    id: "primary-rainbow",
+    audience: "小学生",
+    name: "彩虹小目标",
+    title: "彩虹任务清单",
+    subtitle: "先完成重要的事，再去尽情玩耍吧~",
+    motif: "🌈 ☁️ ✨ 🧸 🍭",
+    footer: "小小一步，也是在进步！",
+    background: "linear-gradient(135deg, #fff1c8 0%, #e9f8ff 45%, #f7edff 100%)",
+    paper: "#fffdf4",
+    card: "rgba(255,255,255,0.86)",
+    accent: "#5b9de8",
+    accentSoft: "#d8efff",
+    ink: "#314257",
+    muted: "#6f7e91",
+    border: "#9ed7ff",
+    checkbox: "#59a8ef",
+    layout: "cute-grid",
+  },
+  {
+    id: "primary-star",
+    audience: "小学生",
+    name: "星星贴纸",
+    title: "星星计划表",
+    subtitle: "每完成一项，就给今天加一颗小星星。",
+    motif: "⭐ 🪄 💖 📚 ✏️",
+    footer: "做完以后，给自己一个大大的夸奖！",
+    background: "linear-gradient(135deg, #fff0f8 0%, #fffbe8 52%, #edf6ff 100%)",
+    paper: "#fffaf2",
+    card: "rgba(255,255,255,0.9)",
+    accent: "#b668e8",
+    accentSoft: "#f1dbff",
+    ink: "#44324d",
+    muted: "#806b8c",
+    border: "#dcb7ff",
+    checkbox: "#a75ee1",
+    layout: "cute-grid",
+  },
+  {
+    id: "middle-focus",
+    audience: "中学生",
+    name: "自习冲刺",
+    title: "今日自习计划",
+    subtitle: "把时间分给真正重要的目标。",
+    motif: "📘 ✍️ ⏱️ 🎯",
+    footer: "稳定推进，比一口气做完更可靠。",
+    background: "linear-gradient(135deg, #eef7ff 0%, #fffdf6 48%, #f1f5ff 100%)",
+    paper: "#ffffff",
+    card: "#f8fbff",
+    accent: "#2f7ed8",
+    accentSoft: "#dceeff",
+    ink: "#27344c",
+    muted: "#65758f",
+    border: "#b9d8ff",
+    checkbox: "#2f7ed8",
+    layout: "clean-list",
+  },
+  {
+    id: "middle-exam",
+    audience: "中学生",
+    name: "考试复盘",
+    title: "学习推进清单",
+    subtitle: "完成、复盘、再前进一点。",
+    motif: "🧠 📐 📝 🌟",
+    footer: "今天的积累，都会在以后发光。",
+    background: "linear-gradient(135deg, #f4f0ff 0%, #f9fbff 50%, #ecfff6 100%)",
+    paper: "#fcfbff",
+    card: "#ffffff",
+    accent: "#7158d8",
+    accentSoft: "#e8e1ff",
+    ink: "#322c4d",
+    muted: "#70698a",
+    border: "#cfc4ff",
+    checkbox: "#7158d8",
+    layout: "clean-list",
+  },
+  {
+    id: "office-morning",
+    audience: "上班族",
+    name: "晨间办公",
+    title: "今日工作计划",
+    subtitle: "清晰排序，稳稳推进。",
+    motif: "💻 ☕ 📌 ✅",
+    footer: "把今天交付得更轻一点。",
+    background: "linear-gradient(135deg, #eef6ff 0%, #ffffff 50%, #f5f7fb 100%)",
+    paper: "#ffffff",
+    card: "#f7fbff",
+    accent: "#176ea8",
+    accentSoft: "#dff0fb",
+    ink: "#263648",
+    muted: "#667589",
+    border: "#bcdff4",
+    checkbox: "#176ea8",
+    layout: "clean-list",
+  },
+  {
+    id: "office-calm",
+    audience: "上班族",
+    name: "极简通勤",
+    title: "Daily Action List",
+    subtitle: "少一点杂乱，多一点完成感。",
+    motif: "🗂️ 🖊️ ⌁",
+    footer: "Done is momentum.",
+    background: "linear-gradient(135deg, #f7f8fb 0%, #ffffff 50%, #eef5f2 100%)",
+    paper: "#ffffff",
+    card: "#fbfcfd",
+    accent: "#3d6f64",
+    accentSoft: "#dcece7",
+    ink: "#243331",
+    muted: "#687977",
+    border: "#c9dbd6",
+    checkbox: "#3d6f64",
+    layout: "clean-list",
+  },
+  {
+    id: "teacher-lesson",
+    audience: "老师",
+    name: "备课清单",
+    title: "今日教学安排",
+    subtitle: "备课、课堂、反馈，一页看清。",
+    motif: "🍎 📚 🧑‍🏫 ✨",
+    footer: "愿今天的课堂温柔又有序。",
+    background: "linear-gradient(135deg, #fff3e8 0%, #fffdf8 48%, #eef8ff 100%)",
+    paper: "#fffdfa",
+    card: "#ffffff",
+    accent: "#d5693a",
+    accentSoft: "#ffe3d4",
+    ink: "#4b352c",
+    muted: "#806a61",
+    border: "#f2c5ad",
+    checkbox: "#d5693a",
+    layout: "clean-list",
+  },
+  {
+    id: "teacher-classroom",
+    audience: "老师",
+    name: "课堂花园",
+    title: "课堂工作手帐",
+    subtitle: "把琐碎安排整理成清爽节奏。",
+    motif: "🌿 📝 🌼 🔔",
+    footer: "今天也辛苦啦，老师。",
+    background: "linear-gradient(135deg, #edf9ef 0%, #fffdfa 50%, #f7efff 100%)",
+    paper: "#fffef9",
+    card: "rgba(255,255,255,0.88)",
+    accent: "#4f9a62",
+    accentSoft: "#d9f1df",
+    ink: "#2d4737",
+    muted: "#607865",
+    border: "#bfe3c8",
+    checkbox: "#4f9a62",
+    layout: "journal",
+  },
+  {
+    id: "research-lab",
+    audience: "学术科研",
+    name: "实验记录",
+    title: "Research Log",
+    subtitle: "实验、阅读、写作，持续推进。",
+    motif: "🔬 📊 🧪 📄",
+    footer: "Small progress compounds.",
+    background: "linear-gradient(135deg, #edf7f9 0%, #ffffff 50%, #f4f0ff 100%)",
+    paper: "#ffffff",
+    card: "#f8fbfc",
+    accent: "#2f7f8d",
+    accentSoft: "#d8eef2",
+    ink: "#243c43",
+    muted: "#617980",
+    border: "#b7dce3",
+    checkbox: "#2f7f8d",
+    layout: "research",
+  },
+  {
+    id: "research-paper",
+    audience: "学术科研",
+    name: "论文推进",
+    title: "Paper Progress Plan",
+    subtitle: "把大问题拆成今天能推进的一步。",
+    motif: "📚 🖋️ 📑 ⌛",
+    footer: "清楚的问题，就是一半的进展。",
+    background: "linear-gradient(135deg, #f5f7fa 0%, #ffffff 48%, #eef2f8 100%)",
+    paper: "#ffffff",
+    card: "#fafbfc",
+    accent: "#4b5f7f",
+    accentSoft: "#e2e8f0",
+    ink: "#252f42",
+    muted: "#687489",
+    border: "#cbd5e1",
+    checkbox: "#4b5f7f",
+    layout: "research",
+  },
+  {
+    id: "journal-collage",
+    audience: "手账爱好者",
+    name: "拼贴贴纸",
+    title: "今日手帐拼贴",
+    subtitle: "把计划贴进今天的生活里。",
+    motif: "🎞️ 🧷 🎀 🌷 ✨",
+    footer: "今天也在认真生活呀。",
+    background: "linear-gradient(135deg, #fff0f5 0%, #fffaf0 45%, #eef8ff 100%)",
+    paper: "#fffaf4",
+    card: "rgba(255,255,255,0.86)",
+    accent: "#df5f8f",
+    accentSoft: "#ffddea",
+    ink: "#44323f",
+    muted: "#846d7b",
+    border: "#f5b8d0",
+    checkbox: "#df5f8f",
+    layout: "journal",
+  },
+  {
+    id: "journal-vintage",
+    audience: "手账爱好者",
+    name: "复古胶带",
+    title: "Planner Memo",
+    subtitle: "温柔记录，也认真完成。",
+    motif: "📎 🏷️ ✒️ ☁️",
+    footer: "把一天过成自己的节奏。",
+    background: "linear-gradient(135deg, #fff6e8 0%, #fffdf8 55%, #eef4ff 100%)",
+    paper: "#fffaf1",
+    card: "#fffdf8",
+    accent: "#b37648",
+    accentSoft: "#f5dfc9",
+    ink: "#47372f",
+    muted: "#7d6d63",
+    border: "#e2c3a6",
+    checkbox: "#b37648",
+    layout: "journal",
+  },
+  {
+    id: "journal-garden",
+    audience: "手账爱好者",
+    name: "花园便签",
+    title: "花园计划页",
+    subtitle: "一朵花开，一项完成。",
+    motif: "🌸 🪴 🦋 🍃",
+    footer: "慢慢来，也会开花。",
+    background: "linear-gradient(135deg, #f0fff4 0%, #fffdf6 45%, #fff0f7 100%)",
+    paper: "#fffef8",
+    card: "rgba(255,255,255,0.88)",
+    accent: "#5e9f73",
+    accentSoft: "#dff3e5",
+    ink: "#33463a",
+    muted: "#69806f",
+    border: "#bfe7ca",
+    checkbox: "#5e9f73",
+    layout: "journal",
+  },
+  {
+    id: "executive-okr",
+    audience: "公司管理层",
+    name: "OKR 推进",
+    title: "Executive Action Plan",
+    subtitle: "目标、节奏、结果，一页对齐。",
+    motif: "📈 🎯 🧭",
+    footer: "Focus on leverage.",
+    background: "linear-gradient(135deg, #eef3f8 0%, #ffffff 48%, #f7f8fb 100%)",
+    paper: "#ffffff",
+    card: "#f8fafc",
+    accent: "#315b7d",
+    accentSoft: "#dbe9f4",
+    ink: "#223447",
+    muted: "#617184",
+    border: "#b9cfe0",
+    checkbox: "#315b7d",
+    layout: "executive",
+  },
+  {
+    id: "executive-meeting",
+    audience: "公司管理层",
+    name: "晨会决策",
+    title: "Leadership Daily Brief",
+    subtitle: "把关键事项放在最醒目的地方。",
+    motif: "🧩 📌 📊",
+    footer: "Decide, align, execute.",
+    background: "linear-gradient(135deg, #f6f8fb 0%, #ffffff 52%, #f0f7f3 100%)",
+    paper: "#ffffff",
+    card: "#fbfcfd",
+    accent: "#4f6f52",
+    accentSoft: "#e2eddf",
+    ink: "#28342a",
+    muted: "#6b766b",
+    border: "#cadbc8",
+    checkbox: "#4f6f52",
+    layout: "executive",
   },
 ];
 
@@ -672,6 +1000,377 @@ function CardCompletionBurst({ feedback }: { feedback: CompletionFeedback }) {
   );
 }
 
+function ExportJournalTemplate({
+  template,
+  selectedDate,
+  plans,
+  completedCount,
+  progress,
+  customCategories,
+}: {
+  template: ExportTemplate;
+  selectedDate: string;
+  plans: PlanItem[];
+  completedCount: number;
+  progress: number;
+  customCategories: CustomCategory[];
+}) {
+  const isCute = template.layout === "cute-grid";
+  const isJournal = template.layout === "journal";
+  const isExecutive = template.layout === "executive";
+  const isResearch = template.layout === "research";
+  const dateLabel = formatDisplayDate(selectedDate);
+  const gridStyle: CSSProperties = {
+    display: "grid",
+    gridTemplateColumns: isCute || isJournal ? "repeat(2, minmax(0, 1fr))" : "1fr",
+    gap: isCute ? "22px" : "16px",
+  };
+  const decorativeBorder = isCute || isJournal ? "3px dashed" : "1.5px solid";
+
+  return (
+    <div
+      style={{
+        width: "960px",
+        minHeight: "1320px",
+        boxSizing: "border-box",
+        padding: "42px",
+        background: template.background,
+        color: template.ink,
+        fontFamily: "'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif",
+      }}
+    >
+      <div
+        style={{
+          minHeight: "1236px",
+          boxSizing: "border-box",
+          border: `4px ${isExecutive || isResearch ? "solid" : "dashed"} ${template.border}`,
+          borderRadius: isExecutive || isResearch ? "28px" : "42px",
+          background:
+            template.layout === "cute-grid"
+              ? `radial-gradient(circle at 12% 8%, ${template.accentSoft} 0 0.6rem, transparent 0.7rem), radial-gradient(circle at 88% 12%, ${template.accentSoft} 0 0.5rem, transparent 0.6rem), ${template.paper}`
+              : template.paper,
+          boxShadow: "0 24px 70px rgba(74, 52, 84, 0.14)",
+          padding: isExecutive ? "42px 48px" : "38px",
+          overflow: "hidden",
+        }}
+      >
+        <header
+          style={{
+            borderBottom: `2px solid ${template.accentSoft}`,
+            display: "grid",
+            gap: "18px",
+            gridTemplateColumns: isCute ? "1fr" : "minmax(0, 1fr) 250px",
+            paddingBottom: "26px",
+          }}
+        >
+          <div>
+            <div
+              style={{
+                color: template.accent,
+                fontSize: isCute ? "36px" : "26px",
+                fontWeight: 900,
+                letterSpacing: 0,
+                lineHeight: 1.15,
+              }}
+            >
+              {template.title}
+            </div>
+            <div
+              style={{
+                color: template.ink,
+                fontSize: isCute ? "44px" : "38px",
+                fontWeight: 900,
+                lineHeight: 1.15,
+                marginTop: "10px",
+              }}
+            >
+              {dateLabel}
+            </div>
+            <div
+              style={{
+                color: template.muted,
+                fontSize: isCute ? "21px" : "17px",
+                fontWeight: 800,
+                lineHeight: 1.6,
+                marginTop: "12px",
+              }}
+            >
+              {template.subtitle}
+            </div>
+          </div>
+
+          <div
+            style={{
+              alignSelf: isCute ? "stretch" : "end",
+              background: template.card,
+              border: `2px solid ${template.accentSoft}`,
+              borderRadius: isCute ? "28px" : "20px",
+              padding: "18px",
+            }}
+          >
+            <div
+              style={{
+                color: template.muted,
+                display: "flex",
+                fontSize: "18px",
+                fontWeight: 900,
+                justifyContent: "space-between",
+                marginBottom: "10px",
+              }}
+            >
+              <span>
+                已完成 {completedCount} / {plans.length} 项
+              </span>
+              <span>{progress}%</span>
+            </div>
+            <div
+              style={{
+                background: "#ffffff",
+                borderRadius: "999px",
+                height: "15px",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  background: `linear-gradient(90deg, ${template.accent}, ${template.accentSoft})`,
+                  borderRadius: "999px",
+                  height: "100%",
+                  width: `${progress}%`,
+                }}
+              />
+            </div>
+            <div
+              style={{
+                color: template.accent,
+                fontSize: isCute ? "28px" : "22px",
+                fontWeight: 900,
+                marginTop: "14px",
+                textAlign: "center",
+                wordBreak: "break-word",
+              }}
+            >
+              {template.motif}
+            </div>
+          </div>
+        </header>
+
+        <section style={{ marginTop: "30px" }}>
+          {plans.length === 0 ? (
+            <div
+              style={{
+                alignItems: "center",
+                background: template.card,
+                border: `${decorativeBorder} ${template.border}`,
+                borderRadius: "30px",
+                color: template.muted,
+                display: "flex",
+                fontSize: "28px",
+                fontWeight: 900,
+                justifyContent: "center",
+                minHeight: "520px",
+                textAlign: "center",
+              }}
+            >
+              今天还没有计划
+            </div>
+          ) : (
+            <div style={gridStyle}>
+              {plans.map((item, index) => {
+                const categoryStyle = getCategoryStyle(item.category, customCategories);
+                const checkboxSize = isCute ? 34 : 26;
+                const noteVisible = item.note.trim();
+
+                return (
+                  <article
+                    key={item.id}
+                    style={{
+                      background: template.card,
+                      border: `${decorativeBorder} ${item.completed ? template.accentSoft : template.border}`,
+                      borderRadius: isCute || isJournal ? "30px" : "18px",
+                      boxShadow: isExecutive
+                        ? "0 14px 28px rgba(35, 52, 71, 0.08)"
+                        : "0 16px 30px rgba(98, 67, 102, 0.08)",
+                      boxSizing: "border-box",
+                      minHeight: isCute ? "220px" : "150px",
+                      padding: isCute ? "24px" : "20px 22px",
+                      position: "relative",
+                    }}
+                  >
+                    {isCute || isJournal ? (
+                      <div
+                        aria-hidden="true"
+                        style={{
+                          color: template.accentSoft,
+                          fontSize: "30px",
+                          position: "absolute",
+                          right: "20px",
+                          top: "16px",
+                        }}
+                      >
+                        {index % 2 === 0 ? "✦" : "♡"}
+                      </div>
+                    ) : null}
+
+                    <div
+                      style={{
+                        alignItems: "flex-start",
+                        display: "grid",
+                        gap: "16px",
+                        gridTemplateColumns: `${checkboxSize}px minmax(0, 1fr)`,
+                      }}
+                    >
+                      <div
+                        style={{
+                          alignItems: "center",
+                          background: item.completed ? template.accent : "#ffffff",
+                          border: `3px solid ${item.completed ? template.accent : template.checkbox}`,
+                          borderRadius: isCute ? "9px" : "7px",
+                          color: "#ffffff",
+                          display: "flex",
+                          fontSize: isCute ? "24px" : "18px",
+                          fontWeight: 900,
+                          height: `${checkboxSize}px`,
+                          justifyContent: "center",
+                          lineHeight: 1,
+                          marginTop: "6px",
+                          width: `${checkboxSize}px`,
+                        }}
+                      >
+                        {item.completed ? "✓" : ""}
+                      </div>
+
+                      <div>
+                        <div
+                          style={{
+                            alignItems: "center",
+                            display: "flex",
+                            flexWrap: "wrap",
+                            gap: "10px",
+                            marginBottom: "12px",
+                          }}
+                        >
+                          <span
+                            style={{
+                              background: template.accentSoft,
+                              borderRadius: "999px",
+                              color: template.accent,
+                              display: "inline-flex",
+                              fontSize: isCute ? "18px" : "14px",
+                              fontWeight: 900,
+                              padding: isCute ? "8px 14px" : "6px 12px",
+                            }}
+                          >
+                            {categoryStyle.emoji} {item.category}
+                          </span>
+                          <span
+                            style={{
+                              color: template.muted,
+                              fontSize: isCute ? "18px" : "13px",
+                              fontWeight: 900,
+                            }}
+                          >
+                            #{index + 1}
+                          </span>
+                        </div>
+
+                        <div
+                          style={{
+                            color: item.completed ? template.muted : template.ink,
+                            fontSize: isCute ? "25px" : isExecutive ? "20px" : "21px",
+                            fontWeight: 900,
+                            lineHeight: 1.35,
+                            textDecoration: item.completed ? "line-through" : "none",
+                            wordBreak: "break-word",
+                          }}
+                        >
+                          {item.title}
+                        </div>
+
+                        {noteVisible ? (
+                          <div
+                            style={{
+                              color: template.muted,
+                              fontSize: isCute ? "18px" : "15px",
+                              fontWeight: 700,
+                              lineHeight: 1.65,
+                              marginTop: "10px",
+                              whiteSpace: "pre-wrap",
+                              wordBreak: "break-word",
+                            }}
+                          >
+                            {item.note}
+                          </div>
+                        ) : null}
+
+                        <div
+                          style={{
+                            display: "flex",
+                            flexWrap: "wrap",
+                            gap: "8px",
+                            marginTop: "15px",
+                          }}
+                        >
+                          <span
+                            style={{
+                              background: "#ffffff",
+                              border: `1px solid ${template.accentSoft}`,
+                              borderRadius: "999px",
+                              color: template.muted,
+                              fontSize: isCute ? "16px" : "13px",
+                              fontWeight: 900,
+                              padding: "6px 11px",
+                            }}
+                          >
+                            目标：{formatMinutes(item.targetMinutes)}
+                          </span>
+                          <span
+                            style={{
+                              background: "#ffffff",
+                              border: `1px solid ${template.accentSoft}`,
+                              borderRadius: "999px",
+                              color: template.muted,
+                              fontSize: isCute ? "16px" : "13px",
+                              fontWeight: 900,
+                              padding: "6px 11px",
+                            }}
+                          >
+                            实际：{formatMinutes(item.actualMinutes)}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        <footer
+          style={{
+            alignItems: "center",
+            background: template.accentSoft,
+            borderRadius: isCute || isJournal ? "28px" : "18px",
+            color: template.accent,
+            display: "flex",
+            fontSize: isCute ? "25px" : "18px",
+            fontWeight: 900,
+            justifyContent: "center",
+            lineHeight: 1.4,
+            marginTop: "34px",
+            minHeight: isCute ? "84px" : "60px",
+            padding: "14px 24px",
+            textAlign: "center",
+          }}
+        >
+          {template.footer}
+        </footer>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const today = useMemo(() => formatDateInput(new Date()), []);
   const [selectedDate, setSelectedDate] = useState<string>(today);
@@ -688,6 +1387,9 @@ function App() {
   const [customCategoryInput, setCustomCategoryInput] = useState<string>("");
   const [customCategoryStatus, setCustomCategoryStatus] = useState<string>("");
   const [isExporting, setIsExporting] = useState<boolean>(false);
+  const [selectedExportTemplateId, setSelectedExportTemplateId] = useState<string>(
+    EXPORT_TEMPLATES[0].id,
+  );
   const [deletedItemIds, setDeletedItemIds] = useState<string[]>(() => loadDeletedItemIds());
   const [currentUser, setCurrentUser] = useState<SupabaseUser | null>(null);
   const [authMode, setAuthMode] = useState<AuthMode>(() =>
@@ -707,6 +1409,7 @@ function App() {
   const [isAuthBusy, setIsAuthBusy] = useState<boolean>(false);
   const [isCloudSaving, setIsCloudSaving] = useState<boolean>(false);
   const journalRef = useRef<HTMLDivElement | null>(null);
+  const exportRef = useRef<HTMLDivElement | null>(null);
   const feedbackTimer = useRef<number | null>(null);
   const cloudTimer = useRef<number | null>(null);
   const cloudReady = useRef<boolean>(false);
@@ -726,6 +1429,17 @@ function App() {
     ],
     [customCategories],
   );
+  const exportTemplateGroups = useMemo(
+    () =>
+      Array.from(new Set(EXPORT_TEMPLATES.map((template) => template.audience))).map((audience) => ({
+        audience,
+        templates: EXPORT_TEMPLATES.filter((template) => template.audience === audience),
+      })),
+    [],
+  );
+  const selectedExportTemplate =
+    EXPORT_TEMPLATES.find((template) => template.id === selectedExportTemplateId) ??
+    EXPORT_TEMPLATES[0];
   const plans = plansByDate[selectedDate] ?? [];
   const completedCount = plans.filter((item) => item.completed).length;
   const progress = plans.length > 0 ? Math.round((completedCount / plans.length) * 100) : 0;
@@ -1250,7 +1964,9 @@ function App() {
   };
 
   const captureJournal = async () => {
-    if (!journalRef.current) {
+    const exportTarget = exportRef.current ?? journalRef.current;
+
+    if (!exportTarget) {
       return null;
     }
 
@@ -1258,8 +1974,8 @@ function App() {
     await new Promise((resolve) => window.requestAnimationFrame(resolve));
 
     try {
-      return await html2canvas(journalRef.current, {
-        backgroundColor: "#fffaf4",
+      return await html2canvas(exportTarget, {
+        backgroundColor: selectedExportTemplate.paper,
         scale: Math.min(window.devicePixelRatio || 2, 2),
         ignoreElements: (element) => element.hasAttribute("data-export-ignore"),
       });
@@ -1687,7 +2403,29 @@ function App() {
                 <p className="text-sm font-bold text-pink-500">Journal Card</p>
                 <h2 className="text-2xl font-black text-[#382b44]">{formatDisplayDate(selectedDate)}</h2>
               </div>
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <label
+                  className="flex min-w-56 flex-col gap-1 text-xs font-black text-[#6f5d78]"
+                  htmlFor="export-template"
+                >
+                  导出模板
+                  <select
+                    className="max-w-full rounded-2xl border border-pink-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+                    id="export-template"
+                    value={selectedExportTemplateId}
+                    onChange={(event) => setSelectedExportTemplateId(event.target.value)}
+                  >
+                    {exportTemplateGroups.map((group) => (
+                      <optgroup key={group.audience} label={group.audience}>
+                        {group.templates.map((template) => (
+                          <option key={template.id} value={template.id}>
+                            {template.name}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                </label>
                 <button
                   className="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-bold text-sky-700 transition hover:bg-sky-100 disabled:opacity-50"
                   type="button"
@@ -1939,6 +2677,29 @@ function App() {
             </div>
           </section>
         </section>
+
+        <div
+          aria-hidden="true"
+          style={{
+            left: "-12000px",
+            pointerEvents: "none",
+            position: "fixed",
+            top: 0,
+            width: "960px",
+            zIndex: -1,
+          }}
+        >
+          <div ref={exportRef}>
+            <ExportJournalTemplate
+              completedCount={completedCount}
+              customCategories={customCategories}
+              plans={plans}
+              progress={progress}
+              selectedDate={selectedDate}
+              template={selectedExportTemplate}
+            />
+          </div>
+        </div>
       </div>
     </main>
   );
