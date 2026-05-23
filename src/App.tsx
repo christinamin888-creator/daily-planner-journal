@@ -19,6 +19,7 @@ import type { User as SupabaseUser } from "@supabase/supabase-js";
 const STORAGE_KEY = "daily-planner-journal-v1";
 const LEGACY_SYNC_STATE_KEY = "daily-planner-journal-sync-v1";
 const DELETED_ITEM_IDS_KEY = "daily-planner-journal-deleted-v1";
+const CUSTOM_CATEGORIES_KEY = "daily-planner-journal-custom-categories-v1";
 const SYNC_DEBOUNCE_MS = 800;
 
 const CATEGORY_OPTIONS = [
@@ -34,7 +35,14 @@ const CATEGORY_OPTIONS = [
   "其他",
 ] as const;
 
-type Category = (typeof CATEGORY_OPTIONS)[number];
+type BuiltInCategory = (typeof CATEGORY_OPTIONS)[number];
+type Category = string;
+
+type CustomCategory = {
+  id: string;
+  name: string;
+  icon: string;
+};
 
 type PlanItem = {
   id: string;
@@ -53,6 +61,7 @@ type PlanBook = Record<string, PlanItem[]>;
 type CloudPayload = {
   plansByDate: PlanBook;
   deletedItemIds: string[];
+  customCategories: CustomCategory[];
 };
 
 type AuthMode = "sign-in" | "sign-up" | "forgot" | "update-password";
@@ -61,6 +70,15 @@ type AuthForm = {
   email: string;
   password: string;
   confirmPassword: string;
+};
+
+type CompletionFeedback = {
+  id: number;
+  itemId: string;
+  title: string;
+  detail: string;
+  allDone: boolean;
+  completionRate: number;
 };
 
 type CategoryStyle = {
@@ -78,7 +96,7 @@ type PlanForm = {
   targetMinutes: string;
 };
 
-const CATEGORY_STYLES: Record<Category, CategoryStyle> = {
+const CATEGORY_STYLES: Record<BuiltInCategory, CategoryStyle> = {
   学习: {
     emoji: "📚✏️",
     accent: "text-sky-700",
@@ -208,6 +226,53 @@ function saveDeletedItemIds(deletedItemIds: string[]) {
   }
 }
 
+function normalizeCustomCategories(value: unknown): CustomCategory[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const seenNames = new Set<string>();
+
+  return value.reduce<CustomCategory[]>((result, item) => {
+    if (!item || typeof item !== "object") {
+      return result;
+    }
+
+    const category = item as Partial<CustomCategory>;
+    const name = typeof category.name === "string" ? category.name.trim() : "";
+
+    if (!name || seenNames.has(name) || CATEGORY_OPTIONS.includes(name as BuiltInCategory)) {
+      return result;
+    }
+
+    seenNames.add(name);
+    result.push({
+      id: typeof category.id === "string" && category.id ? category.id : createId(),
+      name,
+      icon: typeof category.icon === "string" && category.icon.trim() ? category.icon.trim() : "🏷️",
+    });
+
+    return result;
+  }, []);
+}
+
+function loadCustomCategories(): CustomCategory[] {
+  try {
+    const rawData = window.localStorage.getItem(CUSTOM_CATEGORIES_KEY);
+    return normalizeCustomCategories(rawData ? JSON.parse(rawData) : []);
+  } catch {
+    return [];
+  }
+}
+
+function saveCustomCategories(customCategories: CustomCategory[]) {
+  try {
+    window.localStorage.setItem(CUSTOM_CATEGORIES_KEY, JSON.stringify(customCategories));
+  } catch {
+    // localStorage may be unavailable in private or restricted browser modes.
+  }
+}
+
 function hasPlans(planBook: PlanBook): boolean {
   return Object.values(planBook).some((items) => items.length > 0);
 }
@@ -246,12 +311,14 @@ function normalizePayload(payload: unknown): CloudPayload {
       deletedItemIds: Array.isArray(cloudPayload.deletedItemIds)
         ? cloudPayload.deletedItemIds
         : [],
+      customCategories: normalizeCustomCategories(cloudPayload.customCategories),
     };
   }
 
   return {
     plansByDate: normalizePlanBook((payload ?? {}) as PlanBook),
     deletedItemIds: [],
+    customCategories: [],
   };
 }
 
@@ -294,10 +361,38 @@ function mergePlanBooks(
   return merged;
 }
 
-function createCloudPayload(planBook: PlanBook, deletedItemIds: string[]): CloudPayload {
+function mergeCustomCategories(
+  localCategories: CustomCategory[],
+  cloudCategories: CustomCategory[],
+): CustomCategory[] {
+  const categoriesByName = new Map<string, CustomCategory>();
+
+  [...localCategories, ...cloudCategories].forEach((category) => {
+    const name = category.name.trim();
+
+    if (!name || CATEGORY_OPTIONS.includes(name as BuiltInCategory) || categoriesByName.has(name)) {
+      return;
+    }
+
+    categoriesByName.set(name, {
+      id: category.id || createId(),
+      name,
+      icon: category.icon || "🏷️",
+    });
+  });
+
+  return Array.from(categoriesByName.values());
+}
+
+function createCloudPayload(
+  planBook: PlanBook,
+  deletedItemIds: string[],
+  customCategories: CustomCategory[],
+): CloudPayload {
   return {
     plansByDate: normalizePlanBook(planBook),
     deletedItemIds,
+    customCategories: normalizeCustomCategories(customCategories),
   };
 }
 
@@ -329,6 +424,77 @@ function parseOptionalMinutes(value: string): number | null | undefined {
 
 function formatMinutes(minutes: number | undefined): string {
   return minutes ? `${minutes} 分钟` : "未设置";
+}
+
+function getCategoryStyle(category: string, customCategories: CustomCategory[]): CategoryStyle {
+  if (CATEGORY_OPTIONS.includes(category as BuiltInCategory)) {
+    return CATEGORY_STYLES[category as BuiltInCategory];
+  }
+
+  const customCategory = customCategories.find((item) => item.name === category);
+
+  return {
+    emoji: customCategory?.icon ?? "🏷️",
+    accent: "text-pink-700",
+    bg: "bg-pink-50",
+    border: "border-pink-200",
+    caption: customCategory ? `${customCategory.name}分类` : "自定义分类",
+  };
+}
+
+function pickRandomMessage(messages: string[]): string {
+  return messages[Math.floor(Math.random() * messages.length)];
+}
+
+function getCompletionCountMessage(completedCount: number): string {
+  if (completedCount >= 5) {
+    return "今天执行力爆棚！";
+  }
+
+  if (completedCount === 3) {
+    return "三连完成，太厉害啦！";
+  }
+
+  if (completedCount === 2) {
+    return "又完成一项，状态来了！";
+  }
+
+  return pickRandomMessage(["完成啦！你真棒", "任务完成，撒花！", "执行力上线！"]);
+}
+
+function getCompletionRateMessage(completionRate: number): string {
+  if (completionRate === 100) {
+    return pickRandomMessage(["今日计划全部完成！", "今天的你真的很棒！"]);
+  }
+
+  if (completionRate >= 60) {
+    return pickRandomMessage(["快完成啦，再坚持一下！", "离今日目标越来越近了！"]);
+  }
+
+  if (completionRate >= 30) {
+    return pickRandomMessage(["节奏不错，继续保持！", "今天已经完成不少啦！"]);
+  }
+
+  return pickRandomMessage(["已经开始就很棒！", "小小一步，也是在前进"]);
+}
+
+function createCompletionFeedback(params: {
+  itemId: string;
+  completedCount: number;
+  totalCount: number;
+}): CompletionFeedback {
+  const completionRate =
+    params.totalCount > 0 ? Math.round((params.completedCount / params.totalCount) * 100) : 0;
+  const allDone = params.totalCount > 0 && completionRate === 100;
+
+  return {
+    id: Date.now(),
+    itemId: params.itemId,
+    title: allDone ? "今日计划全部完成！" : getCompletionCountMessage(params.completedCount),
+    detail: allDone ? "你完成了今天的全部任务，太棒啦！" : getCompletionRateMessage(completionRate),
+    allDone,
+    completionRate,
+  };
 }
 
 function formatDateInput(date: Date): string {
@@ -369,33 +535,53 @@ function cleanAuthUrl() {
   window.history.replaceState({}, document.title, window.location.pathname);
 }
 
-function CardCompletionBurst() {
-  const sparkles = ["🎉", "✨", "⭐", "🎀", "🎊", "✦"];
+function CardCompletionBurst({ feedback }: { feedback: CompletionFeedback }) {
+  const sparkles = feedback.allDone
+    ? ["🎉", "✨", "⭐", "🎊", "🎀", "🌟", "✦", "🎉"]
+    : ["🎉", "✨", "⭐", "🎀", "🎊", "✦"];
 
   return (
     <motion.div
+      key={feedback.id}
       aria-live="polite"
-      className="pointer-events-none absolute left-1/2 top-[42%] z-20 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-2 rounded-[1.25rem] border border-white/90 bg-white/90 px-5 py-3 text-center text-sm font-black text-pink-600 shadow-sticker backdrop-blur"
+      className={`pointer-events-none absolute left-1/2 top-1/2 z-20 flex w-[calc(100%-2rem)] max-w-72 -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-2 rounded-[1.25rem] border border-white/90 bg-white/90 px-5 py-3 text-center font-black shadow-sticker backdrop-blur ${
+        feedback.allDone ? "text-rose-600" : "text-pink-600"
+      }`}
       data-export-ignore="true"
-      initial={{ opacity: 0, y: 8, scale: 0.72, rotate: -2 }}
+      initial={{ opacity: 0, scale: feedback.allDone ? 0.68 : 0.72, rotate: -2 }}
       animate={{
         opacity: [0, 1, 1, 0],
-        y: [8, -8, -4, -16],
-        scale: [0.72, 1.08, 1, 0.94],
+        scale: feedback.allDone ? [0.68, 1.14, 1.04, 0.96] : [0.72, 1.08, 1, 0.94],
         rotate: [-2, 1, 0, 2],
       }}
       exit={{ opacity: 0, scale: 0.92 }}
-      transition={{ duration: 1.45, ease: "easeOut", times: [0, 0.18, 0.78, 1] }}
+      transition={{
+        duration: feedback.allDone ? 2 : 1.45,
+        ease: "easeOut",
+        times: [0, 0.18, 0.78, 1],
+      }}
     >
-      <span className="whitespace-nowrap text-base">完成啦！</span>
-      <span className="flex gap-1 text-lg">
+      <span className={feedback.allDone ? "text-lg sm:text-xl" : "text-base"}>
+        {feedback.title}
+      </span>
+      <span className="text-xs font-bold text-[#74667d] sm:text-sm">{feedback.detail}</span>
+      {feedback.allDone ? (
+        <span className="rounded-full bg-rose-50 px-3 py-1 text-xs font-black text-rose-500">
+          完成率 {feedback.completionRate}%
+        </span>
+      ) : null}
+      <span className={feedback.allDone ? "flex flex-wrap justify-center gap-1 text-xl" : "flex gap-1 text-lg"}>
         {sparkles.map((sparkle, index) => (
           <motion.span
             aria-hidden="true"
             className="inline-block"
             key={`${sparkle}-${index}`}
-            animate={{ y: [0, -10, 0], rotate: [0, 14, -10, 0], scale: [1, 1.2, 1] }}
-            transition={{ duration: 0.8, delay: index * 0.06 }}
+            animate={{
+              y: feedback.allDone ? [0, -14, 0] : [0, -10, 0],
+              rotate: [0, 14, -10, 0],
+              scale: feedback.allDone ? [1, 1.32, 1] : [1, 1.2, 1],
+            }}
+            transition={{ duration: feedback.allDone ? 0.95 : 0.8, delay: index * 0.06 }}
           >
             {sparkle}
           </motion.span>
@@ -411,10 +597,15 @@ function App() {
   const [plansByDate, setPlansByDate] = useState<PlanBook>(() => loadPlanBook());
   const [form, setForm] = useState<PlanForm>(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [completedFlashId, setCompletedFlashId] = useState<string | null>(null);
+  const [completionFeedback, setCompletionFeedback] = useState<CompletionFeedback | null>(null);
   const [actualEditId, setActualEditId] = useState<string | null>(null);
   const [actualMinutesDraft, setActualMinutesDraft] = useState<string>("");
   const [actualMinutesError, setActualMinutesError] = useState<string>("");
+  const [customCategories, setCustomCategories] = useState<CustomCategory[]>(() =>
+    loadCustomCategories(),
+  );
+  const [customCategoryInput, setCustomCategoryInput] = useState<string>("");
+  const [customCategoryStatus, setCustomCategoryStatus] = useState<string>("");
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [deletedItemIds, setDeletedItemIds] = useState<string[]>(() => loadDeletedItemIds());
   const [currentUser, setCurrentUser] = useState<SupabaseUser | null>(null);
@@ -440,8 +631,20 @@ function App() {
   const cloudReady = useRef<boolean>(false);
   const latestPlanBook = useRef<PlanBook>(plansByDate);
   const latestDeletedItemIds = useRef<string[]>(deletedItemIds);
+  const latestCustomCategories = useRef<CustomCategory[]>(customCategories);
   const currentUserId = currentUser?.id ?? null;
 
+  const categoryOptions = useMemo(
+    () => [
+      ...CATEGORY_OPTIONS.map((category) => ({
+        id: category,
+        name: category,
+        icon: CATEGORY_STYLES[category].emoji,
+      })),
+      ...customCategories,
+    ],
+    [customCategories],
+  );
   const plans = plansByDate[selectedDate] ?? [];
   const completedCount = plans.filter((item) => item.completed).length;
   const progress = plans.length > 0 ? Math.round((completedCount / plans.length) * 100) : 0;
@@ -458,6 +661,11 @@ function App() {
   useEffect(() => {
     saveDeletedItemIds(deletedItemIds);
   }, [deletedItemIds]);
+
+  useEffect(() => {
+    saveCustomCategories(customCategories);
+    latestCustomCategories.current = customCategories;
+  }, [customCategories]);
 
   useEffect(() => {
     return () => {
@@ -549,6 +757,10 @@ function App() {
           ...latestDeletedItemIds.current,
           ...cloudPayload.deletedItemIds,
         ]);
+        const nextCustomCategories = mergeCustomCategories(
+          latestCustomCategories.current,
+          cloudPayload.customCategories,
+        );
         const mergedPlanBook = mergePlanBooks(
           localPlanBook,
           cloudPayload.plansByDate,
@@ -560,10 +772,11 @@ function App() {
         }
 
         setDeletedItemIds(nextDeletedItemIds);
+        setCustomCategories(nextCustomCategories);
         setPlansByDate(mergedPlanBook);
         await upsertDailyPlannerUserData({
           userId: currentUserId,
-          payload: createCloudPayload(mergedPlanBook, nextDeletedItemIds),
+          payload: createCloudPayload(mergedPlanBook, nextDeletedItemIds, nextCustomCategories),
         });
 
         if (!isCancelled) {
@@ -606,7 +819,7 @@ function App() {
         window.clearTimeout(cloudTimer.current);
       }
     };
-  }, [currentUserId, deletedItemIds, plansByDate]);
+  }, [currentUserId, customCategories, deletedItemIds, plansByDate]);
 
   const updatePlansForSelectedDate = (updater: (current: PlanItem[]) => PlanItem[]) => {
     setPlansByDate((currentBook) => ({
@@ -636,6 +849,10 @@ function App() {
         ...latestDeletedItemIds.current,
         ...cloudPayload.deletedItemIds,
       ]);
+      const nextCustomCategories = mergeCustomCategories(
+        latestCustomCategories.current,
+        cloudPayload.customCategories,
+      );
       const mergedPlanBook = mergePlanBooks(
         latestPlanBook.current,
         cloudPayload.plansByDate,
@@ -648,10 +865,13 @@ function App() {
       if (!areStringArraysEqual(nextDeletedItemIds, latestDeletedItemIds.current)) {
         setDeletedItemIds(nextDeletedItemIds);
       }
+      if (JSON.stringify(nextCustomCategories) !== JSON.stringify(latestCustomCategories.current)) {
+        setCustomCategories(nextCustomCategories);
+      }
 
       await upsertDailyPlannerUserData({
         userId,
-        payload: createCloudPayload(mergedPlanBook, nextDeletedItemIds),
+        payload: createCloudPayload(mergedPlanBook, nextDeletedItemIds, nextCustomCategories),
       });
       setCloudStatus("已保存到云端");
     } catch (error) {
@@ -755,6 +975,34 @@ function App() {
       confirmPassword: "",
     }));
     setAuthStatus(nextMode === "forgot" ? "输入邮箱接收重置密码邮件" : "未登录时仍可本地使用");
+  };
+
+  const handleAddCustomCategory = () => {
+    const name = customCategoryInput.trim();
+
+    if (!name) {
+      setCustomCategoryStatus("分类名称不能为空");
+      return;
+    }
+
+    const isBuiltInDuplicate = CATEGORY_OPTIONS.includes(name as BuiltInCategory);
+    const isCustomDuplicate = customCategories.some((category) => category.name === name);
+
+    if (isBuiltInDuplicate || isCustomDuplicate) {
+      setCustomCategoryStatus("这个分类已经存在啦");
+      return;
+    }
+
+    const nextCategory: CustomCategory = {
+      id: createId(),
+      name,
+      icon: "🏷️",
+    };
+
+    setCustomCategories((current) => [...current, nextCategory]);
+    setForm((current) => ({ ...current, category: name }));
+    setCustomCategoryInput("");
+    setCustomCategoryStatus("已添加自定义分类");
   };
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -868,15 +1116,22 @@ function App() {
     const targetPlan = plans.find((item) => item.id === id);
 
     if (targetPlan && !targetPlan.completed) {
-      setCompletedFlashId(id);
+      const nextCompletedCount = plans.filter((item) => item.completed || item.id === id).length;
+      const nextCompletionFeedback = createCompletionFeedback({
+        itemId: id,
+        completedCount: nextCompletedCount,
+        totalCount: plans.length,
+      });
+
+      setCompletionFeedback(nextCompletionFeedback);
 
       if (feedbackTimer.current) {
         window.clearTimeout(feedbackTimer.current);
       }
 
       feedbackTimer.current = window.setTimeout(() => {
-        setCompletedFlashId(null);
-      }, 1500);
+        setCompletionFeedback(null);
+      }, nextCompletionFeedback.allDone ? 2000 : 1500);
     }
 
     if (targetPlan?.completed && actualEditId === id) {
@@ -1245,15 +1500,47 @@ function App() {
                   id="category"
                   value={form.category}
                   onChange={(event) =>
-                    setForm((current) => ({ ...current, category: event.target.value as Category }))
+                    setForm((current) => ({ ...current, category: event.target.value }))
                   }
                 >
-                  {CATEGORY_OPTIONS.map((category) => (
-                    <option key={category} value={category}>
-                      {CATEGORY_STYLES[category].emoji} {category}
+                  {categoryOptions.map((category) => (
+                    <option key={category.id} value={category.name}>
+                      {category.icon} {category.name}
                     </option>
                   ))}
                 </select>
+                <div className="mt-3 rounded-[1.25rem] border border-dashed border-pink-100 bg-pink-50/50 p-3">
+                  <label
+                    className="mb-2 block text-xs font-black text-[#7a6b84]"
+                    htmlFor="custom-category"
+                  >
+                    + 添加自定义分类
+                  </label>
+                  <div className="flex flex-col gap-2 sm:flex-row lg:flex-col">
+                    <input
+                      className="min-w-0 flex-1 rounded-2xl border border-pink-100 bg-white px-4 py-2.5 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+                      id="custom-category"
+                      maxLength={20}
+                      placeholder="例如：阅读、旅行"
+                      value={customCategoryInput}
+                      onChange={(event) => {
+                        setCustomCategoryInput(event.target.value);
+                        setCustomCategoryStatus("");
+                      }}
+                    />
+                    <button
+                      className="rounded-2xl bg-white px-4 py-2.5 text-sm font-black text-pink-600 shadow-sm transition hover:bg-pink-100 disabled:opacity-50"
+                      disabled={!customCategoryInput.trim()}
+                      type="button"
+                      onClick={handleAddCustomCategory}
+                    >
+                      添加
+                    </button>
+                  </div>
+                  {customCategoryStatus ? (
+                    <p className="mt-2 text-xs font-bold text-[#8b7b91]">{customCategoryStatus}</p>
+                  ) : null}
+                </div>
               </div>
 
               <div>
@@ -1387,7 +1674,7 @@ function App() {
               ) : (
                 <div className="grid gap-4 md:grid-cols-2">
                   {plans.map((item) => {
-                    const style = CATEGORY_STYLES[item.category];
+                    const style = getCategoryStyle(item.category, customCategories);
 
                     return (
                       <motion.article
@@ -1395,7 +1682,12 @@ function App() {
                         animate={{
                           opacity: item.completed ? 0.72 : 1,
                           y: 0,
-                          scale: completedFlashId === item.id ? [1, 1.04, 1] : 1,
+                          scale:
+                            completionFeedback?.itemId === item.id
+                              ? completionFeedback.allDone
+                                ? [1, 1.07, 1.02, 1]
+                                : [1, 1.04, 1]
+                              : 1,
                         }}
                         className={`relative overflow-hidden rounded-[1.5rem] border-2 border-dashed p-4 shadow-sm transition ${style.bg} ${style.border} ${
                           item.completed ? "" : "hover:-translate-y-1"
@@ -1406,7 +1698,9 @@ function App() {
                       >
                         <div className="absolute -right-5 -top-5 h-16 w-16 rounded-full border-8 border-white/60 bg-white/30" />
                         <AnimatePresence>
-                          {completedFlashId === item.id ? <CardCompletionBurst /> : null}
+                          {completionFeedback?.itemId === item.id ? (
+                            <CardCompletionBurst feedback={completionFeedback} />
+                          ) : null}
                         </AnimatePresence>
                         <div className="relative flex gap-3">
                           <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-white/80 bg-white text-2xl shadow-sm">
