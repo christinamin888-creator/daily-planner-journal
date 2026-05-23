@@ -77,7 +77,6 @@ type CompletionFeedback = {
   itemId: string;
   title: string;
   detail: string;
-  allDone: boolean;
   completionRate: number;
 };
 
@@ -463,12 +462,8 @@ function getCompletionCountMessage(completedCount: number): string {
 }
 
 function getCompletionRateMessage(completionRate: number): string {
-  if (completionRate === 100) {
-    return pickRandomMessage(["今日计划全部完成！", "今天的你真的很棒！"]);
-  }
-
   if (completionRate >= 60) {
-    return pickRandomMessage(["快完成啦，再坚持一下！", "离今日目标越来越近了！"]);
+    return pickRandomMessage(["快完成啦，再坚持一下！", "离今日目标越来越近了！", "状态越来越好了"]);
   }
 
   if (completionRate >= 30) {
@@ -485,14 +480,12 @@ function createCompletionFeedback(params: {
 }): CompletionFeedback {
   const completionRate =
     params.totalCount > 0 ? Math.round((params.completedCount / params.totalCount) * 100) : 0;
-  const allDone = params.totalCount > 0 && completionRate === 100;
 
   return {
     id: Date.now(),
     itemId: params.itemId,
-    title: allDone ? "今日计划全部完成！" : getCompletionCountMessage(params.completedCount),
-    detail: allDone ? "你完成了今天的全部任务，太棒啦！" : getCompletionRateMessage(completionRate),
-    allDone,
+    title: getCompletionCountMessage(params.completedCount),
+    detail: getCompletionRateMessage(completionRate),
     completionRate,
   };
 }
@@ -536,58 +529,51 @@ function cleanAuthUrl() {
 }
 
 function CardCompletionBurst({ feedback }: { feedback: CompletionFeedback }) {
-  const sparkles = feedback.allDone
-    ? ["🎉", "✨", "⭐", "🎊", "🎀", "🌟", "✦", "🎉"]
-    : ["🎉", "✨", "⭐", "🎀", "🎊", "✦"];
+  const sparkles = ["🎉", "✨", "⭐", "🎀", "🎊", "✦"];
 
   return (
-    <motion.div
-      key={feedback.id}
+    <div
       aria-live="polite"
-      className={`pointer-events-none absolute left-1/2 top-1/2 z-20 flex w-[calc(100%-2rem)] max-w-72 -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-2 rounded-[1.25rem] border border-white/90 bg-white/90 px-5 py-3 text-center font-black shadow-sticker backdrop-blur ${
-        feedback.allDone ? "text-rose-600" : "text-pink-600"
-      }`}
+      className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center p-4"
       data-export-ignore="true"
-      initial={{ opacity: 0, scale: feedback.allDone ? 0.68 : 0.72, rotate: -2 }}
-      animate={{
-        opacity: [0, 1, 1, 0],
-        scale: feedback.allDone ? [0.68, 1.14, 1.04, 0.96] : [0.72, 1.08, 1, 0.94],
-        rotate: [-2, 1, 0, 2],
-      }}
-      exit={{ opacity: 0, scale: 0.92 }}
-      transition={{
-        duration: feedback.allDone ? 2 : 1.45,
-        ease: "easeOut",
-        times: [0, 0.18, 0.78, 1],
-      }}
     >
-      <span className={feedback.allDone ? "text-lg sm:text-xl" : "text-base"}>
-        {feedback.title}
-      </span>
-      <span className="text-xs font-bold text-[#74667d] sm:text-sm">{feedback.detail}</span>
-      {feedback.allDone ? (
-        <span className="rounded-full bg-rose-50 px-3 py-1 text-xs font-black text-rose-500">
-          完成率 {feedback.completionRate}%
+      <motion.div
+        key={feedback.id}
+        className="flex w-full max-w-[15rem] flex-col items-center gap-1.5 rounded-[1.25rem] border border-white/90 bg-white/95 px-3 py-3 text-center font-black text-pink-600 shadow-sticker backdrop-blur"
+        initial={{ opacity: 0, scale: 0.78, rotate: -1 }}
+        animate={{
+          opacity: [0, 1, 1, 0],
+          scale: [0.78, 1.05, 1, 0.96],
+          rotate: [-1, 1, 0, 1],
+        }}
+        exit={{ opacity: 0, scale: 0.92 }}
+        transition={{ duration: 1.45, ease: "easeOut", times: [0, 0.18, 0.78, 1] }}
+      >
+        <span className="max-w-full break-words text-sm leading-5 sm:text-base">
+          {feedback.title}
         </span>
-      ) : null}
-      <span className={feedback.allDone ? "flex flex-wrap justify-center gap-1 text-xl" : "flex gap-1 text-lg"}>
-        {sparkles.map((sparkle, index) => (
-          <motion.span
-            aria-hidden="true"
-            className="inline-block"
-            key={`${sparkle}-${index}`}
-            animate={{
-              y: feedback.allDone ? [0, -14, 0] : [0, -10, 0],
-              rotate: [0, 14, -10, 0],
-              scale: feedback.allDone ? [1, 1.32, 1] : [1, 1.2, 1],
-            }}
-            transition={{ duration: feedback.allDone ? 0.95 : 0.8, delay: index * 0.06 }}
-          >
-            {sparkle}
-          </motion.span>
-        ))}
-      </span>
-    </motion.div>
+        <span className="max-w-full break-words text-xs font-bold leading-5 text-[#74667d]">
+          {feedback.detail}
+        </span>
+        <span className="flex flex-wrap justify-center gap-1 text-base sm:text-lg">
+          {sparkles.map((sparkle, index) => (
+            <motion.span
+              aria-hidden="true"
+              className="inline-block"
+              key={`${sparkle}-${index}`}
+              animate={{
+                y: [0, -8, 0],
+                rotate: [0, 12, -8, 0],
+                scale: [1, 1.18, 1],
+              }}
+              transition={{ duration: 0.8, delay: index * 0.05 }}
+            >
+              {sparkle}
+            </motion.span>
+          ))}
+        </span>
+      </motion.div>
+    </div>
   );
 }
 
@@ -1131,7 +1117,7 @@ function App() {
 
       feedbackTimer.current = window.setTimeout(() => {
         setCompletionFeedback(null);
-      }, nextCompletionFeedback.allDone ? 2000 : 1500);
+      }, 1500);
     }
 
     if (targetPlan?.completed && actualEditId === id) {
@@ -1684,9 +1670,7 @@ function App() {
                           y: 0,
                           scale:
                             completionFeedback?.itemId === item.id
-                              ? completionFeedback.allDone
-                                ? [1, 1.07, 1.02, 1]
-                                : [1, 1.04, 1]
+                              ? [1, 1.035, 1]
                               : 1,
                         }}
                         className={`relative overflow-hidden rounded-[1.5rem] border-2 border-dashed p-4 shadow-sm transition ${style.bg} ${style.border} ${
