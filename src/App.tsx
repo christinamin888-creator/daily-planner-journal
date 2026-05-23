@@ -78,6 +78,7 @@ type CompletionFeedback = {
   title: string;
   detail: string;
   completionRate: number;
+  variantIndex: number;
 };
 
 type CategoryStyle = {
@@ -93,6 +94,16 @@ type PlanForm = {
   category: Category;
   note: string;
   targetMinutes: string;
+};
+
+type CompletionVariant = {
+  sparkles: string[];
+  accentClass: string;
+  detailClass: string;
+  ringClass: string;
+  fromX: number;
+  fromY: number;
+  rotate: number;
 };
 
 const CATEGORY_STYLES: Record<BuiltInCategory, CategoryStyle> = {
@@ -167,6 +178,63 @@ const CATEGORY_STYLES: Record<BuiltInCategory, CategoryStyle> = {
     caption: "爱心贴纸",
   },
 };
+
+const COMPLETION_VARIANTS: CompletionVariant[] = [
+  {
+    sparkles: ["🎉", "✨", "⭐", "🎀", "✦"],
+    accentClass: "text-pink-600",
+    detailClass: "text-[#74667d]",
+    ringClass: "border-pink-100 bg-white/95 shadow-pink-100/80",
+    fromX: -10,
+    fromY: 8,
+    rotate: -2,
+  },
+  {
+    sparkles: ["🌈", "💫", "✨", "🫧", "⭐"],
+    accentClass: "text-sky-700",
+    detailClass: "text-sky-700",
+    ringClass: "border-sky-100 bg-sky-50/95 shadow-sky-100/80",
+    fromX: 10,
+    fromY: -6,
+    rotate: 2,
+  },
+  {
+    sparkles: ["🎊", "🌟", "💖", "✨", "🎉"],
+    accentClass: "text-rose-600",
+    detailClass: "text-rose-700",
+    ringClass: "border-rose-100 bg-rose-50/95 shadow-rose-100/80",
+    fromX: -6,
+    fromY: -10,
+    rotate: 1,
+  },
+  {
+    sparkles: ["🪄", "✨", "🌙", "⭐", "💫"],
+    accentClass: "text-violet-700",
+    detailClass: "text-violet-700",
+    ringClass: "border-violet-100 bg-violet-50/95 shadow-violet-100/80",
+    fromX: 8,
+    fromY: 10,
+    rotate: -1,
+  },
+  {
+    sparkles: ["🌼", "🍀", "✨", "💚", "⭐"],
+    accentClass: "text-emerald-700",
+    detailClass: "text-emerald-700",
+    ringClass: "border-emerald-100 bg-emerald-50/95 shadow-emerald-100/80",
+    fromX: -8,
+    fromY: 4,
+    rotate: 2,
+  },
+  {
+    sparkles: ["⚡", "🔥", "🎯", "✨", "🎉"],
+    accentClass: "text-orange-700",
+    detailClass: "text-orange-700",
+    ringClass: "border-orange-100 bg-orange-50/95 shadow-orange-100/80",
+    fromX: 6,
+    fromY: -8,
+    rotate: -2,
+  },
+];
 
 const emptyForm: PlanForm = {
   title: "",
@@ -441,36 +509,54 @@ function getCategoryStyle(category: string, customCategories: CustomCategory[]):
   };
 }
 
-function pickRandomMessage(messages: string[]): string {
-  return messages[Math.floor(Math.random() * messages.length)];
-}
-
 function getCompletionCountMessage(completedCount: number): string {
   if (completedCount >= 5) {
-    return "今天执行力爆棚！";
+    return `第 ${completedCount} 项完成，今天执行力爆棚！`;
+  }
+
+  if (completedCount === 4) {
+    return "第 4 项完成，节奏稳稳的！";
   }
 
   if (completedCount === 3) {
-    return "三连完成，太厉害啦！";
+    return "第 3 项完成，三连达成啦！";
   }
 
   if (completedCount === 2) {
-    return "又完成一项，状态来了！";
+    return "第 2 项完成，状态来了！";
   }
 
-  return pickRandomMessage(["完成啦！你真棒", "任务完成，撒花！", "执行力上线！"]);
+  return "第 1 项完成，开局很棒！";
 }
 
-function getCompletionRateMessage(completionRate: number): string {
+function getCompletionRateMessage(completionRate: number, completedCount: number): string {
   if (completionRate >= 60) {
-    return pickRandomMessage(["快完成啦，再坚持一下！", "离今日目标越来越近了！", "状态越来越好了"]);
+    const messages = [
+      "离今日目标越来越近了！",
+      "状态越来越好了，继续前进！",
+      "今天的节奏已经热起来了！",
+    ];
+
+    return messages[completedCount % messages.length];
   }
 
   if (completionRate >= 30) {
-    return pickRandomMessage(["节奏不错，继续保持！", "今天已经完成不少啦！"]);
+    const messages = [
+      "节奏不错，继续保持！",
+      "今天已经完成不少啦！",
+      "一步一步，正在变得更顺！",
+    ];
+
+    return messages[completedCount % messages.length];
   }
 
-  return pickRandomMessage(["已经开始就很棒！", "小小一步，也是在前进"]);
+  const messages = [
+    "已经开始就很棒！",
+    "小小一步，也是在前进",
+    "认真生活的感觉来了",
+  ];
+
+  return messages[completedCount % messages.length];
 }
 
 function createCompletionFeedback(params: {
@@ -485,8 +571,9 @@ function createCompletionFeedback(params: {
     id: Date.now(),
     itemId: params.itemId,
     title: getCompletionCountMessage(params.completedCount),
-    detail: getCompletionRateMessage(completionRate),
+    detail: getCompletionRateMessage(completionRate, params.completedCount),
     completionRate,
+    variantIndex: (params.completedCount - 1) % COMPLETION_VARIANTS.length,
   };
 }
 
@@ -529,7 +616,7 @@ function cleanAuthUrl() {
 }
 
 function CardCompletionBurst({ feedback }: { feedback: CompletionFeedback }) {
-  const sparkles = ["🎉", "✨", "⭐", "🎀", "🎊", "✦"];
+  const variant = COMPLETION_VARIANTS[feedback.variantIndex] ?? COMPLETION_VARIANTS[0];
 
   return (
     <div
@@ -539,12 +626,20 @@ function CardCompletionBurst({ feedback }: { feedback: CompletionFeedback }) {
     >
       <motion.div
         key={feedback.id}
-        className="flex w-full max-w-[15rem] flex-col items-center gap-1.5 rounded-[1.25rem] border border-white/90 bg-white/95 px-3 py-3 text-center font-black text-pink-600 shadow-sticker backdrop-blur"
-        initial={{ opacity: 0, scale: 0.78, rotate: -1 }}
+        className={`flex w-full max-w-[15rem] flex-col items-center gap-1.5 rounded-[1.25rem] border px-3 py-3 text-center font-black shadow-sticker backdrop-blur ${variant.accentClass} ${variant.ringClass}`}
+        initial={{
+          opacity: 0,
+          x: variant.fromX,
+          y: variant.fromY,
+          scale: 0.78,
+          rotate: variant.rotate,
+        }}
         animate={{
           opacity: [0, 1, 1, 0],
+          x: [variant.fromX, 0, 0, -variant.fromX / 2],
+          y: [variant.fromY, 0, 0, -6],
           scale: [0.78, 1.05, 1, 0.96],
-          rotate: [-1, 1, 0, 1],
+          rotate: [variant.rotate, -variant.rotate / 2, 0, variant.rotate / 2],
         }}
         exit={{ opacity: 0, scale: 0.92 }}
         transition={{ duration: 1.45, ease: "easeOut", times: [0, 0.18, 0.78, 1] }}
@@ -552,21 +647,21 @@ function CardCompletionBurst({ feedback }: { feedback: CompletionFeedback }) {
         <span className="max-w-full break-words text-sm leading-5 sm:text-base">
           {feedback.title}
         </span>
-        <span className="max-w-full break-words text-xs font-bold leading-5 text-[#74667d]">
+        <span className={`max-w-full break-words text-xs font-bold leading-5 ${variant.detailClass}`}>
           {feedback.detail}
         </span>
         <span className="flex flex-wrap justify-center gap-1 text-base sm:text-lg">
-          {sparkles.map((sparkle, index) => (
+          {variant.sparkles.map((sparkle, index) => (
             <motion.span
               aria-hidden="true"
               className="inline-block"
               key={`${sparkle}-${index}`}
               animate={{
-                y: [0, -8, 0],
-                rotate: [0, 12, -8, 0],
-                scale: [1, 1.18, 1],
+                y: [0, index % 2 === 0 ? -9 : -6, 0],
+                rotate: [0, index % 2 === 0 ? 14 : -12, 0],
+                scale: [1, 1.16 + index * 0.02, 1],
               }}
-              transition={{ duration: 0.8, delay: index * 0.05 }}
+              transition={{ duration: 0.75 + index * 0.03, delay: index * 0.05 }}
             >
               {sparkle}
             </motion.span>
