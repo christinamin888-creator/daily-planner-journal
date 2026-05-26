@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { DragEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import html2canvas from "html2canvas";
@@ -81,6 +81,43 @@ const CATEGORY_OPTIONS = [
 
 type BuiltInCategory = (typeof CATEGORY_OPTIONS)[number];
 type Category = string;
+const PRIORITY_OPTIONS = [
+  {
+    id: "high",
+    icon: "🌟",
+    name: "重要优先",
+    hint: "今天必须完成",
+    sectionClass: "border-rose-100 bg-rose-50/55",
+    activeClass: "border-rose-300 bg-rose-100/80 ring-4 ring-rose-100",
+    cardBg: "bg-rose-50",
+    cardBorder: "border-rose-200",
+    badgeClass: "bg-rose-100 text-rose-700",
+  },
+  {
+    id: "medium",
+    icon: "🌿",
+    name: "正常推进",
+    hint: "尽量完成",
+    sectionClass: "border-sky-100 bg-sky-50/55",
+    activeClass: "border-sky-300 bg-sky-100/80 ring-4 ring-sky-100",
+    cardBg: "bg-sky-50",
+    cardBorder: "border-sky-200",
+    badgeClass: "bg-sky-100 text-sky-700",
+  },
+  {
+    id: "low",
+    icon: "☁️",
+    name: "有空再做",
+    hint: "有时间再处理",
+    sectionClass: "border-emerald-100 bg-emerald-50/55",
+    activeClass: "border-emerald-300 bg-emerald-100/80 ring-4 ring-emerald-100",
+    cardBg: "bg-emerald-50",
+    cardBorder: "border-emerald-200",
+    badgeClass: "bg-emerald-100 text-emerald-700",
+  },
+] as const;
+type TaskPriority = (typeof PRIORITY_OPTIONS)[number]["id"];
+const DEFAULT_PRIORITY: TaskPriority = "medium";
 
 type CustomCategory = {
   id: string;
@@ -95,6 +132,7 @@ type PlanItem = {
   category: Category;
   note: string;
   completed: boolean;
+  priority: TaskPriority;
   targetMinutes?: number;
   actualMinutes?: number;
   createdAt: number;
@@ -102,6 +140,12 @@ type PlanItem = {
 };
 
 type PlanBook = Record<string, PlanItem[]>;
+type PlanSearchResult = {
+  key: string;
+  date: string;
+  item: PlanItem;
+  index: number;
+};
 type CloudPayload = {
   plansByDate: PlanBook;
   deletedItemIds: string[];
@@ -138,6 +182,8 @@ type TaskTimerState = {
   countdownStartedAt: number | null;
 };
 
+type TaskTimersByTaskId = Record<string, TaskTimerState>;
+
 type CategoryStyle = {
   emoji: string;
   accent: string;
@@ -149,6 +195,7 @@ type CategoryStyle = {
 type PlanForm = {
   title: string;
   category: Category;
+  priority: TaskPriority;
   note: string;
   targetMinutes: string;
 };
@@ -890,6 +937,7 @@ const EXPORT_TEMPLATES: ExportTemplate[] = [
 const emptyForm: PlanForm = {
   title: "",
   category: "学习",
+  priority: DEFAULT_PRIORITY,
   note: "",
   targetMinutes: "",
 };
@@ -903,7 +951,7 @@ function loadPlanBook(): PlanBook {
     }
 
     const parsedData = JSON.parse(rawData) as PlanBook;
-    return parsedData && typeof parsedData === "object" ? parsedData : {};
+    return parsedData && typeof parsedData === "object" ? normalizePlanBook(parsedData) : {};
   } catch {
     return {};
   }
@@ -1007,11 +1055,23 @@ function normalizeMinutes(value: unknown): number | undefined {
   return undefined;
 }
 
+function normalizePriority(value: unknown): TaskPriority {
+  return PRIORITY_OPTIONS.some((option) => option.id === value)
+    ? (value as TaskPriority)
+    : DEFAULT_PRIORITY;
+}
+
+function getPriorityOption(priority: unknown) {
+  const normalizedPriority = normalizePriority(priority);
+  return PRIORITY_OPTIONS.find((option) => option.id === normalizedPriority) ?? PRIORITY_OPTIONS[1];
+}
+
 function normalizePlanBook(planBook: PlanBook): PlanBook {
   return Object.entries(planBook).reduce<PlanBook>((result, [date, items]) => {
     result[date] = items.map((item) => ({
       ...item,
       date: item.date || date,
+      priority: normalizePriority(item.priority),
       targetMinutes: normalizeMinutes(item.targetMinutes),
       actualMinutes: normalizeMinutes(item.actualMinutes),
       updatedAt: item.updatedAt ?? item.createdAt ?? Date.now(),
@@ -1060,6 +1120,7 @@ function mergePlanBooks(
       const normalizedItem = {
         ...item,
         date: item.date || date,
+        priority: normalizePriority(item.priority),
         updatedAt: item.updatedAt ?? item.createdAt ?? Date.now(),
       };
       const existingItem = itemMap.get(item.id);
@@ -1290,6 +1351,97 @@ function formatDisplayDate(dateValue: string): string {
   }).format(new Date(`${dateValue}T00:00:00`));
 }
 
+function formatDisplayDateWithYear(dateValue: string): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    weekday: "long",
+  }).format(new Date(`${dateValue}T00:00:00`));
+}
+
+function getPlanDateSearchValues(dateValue: string): string[] {
+  const [year = "", month = "", day = ""] = dateValue.split("-");
+  const monthNumber = Number(month);
+  const dayNumber = Number(day);
+  const compactMonth = Number.isFinite(monthNumber) && monthNumber > 0 ? String(monthNumber) : month;
+  const compactDay = Number.isFinite(dayNumber) && dayNumber > 0 ? String(dayNumber) : day;
+  const values = [
+    dateValue,
+    dateValue.replace(/-/g, "/"),
+    compactMonth && compactDay ? `${compactMonth}月${compactDay}日` : "",
+    year && compactMonth && compactDay ? `${year}年${compactMonth}月${compactDay}日` : "",
+  ];
+
+  try {
+    values.push(formatDisplayDate(dateValue));
+  } catch {
+    // Keep search resilient for older or manually edited date keys.
+  }
+
+  return values.filter(Boolean);
+}
+
+function formatPlanSearchDate(dateValue: string): string {
+  try {
+    return formatDisplayDate(dateValue);
+  } catch {
+    return dateValue;
+  }
+}
+
+function getPlanDateTime(dateValue: string): number {
+  const time = new Date(`${dateValue}T00:00:00`).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function getPlanSearchSummary(note: string | undefined): string {
+  const normalizedNote = (note ?? "").trim().replace(/\s+/g, " ");
+  if (normalizedNote.length <= 42) {
+    return normalizedNote;
+  }
+
+  return `${normalizedNote.slice(0, 42)}...`;
+}
+
+function searchPlans(query: string, planBook: PlanBook): PlanSearchResult[] {
+  const normalizedQuery = query.trim().toLowerCase();
+
+  if (!normalizedQuery) {
+    return [];
+  }
+
+  return Object.entries(planBook)
+    .flatMap(([date, items]) =>
+      (Array.isArray(items) ? items : []).map((item, index) => ({
+        date,
+        index,
+        item,
+        key: `${date}-${item.id || index}`,
+      })),
+    )
+    .filter(({ date, item }) => {
+      const searchableValues = [
+        item.title ?? "",
+        item.note ?? "",
+        item.category ?? "",
+        ...getPlanDateSearchValues(date),
+      ];
+
+      return searchableValues.some((value) => value.toLowerCase().includes(normalizedQuery));
+    })
+    .sort((left, right) => {
+      const dateDiff = getPlanDateTime(right.date) - getPlanDateTime(left.date);
+
+      if (dateDiff !== 0) {
+        return dateDiff;
+      }
+
+      return (right.item.updatedAt ?? right.item.createdAt ?? 0) - (left.item.updatedAt ?? left.item.createdAt ?? 0);
+    })
+    .slice(0, 20);
+}
+
 function createId(): string {
   if (crypto.randomUUID) {
     return crypto.randomUUID();
@@ -1334,7 +1486,7 @@ type ExportDensity = {
 };
 
 function getExportDensity(planCount: number, template: ExportTemplate): ExportDensity {
-  const taskTitleSize = Math.max(template.taskTitleSize + 7, 26);
+  const taskTitleSize = Math.max(template.taskTitleSize + 4, 23);
 
   if (planCount <= 1) {
     return {
@@ -2618,10 +2770,12 @@ function ExportPrimaryPinkTemplate({
   const maxVisibleItems = planCount > 10 ? 15 : 12;
   const displayPlans = plans.slice(0, maxVisibleItems);
   const overflowCount = Math.max(planCount - displayPlans.length, 0);
-  const dateLabel = formatDisplayDate(selectedDate).replace("日星期", "日 星期");
+  const dateLabel = formatDisplayDateWithYear(selectedDate);
   const denseTaskGrid = planCount > 8;
-  const taskTitleSize = planCount <= 8 ? 34 : 30;
+  const taskTitleSize = planCount <= 4 ? 30 : planCount <= 8 ? 27 : 24;
+  const taskTitleLineClamp = planCount <= 8 ? undefined : 3;
   const noteSize = planCount <= 4 ? 20 : planCount <= 8 ? 18 : 0;
+  const noteLineClamp = planCount <= 8 ? undefined : 1;
   const showNotes = planCount <= 8;
   const cardMinHeight = planCount <= 2 ? 380 : planCount <= 4 ? 270 : planCount <= 6 ? 172 : planCount <= 8 ? 150 : 116;
   const taskTextIndent = 48;
@@ -2719,32 +2873,13 @@ function ExportPrimaryPinkTemplate({
             zIndex: 0,
           }}
         />
-        {getPrimaryPinkPageStickers(plans, selectedDate).map((sticker, stickerIndex) => (
-          <img
-            key={`primary-page-sticker-${stickerIndex}`}
-            alt=""
-            aria-hidden="true"
-            decoding="sync"
-            loading="eager"
-            src={sticker.src}
-            style={{
-              filter: "drop-shadow(0 14px 20px rgba(166, 94, 130, 0.13))",
-              pointerEvents: "none",
-              position: "absolute",
-              userSelect: "none",
-              zIndex: 2,
-              ...sticker.style,
-            }}
-          />
-        ))}
-
 	        <header
 	          style={{
 	            display: "grid",
 	            gap: "24px",
 	            gridTemplateColumns: "minmax(0, 1fr) 290px",
 	            position: "relative",
-	            zIndex: 1,
+	            zIndex: 4,
 	          }}
 	        >
           <div
@@ -2997,7 +3132,7 @@ function ExportPrimaryPinkTemplate({
             flexDirection: "column",
             minHeight: 0,
             position: "relative",
-            zIndex: 1,
+            zIndex: 4,
           }}
         >
           <div
@@ -3028,6 +3163,24 @@ function ExportPrimaryPinkTemplate({
                 width: "154px",
               }}
             />
+            {getPrimaryPinkPageStickers(plans, selectedDate).map((sticker, stickerIndex) => (
+              <img
+                key={`primary-page-sticker-${stickerIndex}`}
+                alt=""
+                aria-hidden="true"
+                decoding="sync"
+                loading="eager"
+                src={sticker.src}
+                style={{
+                  filter: "drop-shadow(0 14px 20px rgba(166, 94, 130, 0.16))",
+                  pointerEvents: "none",
+                  position: "absolute",
+                  userSelect: "none",
+                  zIndex: 1,
+                  ...sticker.style,
+                }}
+              />
+            ))}
             {displayPlans.length === 0 ? (
               <div
                 style={{
@@ -3041,7 +3194,9 @@ function ExportPrimaryPinkTemplate({
                   height: "100%",
                   justifyContent: "center",
                   minHeight: "360px",
+                  position: "relative",
                   textAlign: "center",
+                  zIndex: 5,
                 }}
               >
                 今天还没有计划
@@ -3057,6 +3212,8 @@ function ExportPrimaryPinkTemplate({
                   gridTemplateRows: sectionRows,
                   height: "100%",
                   minHeight: 0,
+                  position: "relative",
+                  zIndex: 5,
                 }}
               >
                 {displayPlans.map((item, index) => {
@@ -3084,17 +3241,22 @@ function ExportPrimaryPinkTemplate({
 	                        isolation: "isolate",
 	                        justifyContent: "flex-start",
 	                        minHeight: `${cardMinHeight}px`,
+                          overflow: "visible",
 	                        padding: `${taskCardPaddingTop}px ${taskCardPaddingX}px ${taskCardPaddingBottom}px`,
 	                        position: "relative",
+                          zIndex: 6,
 	                      }}
 	                    >
 	                      <div
 	                        className="export-task-line"
 	                        style={{
+	                          alignItems: "flex-start",
 	                          color: item.completed ? "#806d7b" : "#3f3146",
+	                          display: "flex",
 	                          fontSize: `${taskTitleSize}px`,
 	                          fontWeight: 800,
-	                          lineHeight: 1.15,
+	                          gap: columns === 3 ? "8px" : "12px",
+	                          lineHeight: 1.28,
 	                          margin: 0,
 	                          maxWidth: "100%",
 	                          overflowWrap: "anywhere",
@@ -3111,11 +3273,11 @@ function ExportPrimaryPinkTemplate({
 	                          style={{
 	                            color: item.completed ? cardAccent : "#d76c9d",
 	                            display: "inline-block",
-	                            fontWeight: 900,
+	                            flex: "0 0 auto",
+	                            fontWeight: 800,
 	                            lineHeight: "inherit",
-	                            marginRight: "12px",
 	                            textAlign: "center",
-	                            width: "36px",
+	                            width: columns === 3 ? "28px" : "36px",
 	                          }}
 	                        >
 	                          {item.completed ? "☑" : "☐"}
@@ -3123,24 +3285,53 @@ function ExportPrimaryPinkTemplate({
 	                        <span
 	                          className="export-task-text"
 	                          style={{
-	                            lineHeight: "inherit",
+	                            display: taskTitleLineClamp ? "-webkit-box" : "block",
+	                            flex: "1 1 auto",
 	                            margin: 0,
+	                            minWidth: 0,
+	                            overflow: taskTitleLineClamp ? "hidden" : "visible",
 	                            padding: 0,
+	                            WebkitBoxOrient: taskTitleLineClamp ? "vertical" : undefined,
+	                            WebkitLineClamp: taskTitleLineClamp,
+	                            lineHeight: "inherit",
 	                          }}
 	                        >
 	                          {item.title}
 	                        </span>
                       </div>
 
+                      {noteVisible ? (
+                        <div
+                          style={{
+                            color: "#8f6f82",
+                            display: noteLineClamp ? "-webkit-box" : "block",
+                            fontSize: `${noteSize}px`,
+	                            fontWeight: 750,
+	                            lineHeight: 1.45,
+	                            marginTop: columns === 3 ? "8px" : "10px",
+	                            overflow: noteLineClamp ? "hidden" : "visible",
+                            overflowWrap: "anywhere",
+                            paddingLeft: columns === 3 ? 0 : `${taskTextIndent}px`,
+                            position: "relative",
+	                            wordBreak: "break-word",
+	                            WebkitBoxOrient: noteLineClamp ? "vertical" : undefined,
+	                            WebkitLineClamp: noteLineClamp,
+	                            zIndex: 2,
+                          }}
+                        >
+                          {item.note}
+                        </div>
+                      ) : null}
+
                       {durationText ? (
                         <div
                           className="export-task-time-row"
                           style={{
                             color: "#987486",
-                            fontSize: columns === 3 ? "16px" : "20px",
-                            fontWeight: 800,
-                            lineHeight: 1.35,
-                            marginTop: "10px",
+                            fontSize: columns === 3 ? "15px" : "17px",
+                            fontWeight: 750,
+                            lineHeight: 1.42,
+                            marginTop: noteVisible ? "8px" : "10px",
                             overflowWrap: "anywhere",
                             paddingLeft: columns === 3 ? 0 : `${taskTextIndent}px`,
                             position: "relative",
@@ -3149,26 +3340,6 @@ function ExportPrimaryPinkTemplate({
                           }}
                         >
                           {durationText}
-                        </div>
-                      ) : null}
-
-                      {noteVisible ? (
-                        <div
-                          style={{
-                            color: "#8f6f82",
-                            fontSize: `${noteSize}px`,
-	                            fontWeight: 800,
-	                            lineHeight: 1.45,
-	                            marginTop: columns === 3 ? "12px" : "16px",
-	                            overflowWrap: "anywhere",
-	                            paddingLeft: columns === 3 ? 0 : `${taskTextIndent}px`,
-	                            position: "relative",
-	                            whiteSpace: "pre-wrap",
-	                            wordBreak: "break-word",
-	                            zIndex: 2,
-                          }}
-                        >
-                          {item.note}
                         </div>
                       ) : null}
                     </article>
@@ -3253,7 +3424,7 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
   const density = getExportDensity(plans.length, template);
   const displayPlans = plans.slice(0, density.maxVisibleItems);
   const overflowCount = Math.max(plans.length - displayPlans.length, 0);
-  const dateLabel = formatDisplayDate(selectedDate).replace("日星期", "日 星期");
+  const dateLabel = formatDisplayDateWithYear(selectedDate);
   const footerText = encouragementText ?? template.footer;
   const dailyWord = getExportDailyWord(selectedDate, template);
   const isMedicalTemplate = template.id === "medical-study";
@@ -3267,6 +3438,7 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
   const borderWidth = template.cardBorderStyle === "double" ? "4px" : "2px";
   const cardBorderStyle = template.cardBorderStyle === "double" ? "double" : "solid";
   const decorativeBorder = `${borderWidth} ${cardBorderStyle}`;
+  const shouldClampExportTaskText = plans.length > 10;
   const primarySticker = template.decorations[0] ?? "✦";
   const secondarySticker = template.decorations[1] ?? "⭐";
   const thirdSticker = template.decorations[2] ?? "♡";
@@ -3765,7 +3937,7 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
                   pointerEvents: "none",
                   position: "absolute",
                   userSelect: "none",
-                  zIndex: 2,
+                  zIndex: 1,
                   ...sticker.style,
                 }}
               />
@@ -3800,7 +3972,7 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
                 gridTemplateColumns: `repeat(${density.columns}, minmax(0, 1fr))`,
                 minHeight: 0,
                 position: "relative",
-                zIndex: 1,
+                zIndex: 3,
               }}
             >
               {displayPlans.map((item, index) => {
@@ -3831,8 +4003,10 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
 	                      gap: density.columns === 3 ? "8px" : "10px",
 	                      justifyContent: "flex-start",
 	                      minHeight: `${density.cardHeight}px`,
+                        overflow: "visible",
 	                      padding: `${density.cardPadding}px`,
                       position: "relative",
+                      zIndex: 4,
 	                    }}
 	                  >
 	                    <div
@@ -3903,19 +4077,19 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
                         minHeight: 0,
                         minWidth: 0,
                         position: "relative",
-                        zIndex: 1,
+                        zIndex: 5,
                       }}
                     >
                       <div
                         style={{
-                          alignItems: "baseline",
+                          alignItems: "flex-start",
                           color: item.completed ? template.muted : template.ink,
                           display: "flex",
-                          gap: "12px",
+                          gap: density.columns === 3 ? "8px" : "12px",
                           fontSize: `${density.taskTitleSize}px`,
-                          fontWeight: 900,
-                          lineHeight: 1.24,
-                          marginBottom: "4px",
+                          fontWeight: 850,
+                          lineHeight: 1.28,
+                          marginBottom: "0",
                           overflowWrap: "anywhere",
                           wordBreak: "break-word",
                         }}
@@ -3925,7 +4099,7 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
                           style={{
                             color: item.completed ? cardAccent : template.checkbox,
                             flex: "0 0 auto",
-                            fontWeight: 950,
+                            fontWeight: 800,
                             lineHeight: "inherit",
                           }}
                         >
@@ -3933,8 +4107,14 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
                         </span>
                         <span
                           style={{
+                            display: shouldClampExportTaskText ? "-webkit-box" : "block",
+                            flex: "1 1 auto",
                             lineHeight: "inherit",
+                            minWidth: 0,
+                            overflow: shouldClampExportTaskText ? "hidden" : "visible",
                             textDecoration: "none",
+                            WebkitBoxOrient: shouldClampExportTaskText ? "vertical" : undefined,
+                            WebkitLineClamp: shouldClampExportTaskText ? density.titleLines : undefined,
                           }}
                         >
                           {item.title}
@@ -3945,14 +4125,17 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
                         <div
                           style={{
                             color: template.muted,
-                            fontSize: `${Math.max(density.noteSize + 6, 18)}px`,
-                            fontWeight: 800,
-                            lineHeight: 1.35,
-                            marginTop: "6px",
+                            display: shouldClampExportTaskText ? "-webkit-box" : "block",
+                            fontSize: `${Math.max(density.noteSize + 3, 15)}px`,
+                            fontWeight: 750,
+                            lineHeight: 1.4,
+                            marginTop: "8px",
+                            overflow: shouldClampExportTaskText ? "hidden" : "visible",
                             paddingLeft: density.columns === 3 ? "0" : "40px",
-                            whiteSpace: "pre-wrap",
                             overflowWrap: "anywhere",
                             wordBreak: "break-word",
+                            WebkitBoxOrient: shouldClampExportTaskText ? "vertical" : undefined,
+                            WebkitLineClamp: shouldClampExportTaskText ? density.noteLines : undefined,
                           }}
                         >
                           {item.note}
@@ -3963,10 +4146,10 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
                         <div
                           style={{
                             color: template.muted,
-                            fontSize: `${Math.max(density.metaSize + 5, 16)}px`,
-                            fontWeight: 800,
-                            lineHeight: 1.35,
-                            marginTop: noteVisible ? "4px" : "8px",
+                            fontSize: `${Math.max(density.metaSize + 3, 14)}px`,
+                            fontWeight: 750,
+                            lineHeight: 1.42,
+                            marginTop: noteVisible ? "8px" : "10px",
                             overflowWrap: "anywhere",
                             paddingLeft: density.columns === 3 ? "0" : "40px",
                             wordBreak: "break-word",
@@ -4069,7 +4252,12 @@ function App() {
   const [actualEditId, setActualEditId] = useState<string | null>(null);
   const [actualMinutesDraft, setActualMinutesDraft] = useState<string>("");
   const [actualMinutesError, setActualMinutesError] = useState<string>("");
-  const [taskTimer, setTaskTimer] = useState<TaskTimerState | null>(null);
+  const [planSearchQuery, setPlanSearchQuery] = useState<string>("");
+  const [isPlanSearchOpen, setIsPlanSearchOpen] = useState<boolean>(false);
+  const [highlightedTaskId, setHighlightedTaskId] = useState<string | null>(null);
+  const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
+  const [dragOverPriority, setDragOverPriority] = useState<TaskPriority | null>(null);
+  const [taskTimersByTaskId, setTaskTimersByTaskId] = useState<TaskTimersByTaskId>({});
   const [timerTick, setTimerTick] = useState<number>(() => Date.now());
   const [timerNotice, setTimerNotice] = useState<string>("");
   const [customCategories, setCustomCategories] = useState<CustomCategory[]>(() =>
@@ -4077,6 +4265,7 @@ function App() {
   );
   const [customCategoryInput, setCustomCategoryInput] = useState<string>("");
   const [customCategoryStatus, setCustomCategoryStatus] = useState<string>("");
+  const [isCustomCategoryOpen, setIsCustomCategoryOpen] = useState<boolean>(false);
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [exportEncouragement, setExportEncouragement] = useState<string>(() => getRandomPrimaryEncouragement());
   const [selectedExportTemplateId, setSelectedExportTemplateId] = useState<string>(
@@ -4104,6 +4293,7 @@ function App() {
   const exportRef = useRef<HTMLDivElement | null>(null);
   const feedbackTimer = useRef<number | null>(null);
   const timerNoticeTimer = useRef<number | null>(null);
+  const highlightedTaskTimer = useRef<number | null>(null);
   const cloudTimer = useRef<number | null>(null);
   const cloudReady = useRef<boolean>(false);
   const latestPlanBook = useRef<PlanBook>(plansByDate);
@@ -4134,6 +4324,18 @@ function App() {
     EXPORT_TEMPLATES.find((template) => template.id === selectedExportTemplateId) ??
     EXPORT_TEMPLATES[0];
   const plans = plansByDate[selectedDate] ?? [];
+  const planSearchResults = useMemo(
+    () => searchPlans(planSearchQuery, plansByDate),
+    [planSearchQuery, plansByDate],
+  );
+  const plansByPriority = useMemo(
+    () =>
+      PRIORITY_OPTIONS.map((priorityOption) => ({
+        ...priorityOption,
+        plans: plans.filter((item) => normalizePriority(item.priority) === priorityOption.id),
+      })),
+    [plans],
+  );
   const completedCount = plans.filter((item) => item.completed).length;
   const progress = plans.length > 0 ? Math.round((completedCount / plans.length) * 100) : 0;
 
@@ -4166,11 +4368,18 @@ function App() {
       if (timerNoticeTimer.current) {
         window.clearTimeout(timerNoticeTimer.current);
       }
+      if (highlightedTaskTimer.current) {
+        window.clearTimeout(highlightedTaskTimer.current);
+      }
     };
   }, []);
 
   useEffect(() => {
-    if (!taskTimer?.isRunning && !taskTimer?.countdownIsRunning) {
+    const hasRunningTimer = Object.values(taskTimersByTaskId).some(
+      (timer) => timer.isRunning || timer.countdownIsRunning,
+    );
+
+    if (!hasRunningTimer) {
       return;
     }
 
@@ -4182,43 +4391,46 @@ function App() {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [
-    taskTimer?.countdownIsRunning,
-    taskTimer?.countdownStartedAt,
-    taskTimer?.isRunning,
-    taskTimer?.itemId,
-    taskTimer?.startedAt,
-  ]);
+  }, [taskTimersByTaskId]);
 
   useEffect(() => {
-    if (!taskTimer?.countdownIsRunning) {
-      return;
-    }
+    const finishedCountdownIds = Object.entries(taskTimersByTaskId)
+      .filter(([, timer]) => timer.countdownIsRunning && getCountdownRemainingSeconds(timer, timerTick) <= 0)
+      .map(([itemId]) => itemId);
 
-    if (getCountdownRemainingSeconds(taskTimer, timerTick) > 0) {
+    if (finishedCountdownIds.length === 0) {
       return;
     }
 
     showTimerNotice("倒计时结束啦！");
-    setTaskTimer((currentTimer) => {
-      if (!currentTimer || currentTimer.itemId !== taskTimer.itemId) {
-        return currentTimer;
-      }
+    setTaskTimersByTaskId((currentTimers) => {
+      const nextTimers = { ...currentTimers };
 
-      if (!currentTimer.forwardHasStarted && !currentTimer.isRunning) {
-        return null;
-      }
+      finishedCountdownIds.forEach((itemId) => {
+        const currentTimer = currentTimers[itemId];
 
-      return {
-        ...currentTimer,
-        countdownHasStarted: false,
-        countdownIsRunning: false,
-        countdownRemainingSeconds: currentTimer.countdownInitialSeconds,
-        countdownStartedAt: null,
-      };
+        if (!currentTimer) {
+          return;
+        }
+
+        if (!currentTimer.forwardHasStarted && !currentTimer.isRunning) {
+          delete nextTimers[itemId];
+          return;
+        }
+
+        nextTimers[itemId] = {
+          ...currentTimer,
+          countdownHasStarted: false,
+          countdownIsRunning: false,
+          countdownRemainingSeconds: currentTimer.countdownInitialSeconds,
+          countdownStartedAt: null,
+        };
+      });
+
+      return nextTimers;
     });
     setTimerTick(Date.now());
-  }, [taskTimer, timerTick]);
+  }, [taskTimersByTaskId, timerTick]);
 
   useEffect(() => {
     if (!isSupabaseConfigured) {
@@ -4394,6 +4606,82 @@ function App() {
     }, 2400);
   };
 
+  const updateTaskPriority = (itemId: string, priority: TaskPriority) => {
+    const nextPriority = normalizePriority(priority);
+    const updatedAt = Date.now();
+
+    updatePlansForSelectedDate((currentPlans) =>
+      currentPlans.map((item) =>
+        item.id === itemId && normalizePriority(item.priority) !== nextPriority
+          ? {
+              ...item,
+              priority: nextPriority,
+              updatedAt,
+            }
+          : item,
+      ),
+    );
+  };
+
+  const handleTaskDragStart = (event: DragEvent<HTMLElement>, item: PlanItem) => {
+    setDraggedTaskId(item.id);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", item.id);
+  };
+
+  const handleTaskDragEnd = () => {
+    setDraggedTaskId(null);
+    setDragOverPriority(null);
+  };
+
+  const handlePriorityDragOver = (event: DragEvent<HTMLElement>, priority: TaskPriority) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setDragOverPriority(priority);
+  };
+
+  const handlePriorityDrop = (event: DragEvent<HTMLElement>, priority: TaskPriority) => {
+    event.preventDefault();
+    const itemId = event.dataTransfer.getData("text/plain") || draggedTaskId;
+
+    if (itemId) {
+      updateTaskPriority(itemId, priority);
+    }
+
+    setDraggedTaskId(null);
+    setDragOverPriority(null);
+  };
+
+  const jumpToPlanSearchResult = (result: PlanSearchResult) => {
+    setSelectedDate(result.date);
+    resetForm();
+    setActualEditId(null);
+    setActualMinutesDraft("");
+    setActualMinutesError("");
+    setIsPlanSearchOpen(false);
+
+    if (!result.item.id) {
+      return;
+    }
+
+    setHighlightedTaskId(result.item.id);
+
+    if (highlightedTaskTimer.current) {
+      window.clearTimeout(highlightedTaskTimer.current);
+    }
+
+    window.setTimeout(() => {
+      document
+        .getElementById(`task-${result.item.id}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 80);
+
+    highlightedTaskTimer.current = window.setTimeout(() => {
+      setHighlightedTaskId(null);
+      highlightedTaskTimer.current = null;
+    }, 1800);
+  };
+
   const pushToCloud = async (userId: string) => {
     if (!isSupabaseConfigured) {
       setCloudStatus("Supabase 环境变量未配置，本地模式");
@@ -4564,6 +4852,7 @@ function App() {
     setForm((current) => ({ ...current, category: name }));
     setCustomCategoryInput("");
     setCustomCategoryStatus("已添加自定义分类");
+    setIsCustomCategoryOpen(false);
   };
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -4589,6 +4878,7 @@ function App() {
                 ...item,
                 title,
                 category: form.category,
+                priority: form.priority,
                 note: form.note.trim(),
                 targetMinutes,
                 updatedAt,
@@ -4605,6 +4895,7 @@ function App() {
       date: selectedDate,
       title,
       category: form.category,
+      priority: form.priority,
       note: form.note.trim(),
       completed: false,
       targetMinutes,
@@ -4621,6 +4912,7 @@ function App() {
     setForm({
       title: item.title,
       category: item.category,
+      priority: normalizePriority(item.priority),
       note: item.note,
       targetMinutes: item.targetMinutes ? String(item.targetMinutes) : "",
     });
@@ -4637,7 +4929,11 @@ function App() {
       setActualMinutesDraft("");
       setActualMinutesError("");
     }
-    setTaskTimer((currentTimer) => (currentTimer?.itemId === id ? null : currentTimer));
+    setTaskTimersByTaskId((currentTimers) => {
+      const nextTimers = { ...currentTimers };
+      delete nextTimers[id];
+      return nextTimers;
+    });
   };
 
   const startActualMinutesEdit = (item: PlanItem) => {
@@ -4679,43 +4975,28 @@ function App() {
       return;
     }
 
-    if (taskTimer && taskTimer.itemId !== item.id) {
-      showTimerNotice("已有任务正在计时，请先暂停或完成当前任务。");
-      return;
-    }
-
     clearTimerNotice();
 
     const now = Date.now();
     setTimerTick(now);
+    const currentTimer = taskTimersByTaskId[item.id];
+    const nextBaseTimer = currentTimer ?? createTaskTimerState(item.id);
+    const elapsedSeconds = getTaskTimerElapsedSeconds(nextBaseTimer, now);
 
-    if (!taskTimer) {
-      setTaskTimer({
-        ...createTaskTimerState(item.id),
+    setTaskTimersByTaskId((currentTimers) => ({
+      ...currentTimers,
+      [item.id]: {
+        ...nextBaseTimer,
+        elapsedSeconds,
         forwardHasStarted: true,
-        isRunning: true,
-        startedAt: now,
-      });
-      return;
-    }
-
-    const elapsedSeconds = getTaskTimerElapsedSeconds(taskTimer, now);
-    setTaskTimer({
-      ...taskTimer,
-      elapsedSeconds,
-      forwardHasStarted: true,
-      isRunning: !taskTimer.isRunning,
-      startedAt: taskTimer.isRunning ? null : now,
-    });
+        isRunning: !nextBaseTimer.isRunning,
+        startedAt: nextBaseTimer.isRunning ? null : now,
+      },
+    }));
   };
 
   const handleCountdownClick = (item: PlanItem, minutes: number) => {
     if (item.completed) {
-      return;
-    }
-
-    if (taskTimer && taskTimer.itemId !== item.id) {
-      showTimerNotice("已有任务正在计时，请先暂停或完成当前任务。");
       return;
     }
 
@@ -4724,54 +5005,50 @@ function App() {
     const now = Date.now();
     const selectedSeconds = minutes * 60;
     setTimerTick(now);
-
-    if (!taskTimer) {
-      setTaskTimer({
-        ...createTaskTimerState(item.id),
-        countdownHasStarted: true,
-        countdownInitialSeconds: selectedSeconds,
-        countdownIsRunning: true,
-        countdownRemainingSeconds: selectedSeconds,
-        countdownStartedAt: now,
-      });
-      return;
-    }
-
-    const remainingSeconds = getCountdownRemainingSeconds(taskTimer, now);
+    const currentTimer = taskTimersByTaskId[item.id];
+    const nextBaseTimer = currentTimer ?? createTaskTimerState(item.id);
+    const remainingSeconds = getCountdownRemainingSeconds(nextBaseTimer, now);
     const isSameCountdown =
-      taskTimer.countdownInitialSeconds === selectedSeconds &&
-      (taskTimer.countdownHasStarted || taskTimer.countdownIsRunning);
+      nextBaseTimer.countdownInitialSeconds === selectedSeconds &&
+      (nextBaseTimer.countdownHasStarted || nextBaseTimer.countdownIsRunning);
 
     if (!isSameCountdown) {
-      setTaskTimer({
-        ...taskTimer,
-        countdownHasStarted: true,
-        countdownInitialSeconds: selectedSeconds,
-        countdownIsRunning: true,
-        countdownRemainingSeconds: selectedSeconds,
-        countdownStartedAt: now,
-      });
+      setTaskTimersByTaskId((currentTimers) => ({
+        ...currentTimers,
+        [item.id]: {
+          ...nextBaseTimer,
+          countdownHasStarted: true,
+          countdownInitialSeconds: selectedSeconds,
+          countdownIsRunning: true,
+          countdownRemainingSeconds: selectedSeconds,
+          countdownStartedAt: now,
+        },
+      }));
       return;
     }
 
-    setTaskTimer({
-      ...taskTimer,
-      countdownHasStarted: true,
-      countdownInitialSeconds: selectedSeconds,
-      countdownIsRunning: !taskTimer.countdownIsRunning,
-      countdownRemainingSeconds: taskTimer.countdownIsRunning
-        ? remainingSeconds
-        : remainingSeconds > 0
+    setTaskTimersByTaskId((currentTimers) => ({
+      ...currentTimers,
+      [item.id]: {
+        ...nextBaseTimer,
+        countdownHasStarted: true,
+        countdownInitialSeconds: selectedSeconds,
+        countdownIsRunning: !nextBaseTimer.countdownIsRunning,
+        countdownRemainingSeconds: nextBaseTimer.countdownIsRunning
           ? remainingSeconds
-          : selectedSeconds,
-      countdownStartedAt: taskTimer.countdownIsRunning ? null : now,
-    });
+          : remainingSeconds > 0
+            ? remainingSeconds
+            : selectedSeconds,
+        countdownStartedAt: nextBaseTimer.countdownIsRunning ? null : now,
+      },
+    }));
   };
 
   const handleToggle = (id: string) => {
     const targetPlan = plans.find((item) => item.id === id);
     const now = Date.now();
-    const hasTimerForTask = taskTimer?.itemId === id;
+    const taskTimer = taskTimersByTaskId[id];
+    const hasTimerForTask = Boolean(taskTimer);
     const timerElapsedSeconds =
       hasTimerForTask && taskTimer ? getTaskTimerElapsedSeconds(taskTimer, now) : 0;
     const hasForwardTimer = Boolean(
@@ -4799,7 +5076,11 @@ function App() {
 
     if (hasTimerForTask) {
       clearTimerNotice();
-      setTaskTimer(null);
+      setTaskTimersByTaskId((currentTimers) => {
+        const nextTimers = { ...currentTimers };
+        delete nextTimers[id];
+        return nextTimers;
+      });
       setTimerTick(now);
     }
 
@@ -4838,7 +5119,7 @@ function App() {
     updatePlansForSelectedDate(() => []);
     setDeletedItemIds((current) => uniqueValues([...current, ...plans.map((item) => item.id)]));
     cancelActualMinutesEdit();
-    setTaskTimer(null);
+    setTaskTimersByTaskId({});
     clearTimerNotice();
     resetForm();
   };
@@ -4911,13 +5192,89 @@ function App() {
   return (
     <main className="min-h-screen bg-[#fff8ef] bg-[linear-gradient(180deg,#fff8ef_0%,#f6f1ff_48%,#edf8ff_100%)] px-4 py-6 text-[#46394f] sm:px-6 lg:px-8">
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
-        <header className="flex flex-col gap-4 rounded-[2rem] border border-white/80 bg-white/70 p-5 shadow-sticker backdrop-blur md:flex-row md:items-center md:justify-between">
+        <header className="relative z-[1000] flex flex-col gap-4 overflow-visible rounded-[2rem] border border-white/80 bg-white/70 p-5 shadow-sticker backdrop-blur md:flex-row md:items-center md:justify-between">
           <div>
             <p className="mb-1 text-sm font-semibold text-pink-500">Daily Planner Journal</p>
             <h1 className="text-3xl font-black tracking-normal text-[#382b44] sm:text-4xl">
               今日计划手帐
             </h1>
             <p className="mt-2 text-sm text-[#76687f]">{formatDisplayDate(selectedDate)}</p>
+          </div>
+
+          <div className="relative z-[1001] w-full md:max-w-md md:flex-1">
+            <label className="mb-2 block text-sm font-bold text-[#6f5d78]" htmlFor="plan-search">
+              历史检索
+            </label>
+            <input
+              className="w-full rounded-2xl border border-sky-100 bg-white/90 px-4 py-3 text-sm font-bold text-[#46394f] shadow-sm outline-none transition placeholder:text-[#b8aabd] focus:border-sky-300 focus:ring-4 focus:ring-sky-100"
+              id="plan-search"
+              placeholder="搜索任务标题、备注、分类"
+              type="search"
+              value={planSearchQuery}
+              onChange={(event) => {
+                const nextQuery = event.target.value;
+                setPlanSearchQuery(nextQuery);
+                setIsPlanSearchOpen(Boolean(nextQuery.trim()));
+              }}
+              onFocus={() => {
+                if (planSearchQuery.trim()) {
+                  setIsPlanSearchOpen(true);
+                }
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  setIsPlanSearchOpen(false);
+                }
+              }}
+            />
+            {planSearchQuery.trim() && isPlanSearchOpen ? (
+              <div className="absolute left-0 right-0 top-[calc(100%+8px)] z-[9999] max-h-[360px] overflow-y-auto rounded-[1.35rem] border border-sky-100 bg-white/95 p-2 shadow-2xl shadow-sky-200/70 backdrop-blur">
+                {planSearchResults.length > 0 ? (
+                  <div className="space-y-2">
+                    {planSearchResults.map((result) => {
+                      const noteSummary = getPlanSearchSummary(result.item.note);
+
+                      return (
+                        <button
+                          className="w-full rounded-2xl bg-[#f7fbff] px-3 py-2.5 text-left transition hover:bg-sky-50 focus:outline-none focus:ring-4 focus:ring-sky-100"
+                          key={result.key}
+                          type="button"
+                          onClick={() => jumpToPlanSearchResult(result)}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="min-w-0 break-words text-sm font-black text-[#3f3349]">
+                              {result.item.title || "未命名计划"}
+                            </span>
+                            <span
+                              className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-black ${
+                                result.item.completed
+                                  ? "bg-emerald-50 text-emerald-700"
+                                  : "bg-pink-50 text-pink-600"
+                              }`}
+                            >
+                              {result.item.completed ? "已完成" : "未完成"}
+                            </span>
+                          </div>
+                          <p className="mt-1 text-xs font-bold text-[#7b6c84]">
+                            {result.date} · {formatPlanSearchDate(result.date)} ·{" "}
+                            {result.item.category || "未分类"}
+                          </p>
+                          {noteSummary ? (
+                            <p className="mt-1 break-words text-xs text-[#8b7b91]">
+                              {noteSummary}
+                            </p>
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="rounded-2xl bg-sky-50/70 px-4 py-3 text-sm font-black text-[#6f5d78]">
+                    没有找到相关计划
+                  </div>
+                )}
+              </div>
+            ) : null}
           </div>
 
           <div className="flex flex-col gap-3 sm:min-w-80">
@@ -4938,9 +5295,9 @@ function App() {
         </header>
 
         <section className="grid gap-6 lg:grid-cols-[minmax(280px,360px)_1fr]">
-          <aside className="h-fit rounded-[2rem] border border-white/80 bg-white/80 p-5 shadow-sticker backdrop-blur">
-            <section className="mb-5 rounded-[1.5rem] border border-dashed border-violet-200 bg-violet-50/70 p-4">
-              <div className="mb-3 flex items-start justify-between gap-3">
+          <aside className="h-fit rounded-[2rem] border border-white/80 bg-white/80 p-4 shadow-sticker backdrop-blur">
+            <section className="mb-3 rounded-[1.5rem] border border-dashed border-violet-200 bg-violet-50/70 p-3">
+              <div className="mb-2 flex items-start justify-between gap-3">
                 <div>
                   <p className="text-sm font-black text-[#6f5d78]">邮箱账号</p>
                   <p className="mt-1 text-xs font-bold text-[#8a7a94]">
@@ -4955,8 +5312,8 @@ function App() {
               </div>
 
               {currentUser && authMode !== "update-password" ? (
-                <div className="space-y-3">
-                  <div className="rounded-2xl bg-white/80 px-4 py-3">
+                <div className="space-y-2">
+                  <div className="rounded-2xl bg-white/80 px-3 py-2">
                     <p className="break-all text-sm font-black text-[#46394f]">
                       {currentUser.email ?? "已登录账号"}
                     </p>
@@ -4965,7 +5322,7 @@ function App() {
                     </p>
                   </div>
                   <button
-                    className="w-full rounded-2xl border border-violet-200 bg-white px-4 py-3 text-sm font-black text-violet-700 transition hover:bg-violet-100 disabled:opacity-50"
+                    className="w-full rounded-2xl border border-violet-200 bg-white px-4 py-2 text-sm font-black text-violet-700 transition hover:bg-violet-100 disabled:opacity-50"
                     disabled={isAuthBusy}
                     type="button"
                     onClick={handleSignOut}
@@ -4974,11 +5331,11 @@ function App() {
                   </button>
                 </div>
               ) : (
-                <form className="space-y-3" onSubmit={handleAuthSubmit}>
+                <form className="space-y-2.5" onSubmit={handleAuthSubmit}>
                   {authMode === "sign-in" || authMode === "sign-up" ? (
                     <div className="grid grid-cols-2 gap-2 rounded-2xl bg-white/70 p-1">
                       <button
-                        className={`rounded-[0.9rem] px-3 py-2 text-sm font-black transition ${
+                        className={`rounded-[0.9rem] px-3 py-1.5 text-sm font-black transition ${
                           authMode === "sign-in"
                             ? "bg-[#9f8cff] text-white shadow-sm shadow-violet-200"
                             : "text-[#7a6b84] hover:bg-white"
@@ -4989,7 +5346,7 @@ function App() {
                         登录
                       </button>
                       <button
-                        className={`rounded-[0.9rem] px-3 py-2 text-sm font-black transition ${
+                        className={`rounded-[0.9rem] px-3 py-1.5 text-sm font-black transition ${
                           authMode === "sign-up"
                             ? "bg-[#9f8cff] text-white shadow-sm shadow-violet-200"
                             : "text-[#7a6b84] hover:bg-white"
@@ -5004,15 +5361,15 @@ function App() {
 
                   {authMode === "update-password" ? (
                     <>
-                      <div>
+                      <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center">
                         <label
-                          className="mb-2 block text-sm font-bold text-[#6f5d78]"
+                          className="text-xs font-black text-[#6f5d78] sm:w-20 sm:shrink-0"
                           htmlFor="new-password"
                         >
                           新密码
                         </label>
                         <input
-                          className="w-full rounded-2xl border border-violet-100 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                          className="min-w-0 flex-1 rounded-2xl border border-violet-100 bg-white px-3 py-2 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
                           id="new-password"
                           minLength={6}
                           placeholder="至少 6 位"
@@ -5026,15 +5383,15 @@ function App() {
                           }
                         />
                       </div>
-                      <div>
+                      <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center">
                         <label
-                          className="mb-2 block text-sm font-bold text-[#6f5d78]"
+                          className="text-xs font-black text-[#6f5d78] sm:w-20 sm:shrink-0"
                           htmlFor="confirm-password"
                         >
                           确认新密码
                         </label>
                         <input
-                          className="w-full rounded-2xl border border-violet-100 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                          className="min-w-0 flex-1 rounded-2xl border border-violet-100 bg-white px-3 py-2 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
                           id="confirm-password"
                           minLength={6}
                           placeholder="再次输入新密码"
@@ -5051,16 +5408,16 @@ function App() {
                     </>
                   ) : (
                     <>
-                      <div>
+                      <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center">
                         <label
-                          className="mb-2 block text-sm font-bold text-[#6f5d78]"
+                          className="text-xs font-black text-[#6f5d78] sm:w-12 sm:shrink-0"
                           htmlFor="auth-email"
                         >
                           邮箱
                         </label>
                         <input
                           autoComplete="email"
-                          className="w-full rounded-2xl border border-violet-100 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                          className="min-w-0 flex-1 rounded-2xl border border-violet-100 bg-white px-3 py-2 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
                           id="auth-email"
                           placeholder="QQ、163、Gmail 等邮箱"
                           type="email"
@@ -5072,16 +5429,16 @@ function App() {
                       </div>
 
                       {authMode === "forgot" ? null : (
-                        <div>
+                        <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center">
                           <label
-                            className="mb-2 block text-sm font-bold text-[#6f5d78]"
+                            className="text-xs font-black text-[#6f5d78] sm:w-12 sm:shrink-0"
                             htmlFor="auth-password"
                           >
                             密码
                           </label>
                           <input
                             autoComplete={authMode === "sign-up" ? "new-password" : "current-password"}
-                            className="w-full rounded-2xl border border-violet-100 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                            className="min-w-0 flex-1 rounded-2xl border border-violet-100 bg-white px-3 py-2 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
                             id="auth-password"
                             minLength={6}
                             placeholder="本站登录密码"
@@ -5100,7 +5457,7 @@ function App() {
                   )}
 
                   <button
-                    className="w-full rounded-2xl bg-[#9f8cff] px-4 py-3 text-sm font-black text-white shadow-sm shadow-violet-200 transition hover:bg-[#8f7af2] disabled:opacity-50"
+                    className="w-full rounded-2xl bg-[#9f8cff] px-4 py-2 text-sm font-black text-white shadow-sm shadow-violet-200 transition hover:bg-[#8f7af2] disabled:opacity-50"
                     disabled={isAuthBusy || !isSupabaseConfigured}
                     type="submit"
                   >
@@ -5140,26 +5497,13 @@ function App() {
               )}
             </section>
 
-            <div className="mb-5">
-              <div className="mb-2 flex items-center justify-between text-sm font-bold text-[#6b5d74]">
-                <span>已完成 {completedCount} / {plans.length} 项</span>
-                <span>{progress}%</span>
-              </div>
-              <div className="h-3 overflow-hidden rounded-full bg-[#eee5f5]">
-                <div
-                  className="h-full rounded-full bg-[linear-gradient(90deg,#f7a8c7,#a9d6ff,#b9e5c8)] transition-all duration-500"
-                  style={{ width: `${progress}%` }}
-                />
-              </div>
-            </div>
-
-            <form className="space-y-4" onSubmit={handleSubmit}>
-              <div>
-                <label className="mb-2 block text-sm font-bold text-[#6f5d78]" htmlFor="title">
+            <form className="space-y-2.5" onSubmit={handleSubmit}>
+              <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center">
+                <label className="text-xs font-black text-[#6f5d78] sm:w-16 sm:shrink-0" htmlFor="title">
                   标题
                 </label>
                 <input
-                  className="w-full rounded-2xl border border-pink-100 bg-white px-4 py-3 outline-none transition placeholder:text-[#b8aabd] focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+                  className="min-w-0 flex-1 rounded-2xl border border-pink-100 bg-white px-3 py-2.5 outline-none transition placeholder:text-[#b8aabd] focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
                   id="title"
                   maxLength={48}
                   placeholder="写下今天要做的事"
@@ -5169,66 +5513,122 @@ function App() {
               </div>
 
               <div>
-                <label className="mb-2 block text-sm font-bold text-[#6f5d78]" htmlFor="category">
-                  分类
-                </label>
-                <select
-                  className="w-full rounded-2xl border border-pink-100 bg-white px-4 py-3 outline-none transition focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
-                  id="category"
-                  value={form.category}
-                  onChange={(event) =>
-                    setForm((current) => ({ ...current, category: event.target.value }))
-                  }
-                >
-                  {categoryOptions.map((category) => (
-                    <option key={category.id} value={category.name}>
-                      {category.icon} {category.name}
-                    </option>
-                  ))}
-                </select>
-                <div className="mt-3 rounded-[1.25rem] border border-dashed border-pink-100 bg-pink-50/50 p-3">
+                <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center">
                   <label
-                    className="mb-2 block text-xs font-black text-[#7a6b84]"
-                    htmlFor="custom-category"
+                    className="text-xs font-black text-[#6f5d78] sm:w-16 sm:shrink-0"
+                    htmlFor="category"
                   >
-                    + 添加自定义分类
+                    分类
                   </label>
-                  <div className="flex flex-col gap-2 sm:flex-row lg:flex-col">
-                    <input
-                      className="min-w-0 flex-1 rounded-2xl border border-pink-100 bg-white px-4 py-2.5 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
-                      id="custom-category"
-                      maxLength={20}
-                      placeholder="例如：阅读、旅行"
-                      value={customCategoryInput}
-                      onChange={(event) => {
-                        setCustomCategoryInput(event.target.value);
+                  <select
+                    className="min-w-0 flex-1 rounded-2xl border border-pink-100 bg-white px-3 py-2.5 outline-none transition focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+                    id="category"
+                    value={form.category}
+                    onChange={(event) =>
+                      setForm((current) => ({ ...current, category: event.target.value }))
+                    }
+                  >
+                    {categoryOptions.map((category) => (
+                      <option key={category.id} value={category.name}>
+                        {category.icon} {category.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="mt-2 rounded-[1.1rem] border border-dashed border-pink-100 bg-pink-50/50 p-2">
+                  {isCustomCategoryOpen ? (
+                    <div className="flex flex-col gap-2">
+                      <label className="sr-only" htmlFor="custom-category">
+                        自定义分类
+                      </label>
+                      <div className="flex flex-col gap-2 sm:flex-row">
+                        <input
+                          className="min-w-0 flex-1 rounded-2xl border border-pink-100 bg-white px-3 py-2 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+                          id="custom-category"
+                          maxLength={20}
+                          placeholder="例如：阅读、旅行"
+                          value={customCategoryInput}
+                          onChange={(event) => {
+                            setCustomCategoryInput(event.target.value);
+                            setCustomCategoryStatus("");
+                          }}
+                        />
+                        <div className="flex shrink-0 gap-2">
+                          <button
+                            className="rounded-2xl bg-white px-3 py-2 text-sm font-black text-pink-600 shadow-sm transition hover:bg-pink-100 disabled:opacity-50"
+                            disabled={!customCategoryInput.trim()}
+                            type="button"
+                            onClick={handleAddCustomCategory}
+                          >
+                            添加
+                          </button>
+                          <button
+                            className="rounded-2xl bg-white/70 px-3 py-2 text-sm font-bold text-[#7a6b84] transition hover:bg-white"
+                            type="button"
+                            onClick={() => {
+                              setIsCustomCategoryOpen(false);
+                              setCustomCategoryInput("");
+                              setCustomCategoryStatus("");
+                            }}
+                          >
+                            取消
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      className="w-full rounded-2xl bg-white/70 px-3 py-2 text-left text-xs font-black text-pink-600 transition hover:bg-white"
+                      type="button"
+                      onClick={() => {
+                        setIsCustomCategoryOpen(true);
                         setCustomCategoryStatus("");
                       }}
-                    />
-                    <button
-                      className="rounded-2xl bg-white px-4 py-2.5 text-sm font-black text-pink-600 shadow-sm transition hover:bg-pink-100 disabled:opacity-50"
-                      disabled={!customCategoryInput.trim()}
-                      type="button"
-                      onClick={handleAddCustomCategory}
                     >
-                      添加
+                      + 添加自定义分类
                     </button>
-                  </div>
+                  )}
                   {customCategoryStatus ? (
                     <p className="mt-2 text-xs font-bold text-[#8b7b91]">{customCategoryStatus}</p>
                   ) : null}
                 </div>
               </div>
 
-              <div>
+              <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center">
                 <label
-                  className="mb-2 block text-sm font-bold text-[#6f5d78]"
+                  className="text-xs font-black text-[#6f5d78] sm:w-16 sm:shrink-0"
+                  htmlFor="priority"
+                >
+                  优先级
+                </label>
+                <select
+                  className="min-w-0 flex-1 rounded-2xl border border-pink-100 bg-white px-3 py-2.5 outline-none transition focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+                  id="priority"
+                  value={form.priority}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      priority: normalizePriority(event.target.value),
+                    }))
+                  }
+                >
+                  {PRIORITY_OPTIONS.map((priorityOption) => (
+                    <option key={priorityOption.id} value={priorityOption.id}>
+                      {priorityOption.icon} {priorityOption.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center">
+                <label
+                  className="text-xs font-black text-[#6f5d78] sm:w-24 sm:shrink-0"
                   htmlFor="target-minutes"
                 >
                   目标时长（分钟）
                 </label>
                 <input
-                  className="w-full rounded-2xl border border-pink-100 bg-white px-4 py-3 outline-none transition placeholder:text-[#b8aabd] focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+                  className="min-w-0 flex-1 rounded-2xl border border-pink-100 bg-white px-3 py-2.5 outline-none transition placeholder:text-[#b8aabd] focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
                   id="target-minutes"
                   inputMode="numeric"
                   min={1}
@@ -5243,11 +5643,11 @@ function App() {
               </div>
 
               <div>
-                <label className="mb-2 block text-sm font-bold text-[#6f5d78]" htmlFor="note">
+                <label className="mb-1.5 block text-xs font-black text-[#6f5d78]" htmlFor="note">
                   备注
                 </label>
                 <textarea
-                  className="min-h-24 w-full resize-none rounded-2xl border border-pink-100 bg-white px-4 py-3 outline-none transition placeholder:text-[#b8aabd] focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+                  className="min-h-20 w-full resize-none rounded-2xl border border-pink-100 bg-white px-3 py-2.5 outline-none transition placeholder:text-[#b8aabd] focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
                   id="note"
                   maxLength={160}
                   placeholder="可选"
@@ -5258,7 +5658,7 @@ function App() {
 
               <div className="flex flex-wrap gap-3">
                 <button
-                  className="rounded-2xl bg-[#ff8fbc] px-5 py-3 text-sm font-black text-white shadow-lg shadow-pink-200 transition hover:-translate-y-0.5 hover:bg-[#ff79ad] disabled:opacity-50"
+                  className="rounded-2xl bg-[#ff8fbc] px-5 py-2.5 text-sm font-black text-white shadow-lg shadow-pink-200 transition hover:-translate-y-0.5 hover:bg-[#ff79ad] disabled:opacity-50"
                   type="submit"
                   disabled={!form.title.trim()}
                 >
@@ -5266,7 +5666,7 @@ function App() {
                 </button>
                 {editingId ? (
                   <button
-                    className="rounded-2xl border border-[#ded2e8] bg-white px-5 py-3 text-sm font-bold text-[#6f5d78] transition hover:bg-[#f8f2ff]"
+                    className="rounded-2xl border border-[#ded2e8] bg-white px-5 py-2.5 text-sm font-bold text-[#6f5d78] transition hover:bg-[#f8f2ff]"
                     type="button"
                     onClick={resetForm}
                   >
@@ -5278,12 +5678,7 @@ function App() {
           </aside>
 
           <section className="rounded-[2rem] border border-white/80 bg-white/80 p-4 shadow-sticker backdrop-blur sm:p-6">
-            <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <p className="text-sm font-bold text-pink-500">Journal Card</p>
-                <h2 className="text-2xl font-black text-[#382b44]">{formatDisplayDate(selectedDate)}</h2>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
+            <div className="mb-5 flex flex-wrap items-center justify-end gap-2">
                 <label
                   className="flex min-w-56 flex-col gap-1 text-xs font-black text-[#6f5d78]"
                   htmlFor="export-template"
@@ -5330,7 +5725,6 @@ function App() {
                 >
                   清空当天
                 </button>
-              </div>
             </div>
 
             <div
@@ -5345,7 +5739,7 @@ function App() {
                 <div>
                   <p className="text-sm font-black text-pink-500">今日计划手帐</p>
                   <h3 className="mt-1 text-2xl font-black text-[#3f3349]">
-                    {formatDisplayDate(selectedDate)}
+                    {formatDisplayDateWithYear(selectedDate)}
                   </h3>
                 </div>
                 <div className="min-w-48">
@@ -5385,10 +5779,48 @@ function App() {
                   </div>
                 </div>
               ) : (
-                <div className="grid gap-4 md:grid-cols-2">
-                  {plans.map((item) => {
+                <div className="flex flex-col gap-4">
+                  {plansByPriority.map((prioritySection) => {
+                    const isDragOver = dragOverPriority === prioritySection.id;
+
+                    return (
+                      <section
+                        className={`rounded-[1.5rem] border-2 border-dashed p-3 transition ${
+                          isDragOver ? prioritySection.activeClass : prioritySection.sectionClass
+                        }`}
+                        key={prioritySection.id}
+                        onDragLeave={() => {
+                          if (dragOverPriority === prioritySection.id) {
+                            setDragOverPriority(null);
+                          }
+                        }}
+                        onDragOver={(event) => handlePriorityDragOver(event, prioritySection.id)}
+                        onDrop={(event) => handlePriorityDrop(event, prioritySection.id)}
+                      >
+                        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <h4 className="text-sm font-black text-[#4b3a59]">
+                              {prioritySection.icon} {prioritySection.name}
+                            </h4>
+                            <p className="mt-0.5 text-xs font-bold text-[#8b7b91]">
+                              {prioritySection.hint}
+                            </p>
+                          </div>
+                          <span className={`rounded-full px-3 py-1 text-xs font-black ${prioritySection.badgeClass}`}>
+                            {prioritySection.plans.length} 项
+                          </span>
+                        </div>
+
+                        {prioritySection.plans.length === 0 ? (
+                          <div className="rounded-[1.15rem] border border-dashed border-white/90 bg-white/45 px-4 py-4 text-center text-sm font-black text-[#8b7b91]">
+                            把任务拖到这里
+                          </div>
+                        ) : (
+                          <div className="grid gap-4 md:grid-cols-2">
+                            {prioritySection.plans.map((item) => {
                     const style = getCategoryStyle(item.category, customCategories);
-                    const timerForItem = taskTimer?.itemId === item.id ? taskTimer : null;
+                    const priorityOption = getPriorityOption(item.priority);
+                    const timerForItem = taskTimersByTaskId[item.id] ?? null;
                     const timerElapsedSeconds = timerForItem
                       ? getTaskTimerElapsedSeconds(timerForItem, timerTick)
                       : 0;
@@ -5424,34 +5856,70 @@ function App() {
                               ? [1, 1.035, 1]
                               : 1,
                         }}
-                        className={`relative overflow-hidden rounded-[1.5rem] border-2 border-dashed p-4 shadow-sm transition ${style.bg} ${style.border} ${
+                        className={`relative overflow-hidden rounded-[1.5rem] border-2 border-dashed p-3 shadow-sm transition ${priorityOption.cardBg} ${priorityOption.cardBorder} ${
                           item.completed ? "" : "hover:-translate-y-1"
-                        }`}
+                        } ${
+                          highlightedTaskId === item.id
+                            ? "ring-4 ring-amber-200 ring-offset-2 ring-offset-white"
+                            : draggedTaskId === item.id
+                              ? "opacity-70 ring-4 ring-white/80"
+                            : ""
+                        } cursor-grab active:cursor-grabbing`}
+                        draggable
+                        id={item.id ? `task-${item.id}` : undefined}
                         initial={{ opacity: 0, y: 12 }}
                         key={item.id}
+                        onDragEndCapture={handleTaskDragEnd}
+                        onDragStartCapture={(event) => handleTaskDragStart(event, item)}
                         transition={{ duration: 0.42, ease: "easeOut" }}
                       >
-                        <div className="absolute -right-5 -top-5 h-16 w-16 rounded-full border-8 border-white/60 bg-white/30" />
+                        <div className="absolute -right-5 -top-5 h-14 w-14 rounded-full border-8 border-white/60 bg-white/30" />
                         <AnimatePresence>
                           {completionFeedback?.itemId === item.id ? (
                             <CardCompletionBurst feedback={completionFeedback} />
                           ) : null}
                         </AnimatePresence>
-                        <div className="relative flex gap-3">
-                          <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-white/80 bg-white text-2xl shadow-sm">
-                            <span aria-label={style.caption} role="img">
-                              {style.emoji}
+                        <div className="relative flex gap-2.5">
+                          <div className="flex w-16 shrink-0 flex-col items-center gap-1.5">
+                            <div className="flex h-12 w-12 items-center justify-center overflow-hidden rounded-2xl border border-white/80 bg-white text-[1.18rem] leading-none shadow-sm">
+                              <span
+                                aria-label={style.caption}
+                                className="inline-flex whitespace-nowrap leading-none"
+                                role="img"
+                              >
+                                {style.emoji}
+                              </span>
+                            </div>
+                            <span
+                              className={`max-w-full truncate whitespace-nowrap rounded-full bg-white/80 px-2 py-1 text-xs font-black ${style.accent}`}
+                              title={item.category}
+                            >
+                              {item.category}
                             </span>
                           </div>
                           <div className="min-w-0 flex-1">
-                            <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
-                              <span
-                                className={`rounded-full bg-white/80 px-3 py-1 text-xs font-black ${style.accent}`}
-                              >
-                                {item.category}
-                              </span>
+                            <div className="mb-1.5 flex flex-nowrap items-center justify-between gap-2">
+                                <label
+                                  className={`min-w-[8.75rem] shrink-0 rounded-full px-2.5 py-1 text-xs font-black ${priorityOption.badgeClass}`}
+                                  data-export-ignore="true"
+                                >
+                                  <span className="sr-only">优先级</span>
+                                  <select
+                                    className="w-full bg-transparent text-xs font-black outline-none"
+                                    value={normalizePriority(item.priority)}
+                                    onChange={(event) =>
+                                      updateTaskPriority(item.id, normalizePriority(event.target.value))
+                                    }
+                                  >
+                                    {PRIORITY_OPTIONS.map((option) => (
+                                      <option key={option.id} value={option.id}>
+                                        {option.icon} {option.name}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
                               <button
-                                className={`flex min-h-7 items-center gap-1.5 rounded-full px-3 py-1 text-xs font-black transition ${
+                                className={`flex min-h-7 shrink-0 items-center gap-1.5 rounded-full px-3 py-1 text-xs font-black transition ${
                                   item.completed
                                     ? "bg-white text-[#7f7188]"
                                     : "bg-[#ff8fbc] text-white shadow-sm shadow-pink-200"
@@ -5477,16 +5945,18 @@ function App() {
                                 {item.completed ? "已完成" : "完成"}
                               </button>
                             </div>
-                            <h3
-                              className={`break-words text-lg font-black text-[#41354b] ${
-                                item.completed ? "line-through decoration-2 opacity-60" : ""
-                              }`}
-                            >
-                              {item.title}
-                            </h3>
+                            <div className="flex items-baseline">
+                              <h3
+                                className={`min-w-0 flex-1 break-words text-lg font-black text-[#41354b] ${
+                                  item.completed ? "line-through decoration-2 opacity-60" : ""
+                                }`}
+                              >
+                                {item.title}
+                              </h3>
+                            </div>
                             {item.note ? (
                               <p
-                                className={`mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-[#74667d] ${
+                                className={`mt-1 whitespace-pre-wrap break-words text-sm leading-5 text-[#74667d] ${
                                   item.completed ? "opacity-60" : ""
                                 }`}
                               >
@@ -5496,13 +5966,13 @@ function App() {
                           </div>
                         </div>
 
-                        <div className="relative mt-3 flex w-full flex-row flex-wrap items-center justify-start gap-3 text-xs font-black text-[#74667d] sm:gap-4">
-                          <span className="inline-flex min-h-8 shrink-0 items-center rounded-full bg-white/70 px-3 py-1">
+                        <div className="relative mt-2 flex w-full flex-row flex-wrap items-center justify-start gap-2 text-xs font-black text-[#74667d] sm:gap-3">
+                          <span className="inline-flex min-h-7 shrink-0 items-center rounded-full bg-white/70 px-2.5 py-0.5">
                             目标：{formatMinutes(item.targetMinutes)}
                           </span>
                           <button
                             aria-label="编辑实际用时"
-                            className="inline-flex min-h-8 shrink-0 items-center rounded-full bg-white/70 px-3 py-1 text-left transition hover:bg-white hover:text-sky-700 focus:outline-none focus:ring-4 focus:ring-sky-100"
+                            className="inline-flex min-h-7 shrink-0 items-center rounded-full bg-white/70 px-2.5 py-0.5 text-left transition hover:bg-white hover:text-sky-700 focus:outline-none focus:ring-4 focus:ring-sky-100"
                             type="button"
                             onClick={() => startActualMinutesEdit(item)}
                           >
@@ -5512,7 +5982,7 @@ function App() {
                         </div>
                         {actualEditId === item.id ? (
                           <form
-                            className="relative mt-3 flex w-full flex-col gap-2 rounded-[1rem] bg-white/70 p-3 sm:flex-row sm:items-end"
+                            className="relative mt-2 flex w-full flex-col gap-2 rounded-[1rem] bg-white/70 p-2 sm:flex-row sm:items-end"
                             data-export-ignore="true"
                             onSubmit={(event) => {
                               event.preventDefault();
@@ -5525,7 +5995,7 @@ function App() {
                             >
                               实际用时（分钟）
                               <input
-                                className="mt-1 w-full rounded-xl border border-sky-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition placeholder:text-[#b8aabd] focus:border-sky-300 focus:ring-4 focus:ring-sky-100"
+                                className="mt-1 w-full rounded-xl border border-sky-100 bg-white px-3 py-1.5 text-sm font-bold text-[#46394f] outline-none transition placeholder:text-[#b8aabd] focus:border-sky-300 focus:ring-4 focus:ring-sky-100"
                                 id={`actual-minutes-${item.id}`}
                                 inputMode="numeric"
                                 min={1}
@@ -5545,13 +6015,13 @@ function App() {
                             </label>
                             <div className="flex flex-wrap gap-2">
                               <button
-                                className="rounded-full bg-sky-100 px-3 py-2 text-xs font-black text-sky-700 transition hover:bg-sky-200"
+                                className="rounded-full bg-sky-100 px-3 py-1.5 text-xs font-black text-sky-700 transition hover:bg-sky-200"
                                 type="submit"
                               >
                                 保存
                               </button>
                               <button
-                                className="rounded-full bg-white px-3 py-2 text-xs font-bold text-[#6c5e75] transition hover:bg-slate-50"
+                                className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-[#6c5e75] transition hover:bg-slate-50"
                                 type="button"
                                 onClick={cancelActualMinutesEdit}
                               >
@@ -5567,38 +6037,56 @@ function App() {
                         ) : null}
 
                         <div
-                          className="relative mt-4 flex flex-col gap-3 border-t border-white/80 pt-3"
+                          className="relative mt-2 flex flex-col gap-2 border-t border-white/80 pt-2"
                           data-export-ignore="true"
                         >
-                          <div className="flex flex-row flex-wrap items-center gap-2 rounded-[1.25rem] bg-white/45 p-2">
-                            <div
-                              className={`flex max-w-full flex-wrap items-center gap-2 rounded-full border px-2.5 py-1.5 text-xs font-black ${
-                                isTimerRunning
-                                  ? "border-sky-200 bg-sky-50 text-sky-800"
-                                  : isTimerPaused
-                                    ? "border-violet-200 bg-violet-50 text-violet-800"
-                                    : "border-white/80 bg-white/80 text-[#6c5e75]"
-                              } ${item.completed ? "opacity-60" : ""}`}
-                            >
-                              <span className="whitespace-nowrap tabular-nums">
-                                ⏱ {formatTimerSeconds(timerElapsedSeconds)}
-                              </span>
-                              <button
-                                className={`rounded-full px-3 py-1 text-xs font-black transition disabled:cursor-not-allowed disabled:opacity-55 ${
+                          <div className="flex flex-col gap-1.5 rounded-[1rem] bg-white/45 p-1.5">
+                            <div className="flex flex-row flex-wrap items-center justify-between gap-2">
+                              <div
+                                className={`flex max-w-full flex-wrap items-center gap-1.5 rounded-full border px-2 py-1 text-xs font-black ${
                                   isTimerRunning
-                                    ? "bg-sky-500 text-white shadow-sm shadow-sky-100 hover:bg-sky-600"
+                                    ? "border-sky-200 bg-sky-50 text-sky-800"
                                     : isTimerPaused
-                                      ? "bg-violet-500 text-white shadow-sm shadow-violet-100 hover:bg-violet-600"
-                                      : "bg-[#ffe4f0] text-pink-700 hover:bg-[#ffd3e6]"
-                                }`}
-                                disabled={item.completed}
-                                type="button"
-                                onClick={() => handleTimerClick(item)}
+                                      ? "border-violet-200 bg-violet-50 text-violet-800"
+                                      : "border-white/80 bg-white/80 text-[#6c5e75]"
+                                } ${item.completed ? "opacity-60" : ""}`}
                               >
-                                {timerButtonLabel}
-                              </button>
+                                <span className="whitespace-nowrap tabular-nums">
+                                  ⏱ {formatTimerSeconds(timerElapsedSeconds)}
+                                </span>
+                                <button
+                                  className={`rounded-full px-2.5 py-1 text-xs font-black transition disabled:cursor-not-allowed disabled:opacity-55 ${
+                                    isTimerRunning
+                                      ? "bg-sky-500 text-white shadow-sm shadow-sky-100 hover:bg-sky-600"
+                                      : isTimerPaused
+                                        ? "bg-violet-500 text-white shadow-sm shadow-violet-100 hover:bg-violet-600"
+                                        : "bg-[#ffe4f0] text-pink-700 hover:bg-[#ffd3e6]"
+                                  }`}
+                                  disabled={item.completed}
+                                  type="button"
+                                  onClick={() => handleTimerClick(item)}
+                                >
+                                  {timerButtonLabel}
+                                </button>
+                              </div>
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <button
+                                  className="rounded-full bg-white/80 px-2.5 py-1 text-xs font-bold text-[#6c5e75] transition hover:bg-white"
+                                  type="button"
+                                  onClick={() => handleEdit(item)}
+                                >
+                                  编辑
+                                </button>
+                                <button
+                                  className="rounded-full bg-white/80 px-2.5 py-1 text-xs font-bold text-rose-600 transition hover:bg-white"
+                                  type="button"
+                                  onClick={() => handleDelete(item.id)}
+                                >
+                                  删除
+                                </button>
+                              </div>
                             </div>
-                            <div className={`flex max-w-full flex-wrap items-center gap-1.5 ${item.completed ? "opacity-60" : ""}`}>
+                            <div className={`flex max-w-full flex-wrap items-center gap-1 ${item.completed ? "opacity-60" : ""}`}>
                               {COUNTDOWN_OPTIONS.map((option) => {
                                 const optionSeconds = option.minutes * 60;
                                 const isActiveCountdown = activeCountdownSeconds === optionSeconds;
@@ -5607,7 +6095,7 @@ function App() {
                                   <span className="group relative inline-flex" key={option.minutes}>
                                     <button
                                       aria-label={option.title}
-                                      className={`flex h-8 w-8 items-center justify-center rounded-full border text-sm font-black transition disabled:cursor-not-allowed disabled:opacity-55 ${
+                                      className={`flex h-7 w-7 items-center justify-center rounded-full border text-xs font-black transition disabled:cursor-not-allowed disabled:opacity-55 ${
                                         isActiveCountdown ? option.activeClass : option.baseClass
                                       } ${isActiveCountdown && isCountdownRunning ? "ring-2 ring-white/80" : ""}`}
                                       disabled={item.completed}
@@ -5623,30 +6111,19 @@ function App() {
                                 );
                               })}
                               {hasCountdownTiming ? (
-                                <span className="ml-1 whitespace-nowrap rounded-full bg-white/80 px-2.5 py-1 text-xs font-black tabular-nums text-amber-800">
+                                <span className="ml-1 whitespace-nowrap rounded-full bg-white/80 px-2 py-0.5 text-xs font-black tabular-nums text-amber-800">
                                   ⏳ {formatTimerSeconds(countdownRemainingSeconds)}
                                 </span>
                               ) : null}
                             </div>
                           </div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <button
-                              className="rounded-full bg-white/80 px-3 py-1.5 text-xs font-bold text-[#6c5e75] transition hover:bg-white"
-                              type="button"
-                              onClick={() => handleEdit(item)}
-                            >
-                              编辑
-                            </button>
-                            <button
-                              className="rounded-full bg-white/80 px-3 py-1.5 text-xs font-bold text-rose-600 transition hover:bg-white"
-                              type="button"
-                              onClick={() => handleDelete(item.id)}
-                            >
-                              删除
-                            </button>
-                          </div>
                         </div>
                       </motion.article>
+                    );
+                            })}
+                          </div>
+                        )}
+                      </section>
                     );
                   })}
                 </div>
