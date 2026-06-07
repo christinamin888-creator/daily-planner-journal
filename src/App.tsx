@@ -1,5 +1,6 @@
-import { DragEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { flushSync } from "react-dom";
+import { DragEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import { createPortal, flushSync } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
@@ -118,6 +119,7 @@ const PRIORITY_OPTIONS = [
 ] as const;
 type TaskPriority = (typeof PRIORITY_OPTIONS)[number]["id"];
 const DEFAULT_PRIORITY: TaskPriority = "medium";
+const SORT_ORDER_STEP = 1000;
 
 type CustomCategory = {
   id: string;
@@ -135,6 +137,7 @@ type PlanItem = {
   priority: TaskPriority;
   targetMinutes?: number;
   actualMinutes?: number;
+  sortOrder?: number;
   createdAt: number;
   updatedAt?: number;
 };
@@ -145,6 +148,31 @@ type PlanSearchResult = {
   date: string;
   item: PlanItem;
   index: number;
+};
+type DailyTimeStats = {
+  targetTotalMinutes: number;
+  savedActualMinutes: number;
+  temporaryTimerSeconds: number;
+  liveActualSeconds: number;
+  comparableActualSeconds: number;
+  differenceSeconds: number | null;
+  unplannedActualSeconds: number;
+  completedActualMinutes: number;
+  incompleteActualMinutes: number;
+  unfinishedTargetMinutes: number;
+  missingTargetCount: number;
+  missingActualCount: number;
+  activeTimerCount: number;
+  trackedTimerCount: number;
+  completedCount: number;
+  actualPercent: number;
+  actualProgress: number;
+};
+type TaskDropPlacement = "before" | "after" | "end";
+type TaskDropTarget = {
+  priority: TaskPriority;
+  itemId: string | null;
+  placement: TaskDropPlacement;
 };
 type CloudPayload = {
   plansByDate: PlanBook;
@@ -198,6 +226,67 @@ type PlanForm = {
   priority: TaskPriority;
   note: string;
   targetMinutes: string;
+};
+
+type TaskInlineField = "category" | "targetMinutes" | "title" | "note";
+type TaskInlineFieldEdit = {
+  itemId: string;
+  field: TaskInlineField;
+};
+
+type ChinaHolidayType =
+  | "statutory-holiday"
+  | "adjusted-workday"
+  | "observance"
+  | "weekend"
+  | "normal";
+type ChinaHolidayInfo = {
+  date: string;
+  name: string;
+  isHoliday: boolean;
+  isWorkday: boolean;
+  type: ChinaHolidayType;
+};
+type ChinaHolidayDataSource = "fallback" | "cache" | "remote";
+type ChinaHolidayYearResult = {
+  records: ChinaHolidayInfo[];
+  source: ChinaHolidayDataSource;
+};
+type ChinaHolidaySearchCandidate = {
+  date: string;
+  name: string;
+  priority: number;
+};
+type ChinaLunarDate = {
+  day: number;
+  isLeapMonth: boolean;
+  month: number;
+  year: number;
+};
+type WeatherStatus = "idle" | "loading" | "ready" | "error" | "permission-denied" | "unavailable";
+type WeatherSnapshot = {
+  apparentTemperature: number | null;
+  humidity: number | null;
+  latitude: number;
+  longitude: number;
+  temperature: number;
+  updatedAt: number;
+  weatherCode: number;
+  windSpeed: number | null;
+};
+type WeatherState = {
+  data: WeatherSnapshot | null;
+  isRefreshing: boolean;
+  message: string;
+  status: WeatherStatus;
+};
+type WeatherRefreshOptions = {
+  force?: boolean;
+  silent?: boolean;
+};
+type WeatherCondition = {
+  icon: string;
+  text: string;
 };
 
 type CompletionVariant = {
@@ -942,6 +1031,185 @@ const emptyForm: PlanForm = {
   targetMinutes: "",
 };
 
+const CHINA_HOLIDAYS_CACHE_PREFIX = "daily-planner-china-holidays";
+const CHINA_HOLIDAYS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const CHINA_HOLIDAYS_REMOTE_URL: string = "";
+const WEATHER_CACHE_KEY = "daily-planner-weather-v1";
+const WEATHER_CACHE_TTL_MS = 45 * 60 * 1000;
+const WEATHER_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
+const WEATHER_API_URL = "https://api.open-meteo.com/v1/forecast";
+const WEEKDAY_LABELS = ["一", "二", "三", "四", "五", "六", "日"] as const;
+const LUNAR_BASE_YEAR = 1900;
+const LUNAR_MAX_YEAR = 2100;
+const LUNAR_BASE_DATE = new Date(1900, 0, 31);
+const CHINA_LUNAR_MONTH_NAMES = [
+  "正",
+  "二",
+  "三",
+  "四",
+  "五",
+  "六",
+  "七",
+  "八",
+  "九",
+  "十",
+  "冬",
+  "腊",
+] as const;
+const CHINA_LUNAR_DAY_NAMES = [
+  "初一",
+  "初二",
+  "初三",
+  "初四",
+  "初五",
+  "初六",
+  "初七",
+  "初八",
+  "初九",
+  "初十",
+  "十一",
+  "十二",
+  "十三",
+  "十四",
+  "十五",
+  "十六",
+  "十七",
+  "十八",
+  "十九",
+  "二十",
+  "廿一",
+  "廿二",
+  "廿三",
+  "廿四",
+  "廿五",
+  "廿六",
+  "廿七",
+  "廿八",
+  "廿九",
+  "三十",
+] as const;
+const CHINA_LUNAR_INFO = [
+  0x04bd8, 0x04ae0, 0x0a570, 0x054d5, 0x0d260, 0x0d950, 0x16554, 0x056a0, 0x09ad0, 0x055d2,
+  0x04ae0, 0x0a5b6, 0x0a4d0, 0x0d250, 0x1d255, 0x0b540, 0x0d6a0, 0x0ada2, 0x095b0, 0x14977,
+  0x04970, 0x0a4b0, 0x0b4b5, 0x06a50, 0x06d40, 0x1ab54, 0x02b60, 0x09570, 0x052f2, 0x04970,
+  0x06566, 0x0d4a0, 0x0ea50, 0x06e95, 0x05ad0, 0x02b60, 0x186e3, 0x092e0, 0x1c8d7, 0x0c950,
+  0x0d4a0, 0x1d8a6, 0x0b550, 0x056a0, 0x1a5b4, 0x025d0, 0x092d0, 0x0d2b2, 0x0a950, 0x0b557,
+  0x06ca0, 0x0b550, 0x15355, 0x04da0, 0x0a5d0, 0x14573, 0x052d0, 0x0a9a8, 0x0e950, 0x06aa0,
+  0x0aea6, 0x0ab50, 0x04b60, 0x0aae4, 0x0a570, 0x05260, 0x0f263, 0x0d950, 0x05b57, 0x056a0,
+  0x096d0, 0x04dd5, 0x04ad0, 0x0a4d0, 0x0d4d4, 0x0d250, 0x0d558, 0x0b540, 0x0b6a0, 0x195a6,
+  0x095b0, 0x049b0, 0x0a974, 0x0a4b0, 0x0b27a, 0x06a50, 0x06d40, 0x0af46, 0x0ab60, 0x09570,
+  0x04af5, 0x04970, 0x064b0, 0x074a3, 0x0ea50, 0x06b58, 0x055c0, 0x0ab60, 0x096d5, 0x092e0,
+  0x0c960, 0x0d954, 0x0d4a0, 0x0da50, 0x07552, 0x056a0, 0x0abb7, 0x025d0, 0x092d0, 0x0cab5,
+  0x0a950, 0x0b4a0, 0x0baa4, 0x0ad50, 0x055d9, 0x04ba0, 0x0a5b0, 0x15176, 0x052b0, 0x0a930,
+  0x07954, 0x06aa0, 0x0ad50, 0x05b52, 0x04b60, 0x0a6e6, 0x0a4e0, 0x0d260, 0x0ea65, 0x0d530,
+  0x05aa0, 0x076a3, 0x096d0, 0x04bd7, 0x04ad0, 0x0a4d0, 0x1d0b6, 0x0d250, 0x0d520, 0x0dd45,
+  0x0b5a0, 0x056d0, 0x055b2, 0x049b0, 0x0a577, 0x0a4b0, 0x0aa50, 0x1b255, 0x06d20, 0x0ada0,
+  0x14b63, 0x09370, 0x049f8, 0x04970, 0x064b0, 0x168a6, 0x0ea50, 0x06b20, 0x1a6c4, 0x0aae0,
+  0x0a2e0, 0x0d2e3, 0x0c960, 0x0d557, 0x0d4a0, 0x0da50, 0x05d55, 0x056a0, 0x0a6d0, 0x055d4,
+  0x052d0, 0x0a9b8, 0x0a950, 0x0b4a0, 0x0b6a6, 0x0ad50, 0x055a0, 0x0aba4, 0x0a5b0, 0x052b0,
+  0x0b273, 0x06930, 0x07337, 0x06aa0, 0x0ad50, 0x14b55, 0x04b60, 0x0a570, 0x054e4, 0x0d160,
+  0x0e968, 0x0d520, 0x0daa0, 0x16aa6, 0x056d0, 0x04ae0, 0x0a9d4, 0x0a2d0, 0x0d150, 0x0f252,
+  0x0d520,
+] as const;
+const CHINA_OBSERVANCE_DEFINITIONS = [
+  { month: 3, day: 8, name: "妇女节" },
+  { month: 3, day: 12, name: "植树节" },
+  { month: 5, day: 4, name: "青年节" },
+  { month: 5, day: 12, name: "国际护士节" },
+  { month: 6, day: 1, name: "儿童节" },
+  { month: 7, day: 1, name: "建党节" },
+  { month: 8, day: 1, name: "建军节" },
+  { month: 8, day: 19, name: "中国医师节" },
+  { month: 9, day: 10, name: "教师节" },
+  { month: 11, day: 8, name: "记者节" },
+] as const;
+const CHINA_NAMED_FESTIVAL_DATES_BY_YEAR: Record<
+  number,
+  Array<{ date: string; name: string }>
+> = {
+  2025: [
+    { date: "2025-01-01", name: "元旦" },
+    { date: "2025-01-28", name: "除夕" },
+    { date: "2025-01-29", name: "春节" },
+    { date: "2025-02-12", name: "元宵节" },
+    { date: "2025-04-04", name: "清明节" },
+    { date: "2025-05-01", name: "劳动节" },
+    { date: "2025-05-31", name: "端午节" },
+    { date: "2025-10-01", name: "国庆节" },
+    { date: "2025-10-06", name: "中秋节" },
+  ],
+  2026: [
+    { date: "2026-01-01", name: "元旦" },
+    { date: "2026-02-16", name: "除夕" },
+    { date: "2026-02-17", name: "春节" },
+    { date: "2026-03-03", name: "元宵节" },
+    { date: "2026-04-05", name: "清明节" },
+    { date: "2026-05-01", name: "劳动节" },
+    { date: "2026-06-19", name: "端午节" },
+    { date: "2026-09-25", name: "中秋节" },
+    { date: "2026-10-01", name: "国庆节" },
+  ],
+};
+const CHINA_HOLIDAY_SEARCH_ALIASES_BY_NAME: Record<string, string[]> = {
+  元旦: ["新年"],
+  除夕: ["除夕夜", "大年三十", "年三十"],
+  春节: ["过年", "大年初一", "农历新年"],
+  元宵节: ["元宵"],
+  妇女节: ["三八", "三八妇女节", "女神节"],
+  劳动节: ["五一", "五一劳动节"],
+  青年节: ["五四", "五四青年节"],
+  国际护士节: ["护士节", "512", "五一二"],
+  儿童节: ["六一", "61", "六一儿童节"],
+  建党节: ["七一"],
+  建军节: ["八一"],
+  中国医师节: ["医师节"],
+  教师节: ["老师节"],
+  国庆节: ["十一", "国庆"],
+};
+const CHINA_HOLIDAY_FALLBACK_BY_YEAR: Record<number, ChinaHolidayInfo[]> = {
+  2025: mergeChinaHolidayRecords(
+    createChinaHolidayRecords([
+      { end: "2025-01-01", name: "元旦", start: "2025-01-01", type: "statutory-holiday" },
+      { end: "2025-02-04", name: "春节", start: "2025-01-28", type: "statutory-holiday" },
+      { end: "2025-04-06", name: "清明节", start: "2025-04-04", type: "statutory-holiday" },
+      { end: "2025-05-05", name: "劳动节", start: "2025-05-01", type: "statutory-holiday" },
+      { end: "2025-06-02", name: "端午节", start: "2025-05-31", type: "statutory-holiday" },
+      {
+        end: "2025-10-08",
+        name: "国庆节/中秋节",
+        start: "2025-10-01",
+        type: "statutory-holiday",
+      },
+      { end: "2025-01-26", name: "调休上班", start: "2025-01-26", type: "adjusted-workday" },
+      { end: "2025-02-08", name: "调休上班", start: "2025-02-08", type: "adjusted-workday" },
+      { end: "2025-04-27", name: "调休上班", start: "2025-04-27", type: "adjusted-workday" },
+      { end: "2025-09-28", name: "调休上班", start: "2025-09-28", type: "adjusted-workday" },
+      { end: "2025-10-11", name: "调休上班", start: "2025-10-11", type: "adjusted-workday" },
+    ]),
+    createChinaObservanceRecords(2025),
+    createChinaNamedFestivalRecords(2025),
+  ),
+  2026: mergeChinaHolidayRecords(
+    createChinaHolidayRecords([
+      { end: "2026-01-03", name: "元旦", start: "2026-01-01", type: "statutory-holiday" },
+      { end: "2026-02-23", name: "春节", start: "2026-02-15", type: "statutory-holiday" },
+      { end: "2026-04-06", name: "清明节", start: "2026-04-04", type: "statutory-holiday" },
+      { end: "2026-05-05", name: "劳动节", start: "2026-05-01", type: "statutory-holiday" },
+      { end: "2026-06-21", name: "端午节", start: "2026-06-19", type: "statutory-holiday" },
+      { end: "2026-09-27", name: "中秋节", start: "2026-09-25", type: "statutory-holiday" },
+      { end: "2026-10-07", name: "国庆节", start: "2026-10-01", type: "statutory-holiday" },
+      { end: "2026-01-04", name: "调休上班", start: "2026-01-04", type: "adjusted-workday" },
+      { end: "2026-02-14", name: "调休上班", start: "2026-02-14", type: "adjusted-workday" },
+      { end: "2026-02-28", name: "调休上班", start: "2026-02-28", type: "adjusted-workday" },
+      { end: "2026-05-09", name: "调休上班", start: "2026-05-09", type: "adjusted-workday" },
+      { end: "2026-09-20", name: "调休上班", start: "2026-09-20", type: "adjusted-workday" },
+      { end: "2026-10-10", name: "调休上班", start: "2026-10-10", type: "adjusted-workday" },
+    ]),
+    createChinaObservanceRecords(2026),
+    createChinaNamedFestivalRecords(2026),
+  ),
+};
+
 function loadPlanBook(): PlanBook {
   try {
     const rawData = window.localStorage.getItem(STORAGE_KEY);
@@ -1066,16 +1334,154 @@ function getPriorityOption(priority: unknown) {
   return PRIORITY_OPTIONS.find((option) => option.id === normalizedPriority) ?? PRIORITY_OPTIONS[1];
 }
 
+function normalizeSortOrder(value: unknown, fallbackIndex: number): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : fallbackIndex * SORT_ORDER_STEP;
+}
+
+function getPlanSortOrder(item: PlanItem, fallbackIndex = 0): number {
+  return normalizeSortOrder(item.sortOrder, fallbackIndex);
+}
+
+function getPriorityIndex(priority: unknown): number {
+  const normalizedPriority = normalizePriority(priority);
+  const index = PRIORITY_OPTIONS.findIndex((option) => option.id === normalizedPriority);
+  return index >= 0 ? index : 1;
+}
+
+function getSortedPlansForPriority(plans: PlanItem[], priority: TaskPriority): PlanItem[] {
+  const targetPriority = normalizePriority(priority);
+
+  return plans
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => normalizePriority(item.priority) === targetPriority)
+    .sort((left, right) => {
+      const sortOrderDifference =
+        getPlanSortOrder(left.item, left.index) - getPlanSortOrder(right.item, right.index);
+
+      if (sortOrderDifference !== 0) {
+        return sortOrderDifference;
+      }
+
+      const createdAtDifference = (right.item.createdAt ?? 0) - (left.item.createdAt ?? 0);
+
+      if (createdAtDifference !== 0) {
+        return createdAtDifference;
+      }
+
+      return left.index - right.index;
+    })
+    .map(({ item }) => item);
+}
+
+function sortPlansByDisplayOrder(plans: PlanItem[]): PlanItem[] {
+  return plans
+    .map((item, index) => ({ item, index }))
+    .sort((left, right) => {
+      const priorityDifference =
+        getPriorityIndex(left.item.priority) - getPriorityIndex(right.item.priority);
+
+      if (priorityDifference !== 0) {
+        return priorityDifference;
+      }
+
+      const sortOrderDifference =
+        getPlanSortOrder(left.item, left.index) - getPlanSortOrder(right.item, right.index);
+
+      if (sortOrderDifference !== 0) {
+        return sortOrderDifference;
+      }
+
+      const createdAtDifference = (right.item.createdAt ?? 0) - (left.item.createdAt ?? 0);
+
+      if (createdAtDifference !== 0) {
+        return createdAtDifference;
+      }
+
+      return left.index - right.index;
+    })
+    .map(({ item }) => item);
+}
+
+function getTopSortOrderForPriority(plans: PlanItem[], priority: TaskPriority): number {
+  const priorityPlans = getSortedPlansForPriority(plans, priority);
+  return priorityPlans.length > 0
+    ? getPlanSortOrder(priorityPlans[0], 0) - SORT_ORDER_STEP
+    : 0;
+}
+
+function movePlanItemToPosition(
+  currentPlans: PlanItem[],
+  itemId: string,
+  priority: TaskPriority,
+  targetItemId: string | null,
+  placement: TaskDropPlacement,
+  updatedAt: number,
+): PlanItem[] {
+  const movingItem = currentPlans.find((item) => item.id === itemId);
+
+  if (!movingItem || targetItemId === itemId) {
+    return currentPlans;
+  }
+
+  const targetPriority = normalizePriority(priority);
+  const sourcePriority = normalizePriority(movingItem.priority);
+  const remainingPlans = currentPlans.filter((item) => item.id !== itemId);
+  const targetPriorityPlans = getSortedPlansForPriority(remainingPlans, targetPriority);
+  const targetIndex = targetItemId
+    ? targetPriorityPlans.findIndex((item) => item.id === targetItemId)
+    : -1;
+  const insertIndex =
+    targetIndex >= 0
+      ? placement === "after"
+        ? targetIndex + 1
+        : targetIndex
+      : targetPriorityPlans.length;
+  const reorderedTargetPlans = [...targetPriorityPlans];
+
+  reorderedTargetPlans.splice(insertIndex, 0, {
+    ...movingItem,
+    priority: targetPriority,
+  });
+
+  const nextPlansById = new Map(currentPlans.map((item) => [item.id, item]));
+
+  reorderedTargetPlans.forEach((item, index) => {
+    nextPlansById.set(item.id, {
+      ...item,
+      priority: targetPriority,
+      sortOrder: index * SORT_ORDER_STEP,
+      updatedAt,
+    });
+  });
+
+  if (sourcePriority !== targetPriority) {
+    getSortedPlansForPriority(remainingPlans, sourcePriority).forEach((item, index) => {
+      nextPlansById.set(item.id, {
+        ...item,
+        sortOrder: index * SORT_ORDER_STEP,
+        updatedAt,
+      });
+    });
+  }
+
+  return sortPlansByDisplayOrder(Array.from(nextPlansById.values()));
+}
+
 function normalizePlanBook(planBook: PlanBook): PlanBook {
   return Object.entries(planBook).reduce<PlanBook>((result, [date, items]) => {
-    result[date] = items.map((item) => ({
-      ...item,
-      date: item.date || date,
-      priority: normalizePriority(item.priority),
-      targetMinutes: normalizeMinutes(item.targetMinutes),
-      actualMinutes: normalizeMinutes(item.actualMinutes),
-      updatedAt: item.updatedAt ?? item.createdAt ?? Date.now(),
-    }));
+    result[date] = sortPlansByDisplayOrder(
+      items.map((item, index) => ({
+        ...item,
+        date: item.date || date,
+        priority: normalizePriority(item.priority),
+        targetMinutes: normalizeMinutes(item.targetMinutes),
+        actualMinutes: normalizeMinutes(item.actualMinutes),
+        sortOrder: normalizeSortOrder(item.sortOrder, index),
+        updatedAt: item.updatedAt ?? item.createdAt ?? Date.now(),
+      })),
+    );
     return result;
   }, {});
 }
@@ -1111,8 +1517,9 @@ function mergePlanBooks(
 
   dates.forEach((date) => {
     const itemMap = new Map<string, PlanItem>();
+    const dateItems = [...(localPlanBook[date] ?? []), ...(cloudPlanBook[date] ?? [])];
 
-    [...(localPlanBook[date] ?? []), ...(cloudPlanBook[date] ?? [])].forEach((item) => {
+    dateItems.forEach((item, index) => {
       if (deletedSet.has(item.id)) {
         return;
       }
@@ -1121,6 +1528,9 @@ function mergePlanBooks(
         ...item,
         date: item.date || date,
         priority: normalizePriority(item.priority),
+        targetMinutes: normalizeMinutes(item.targetMinutes),
+        actualMinutes: normalizeMinutes(item.actualMinutes),
+        sortOrder: normalizeSortOrder(item.sortOrder, index),
         updatedAt: item.updatedAt ?? item.createdAt ?? Date.now(),
       };
       const existingItem = itemMap.get(item.id);
@@ -1130,7 +1540,7 @@ function mergePlanBooks(
       }
     });
 
-    const items = Array.from(itemMap.values()).sort((a, b) => b.createdAt - a.createdAt);
+    const items = sortPlansByDisplayOrder(Array.from(itemMap.values()));
 
     if (items.length > 0) {
       merged[date] = items;
@@ -1343,6 +1753,886 @@ function formatDateInput(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
+function parseDateInputValue(dateValue: string): Date {
+  const [year = "", month = "", day = ""] = dateValue.split("-");
+  const parsedYear = Number(year);
+  const parsedMonth = Number(month);
+  const parsedDay = Number(day);
+
+  if (!parsedYear || !parsedMonth || !parsedDay) {
+    return new Date();
+  }
+
+  return new Date(parsedYear, parsedMonth - 1, parsedDay);
+}
+
+function getChinaLunarYearInfo(year: number): number | null {
+  if (year < LUNAR_BASE_YEAR || year > LUNAR_MAX_YEAR) {
+    return null;
+  }
+
+  return CHINA_LUNAR_INFO[year - LUNAR_BASE_YEAR] ?? null;
+}
+
+function getChinaLunarLeapMonth(year: number): number {
+  return getChinaLunarYearInfo(year) ? getChinaLunarYearInfo(year)! & 0xf : 0;
+}
+
+function getChinaLunarLeapMonthDays(year: number): number {
+  const yearInfo = getChinaLunarYearInfo(year);
+
+  if (!yearInfo || getChinaLunarLeapMonth(year) === 0) {
+    return 0;
+  }
+
+  return yearInfo & 0x10000 ? 30 : 29;
+}
+
+function getChinaLunarMonthDays(year: number, month: number): number {
+  const yearInfo = getChinaLunarYearInfo(year);
+
+  if (!yearInfo) {
+    return 0;
+  }
+
+  return yearInfo & (0x10000 >> month) ? 30 : 29;
+}
+
+function getChinaLunarYearDays(year: number): number {
+  const yearInfo = getChinaLunarYearInfo(year);
+
+  if (!yearInfo) {
+    return 0;
+  }
+
+  let totalDays = 348;
+
+  for (let monthMask = 0x8000; monthMask > 0x8; monthMask >>= 1) {
+    totalDays += yearInfo & monthMask ? 1 : 0;
+  }
+
+  return totalDays + getChinaLunarLeapMonthDays(year);
+}
+
+function getChinaLunarMonthSequence(year: number): Array<{
+  days: number;
+  isLeapMonth: boolean;
+  month: number;
+}> {
+  const leapMonth = getChinaLunarLeapMonth(year);
+  const sequence: Array<{ days: number; isLeapMonth: boolean; month: number }> = [];
+
+  for (let month = 1; month <= 12; month += 1) {
+    sequence.push({
+      days: getChinaLunarMonthDays(year, month),
+      isLeapMonth: false,
+      month,
+    });
+
+    if (leapMonth === month) {
+      sequence.push({
+        days: getChinaLunarLeapMonthDays(year),
+        isLeapMonth: true,
+        month,
+      });
+    }
+  }
+
+  return sequence;
+}
+
+function getChinaLunarDate(dateValue: string): ChinaLunarDate | null {
+  const date = parseDateInputValue(dateValue);
+  const dateYear = date.getFullYear();
+
+  if (dateYear < LUNAR_BASE_YEAR || dateYear > LUNAR_MAX_YEAR) {
+    return null;
+  }
+
+  let offsetDays = Math.floor(
+    (Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) -
+      Date.UTC(LUNAR_BASE_DATE.getFullYear(), LUNAR_BASE_DATE.getMonth(), LUNAR_BASE_DATE.getDate())) /
+      86400000,
+  );
+
+  if (offsetDays < 0) {
+    return null;
+  }
+
+  let lunarYear = LUNAR_BASE_YEAR;
+
+  while (lunarYear <= LUNAR_MAX_YEAR) {
+    const yearDays = getChinaLunarYearDays(lunarYear);
+
+    if (offsetDays < yearDays) {
+      break;
+    }
+
+    offsetDays -= yearDays;
+    lunarYear += 1;
+  }
+
+  if (lunarYear > LUNAR_MAX_YEAR) {
+    return null;
+  }
+
+  for (const lunarMonth of getChinaLunarMonthSequence(lunarYear)) {
+    if (offsetDays < lunarMonth.days) {
+      return {
+        day: offsetDays + 1,
+        isLeapMonth: lunarMonth.isLeapMonth,
+        month: lunarMonth.month,
+        year: lunarYear,
+      };
+    }
+
+    offsetDays -= lunarMonth.days;
+  }
+
+  return null;
+}
+
+function formatChinaLunarMonthName(month: number, isLeapMonth: boolean): string {
+  const monthName = CHINA_LUNAR_MONTH_NAMES[month - 1] ?? String(month);
+  return `${isLeapMonth ? "闰" : ""}${monthName}月`;
+}
+
+function formatChinaLunarDayName(day: number): string {
+  return CHINA_LUNAR_DAY_NAMES[day - 1] ?? String(day);
+}
+
+function formatChinaLunarCellLabel(dateValue: string): string {
+  const lunarDate = getChinaLunarDate(dateValue);
+
+  if (!lunarDate) {
+    return "";
+  }
+
+  return lunarDate.day === 1
+    ? formatChinaLunarMonthName(lunarDate.month, lunarDate.isLeapMonth)
+    : formatChinaLunarDayName(lunarDate.day);
+}
+
+function formatChinaLunarDisplayDate(dateValue: string): string {
+  const lunarDate = getChinaLunarDate(dateValue);
+
+  if (!lunarDate) {
+    return "";
+  }
+
+  return `${formatChinaLunarMonthName(lunarDate.month, lunarDate.isLeapMonth)}${formatChinaLunarDayName(lunarDate.day)}`;
+}
+
+function normalizeDateSearchParts(year: number, month: number, day: number): string | null {
+  if (!year || !month || !day || year < 1900 || year > 9999 || month < 1 || month > 12) {
+    return null;
+  }
+
+  const date = new Date(year, month - 1, day);
+
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) {
+    return null;
+  }
+
+  return formatDateInput(date);
+}
+
+function normalizeHolidaySearchText(value: string): string {
+  return value
+    .trim()
+    .replace(/\s+/g, "")
+    .replace(/[·・、，,。.!！?？]/g, "")
+    .replace(/节假日/g, "节");
+}
+
+function getHolidaySearchYearAndText(value: string, fallbackYear: number): {
+  searchText: string;
+  year: number;
+} {
+  const trimmedValue = value.trim();
+  const yearMatch = trimmedValue.match(/((?:19|20)\d{2})年?/);
+  const year = yearMatch ? Number(yearMatch[1]) : fallbackYear;
+  const searchText = normalizeHolidaySearchText(
+    yearMatch ? trimmedValue.replace(yearMatch[0], "") : trimmedValue,
+  );
+
+  return { searchText, year };
+}
+
+function getChinaHolidayNameSearchVariants(name: string): string[] {
+  const variants = new Set<string>();
+  const addVariant = (variant: string) => {
+    const normalizedVariant = normalizeHolidaySearchText(variant);
+
+    if (normalizedVariant.length >= 2 || /^\d+$/.test(normalizedVariant)) {
+      variants.add(normalizedVariant);
+    }
+  };
+  const addNameVariants = (rawName: string) => {
+    const normalizedName = normalizeHolidaySearchText(rawName);
+
+    if (!normalizedName) {
+      return;
+    }
+
+    addVariant(normalizedName);
+
+    const withoutPrefix = normalizedName.replace(/^(中国|国际)/, "");
+    addVariant(withoutPrefix);
+
+    if (normalizedName.endsWith("节")) {
+      addVariant(normalizedName.slice(0, -1));
+    }
+
+    if (withoutPrefix.endsWith("节")) {
+      addVariant(withoutPrefix.slice(0, -1));
+    }
+  };
+
+  name.split("/").forEach((namePart) => {
+    addNameVariants(namePart);
+    (CHINA_HOLIDAY_SEARCH_ALIASES_BY_NAME[namePart.trim()] ?? []).forEach(addVariant);
+  });
+
+  (CHINA_HOLIDAY_SEARCH_ALIASES_BY_NAME[name] ?? []).forEach(addVariant);
+
+  return Array.from(variants);
+}
+
+function getChinaHolidaySearchCandidates(
+  year: number,
+  holidayMap: Map<string, ChinaHolidayInfo>,
+): ChinaHolidaySearchCandidate[] {
+  const candidates: ChinaHolidaySearchCandidate[] = [];
+  const addCandidate = (date: string, name: string, priority: number) => {
+    const normalizedName = normalizeHolidaySearchText(name);
+
+    if (!date.startsWith(`${year}-`) || !normalizedName) {
+      return;
+    }
+
+    candidates.push({ date, name: normalizedName, priority });
+  };
+
+  (CHINA_NAMED_FESTIVAL_DATES_BY_YEAR[year] ?? []).forEach((festival) => {
+    addCandidate(festival.date, festival.name, 0);
+  });
+
+  CHINA_OBSERVANCE_DEFINITIONS.forEach((definition) => {
+    addCandidate(
+      `${year}-${String(definition.month).padStart(2, "0")}-${String(definition.day).padStart(2, "0")}`,
+      definition.name,
+      1,
+    );
+  });
+
+  holidayMap.forEach((holidayInfo) => {
+    if (
+      holidayInfo.type !== "statutory-holiday" &&
+      holidayInfo.type !== "observance"
+    ) {
+      return;
+    }
+
+    holidayInfo.name.split("/").forEach((namePart) => {
+      addCandidate(holidayInfo.date, namePart, 2);
+    });
+  });
+
+  return candidates.sort(
+    (left, right) => left.priority - right.priority || left.date.localeCompare(right.date),
+  );
+}
+
+function findChinaHolidayDateByName(
+  value: string,
+  fallbackYear: number,
+  holidayMap: Map<string, ChinaHolidayInfo>,
+): string | null {
+  const { searchText, year } = getHolidaySearchYearAndText(value, fallbackYear);
+
+  if (searchText.length < 2 && !/^\d+$/.test(searchText)) {
+    return null;
+  }
+
+  const candidates = getChinaHolidaySearchCandidates(year, holidayMap);
+  const exactMatch = candidates.find((candidate) =>
+    getChinaHolidayNameSearchVariants(candidate.name).includes(searchText),
+  );
+
+  if (exactMatch) {
+    return exactMatch.date;
+  }
+
+  const fuzzyMatch = candidates.find((candidate) =>
+    getChinaHolidayNameSearchVariants(candidate.name).some((variant) =>
+      searchText.includes(variant) || variant.includes(searchText),
+    ),
+  );
+
+  return fuzzyMatch?.date ?? null;
+}
+
+function parseDateSearchInput(
+  value: string,
+  fallbackYear: number,
+  holidayMap: Map<string, ChinaHolidayInfo>,
+): string | null {
+  const trimmedValue = value.trim();
+
+  if (!trimmedValue) {
+    return null;
+  }
+
+  const compactDigits = trimmedValue.replace(/\D/g, "");
+
+  if (/^\d{8}$/.test(compactDigits)) {
+    return normalizeDateSearchParts(
+      Number(compactDigits.slice(0, 4)),
+      Number(compactDigits.slice(4, 6)),
+      Number(compactDigits.slice(6, 8)),
+    );
+  }
+
+  const normalizedValue = trimmedValue
+    .replace(/[年月./]/g, "-")
+    .replace(/[日号]/g, "")
+    .replace(/\s+/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  const fullDateMatch = normalizedValue.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+
+  if (fullDateMatch) {
+    return normalizeDateSearchParts(
+      Number(fullDateMatch[1]),
+      Number(fullDateMatch[2]),
+      Number(fullDateMatch[3]),
+    );
+  }
+
+  const monthDayMatch = normalizedValue.match(/^(\d{1,2})-(\d{1,2})$/);
+
+  if (monthDayMatch) {
+    return normalizeDateSearchParts(
+      fallbackYear,
+      Number(monthDayMatch[1]),
+      Number(monthDayMatch[2]),
+    );
+  }
+
+  return findChinaHolidayDateByName(trimmedValue, fallbackYear, holidayMap);
+}
+
+function getDateInputYear(dateValue: string): number {
+  return parseDateInputValue(dateValue).getFullYear();
+}
+
+function getMonthStartDateValue(dateValue: string): string {
+  const date = parseDateInputValue(dateValue);
+  return formatDateInput(new Date(date.getFullYear(), date.getMonth(), 1));
+}
+
+function addMonthsToDateValue(dateValue: string, monthOffset: number): string {
+  const date = parseDateInputValue(dateValue);
+  return formatDateInput(new Date(date.getFullYear(), date.getMonth() + monthOffset, 1));
+}
+
+function createDateRange(startDate: string, endDate: string): string[] {
+  const dates: string[] = [];
+  const start = parseDateInputValue(startDate);
+  const end = parseDateInputValue(endDate);
+
+  for (
+    const date = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+    date.getTime() <= end.getTime();
+    date.setDate(date.getDate() + 1)
+  ) {
+    dates.push(formatDateInput(date));
+  }
+
+  return dates;
+}
+
+function createChinaHolidayRecords(
+  entries: Array<{
+    end: string;
+    name: string;
+    start: string;
+    type: Extract<ChinaHolidayType, "statutory-holiday" | "adjusted-workday">;
+  }>,
+): ChinaHolidayInfo[] {
+  return entries.flatMap((entry) =>
+    createDateRange(entry.start, entry.end).map((date) => ({
+      date,
+      name: entry.name,
+      isHoliday: entry.type === "statutory-holiday",
+      isWorkday: entry.type === "adjusted-workday",
+      type: entry.type,
+    })),
+  );
+}
+
+function createChinaObservanceRecords(year: number): ChinaHolidayInfo[] {
+  return CHINA_OBSERVANCE_DEFINITIONS.map((definition) => ({
+    date: `${year}-${String(definition.month).padStart(2, "0")}-${String(definition.day).padStart(2, "0")}`,
+    name: definition.name,
+    isHoliday: false,
+    isWorkday: false,
+    type: "observance",
+  }));
+}
+
+function createChinaNamedFestivalRecords(year: number): ChinaHolidayInfo[] {
+  return (CHINA_NAMED_FESTIVAL_DATES_BY_YEAR[year] ?? []).map((festival) => ({
+    date: festival.date,
+    name: festival.name,
+    isHoliday: false,
+    isWorkday: false,
+    type: "observance",
+  }));
+}
+
+function getDefaultChinaHolidayInfo(dateValue: string): ChinaHolidayInfo {
+  const date = parseDateInputValue(dateValue);
+  const isWeekend = date.getDay() === 0 || date.getDay() === 6;
+
+  return {
+    date: dateValue,
+    name: isWeekend ? "周末" : "",
+    isHoliday: false,
+    isWorkday: false,
+    type: isWeekend ? "weekend" : "normal",
+  };
+}
+
+function getChinaHolidayInfo(
+  dateValue: string,
+  holidayMap: Map<string, ChinaHolidayInfo>,
+): ChinaHolidayInfo {
+  return holidayMap.get(dateValue) ?? getDefaultChinaHolidayInfo(dateValue);
+}
+
+function getChinaSpecialDateText(holidayInfo: ChinaHolidayInfo): string {
+  if (holidayInfo.type === "statutory-holiday") {
+    return holidayInfo.name ? `休 · ${holidayInfo.name}` : "休";
+  }
+
+  if (holidayInfo.type === "adjusted-workday") {
+    return holidayInfo.name ? `班 · ${holidayInfo.name}` : "班";
+  }
+
+  if (holidayInfo.type === "observance") {
+    return holidayInfo.name;
+  }
+
+  return "";
+}
+
+function getChinaCalendarDateName(holidayInfo: ChinaHolidayInfo): string {
+  if (
+    holidayInfo.type === "statutory-holiday" ||
+    holidayInfo.type === "adjusted-workday" ||
+    holidayInfo.type === "observance"
+  ) {
+    return holidayInfo.name;
+  }
+
+  return "";
+}
+
+function mergeChinaHolidayRecords(...recordLists: ChinaHolidayInfo[][]): ChinaHolidayInfo[] {
+  const recordsByDate = new Map<string, ChinaHolidayInfo>();
+
+  recordLists.flat().forEach((record) => {
+    const existingRecord = recordsByDate.get(record.date);
+
+    if (!existingRecord) {
+      recordsByDate.set(record.date, record);
+      return;
+    }
+
+    const nameParts = [existingRecord.name, record.name]
+      .flatMap((name) => name.split("/"))
+      .map((name) => name.trim())
+      .filter(Boolean);
+    const name = Array.from(new Set(nameParts)).join("/");
+    const isHoliday = existingRecord.isHoliday || record.isHoliday;
+    const isWorkday = existingRecord.isWorkday || record.isWorkday;
+    const type = isWorkday
+      ? "adjusted-workday"
+      : isHoliday
+        ? "statutory-holiday"
+        : existingRecord.type === "observance" || record.type === "observance"
+          ? "observance"
+          : existingRecord.type;
+
+    recordsByDate.set(record.date, {
+      date: record.date,
+      name,
+      isHoliday,
+      isWorkday,
+      type,
+    });
+  });
+
+  return Array.from(recordsByDate.values()).sort((left, right) =>
+    left.date.localeCompare(right.date),
+  );
+}
+
+function getChinaHolidayCacheKey(year: number): string {
+  return `${CHINA_HOLIDAYS_CACHE_PREFIX}-${year}`;
+}
+
+function isChinaHolidayType(value: unknown): value is ChinaHolidayType {
+  return (
+    value === "statutory-holiday" ||
+    value === "adjusted-workday" ||
+    value === "observance" ||
+    value === "weekend" ||
+    value === "normal"
+  );
+}
+
+function normalizeChinaHolidayInfo(value: unknown, year: number): ChinaHolidayInfo | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as Partial<ChinaHolidayInfo>;
+
+  if (typeof candidate.date !== "string" || !candidate.date.startsWith(`${year}-`)) {
+    return null;
+  }
+
+  const type = isChinaHolidayType(candidate.type)
+    ? candidate.type
+    : candidate.isWorkday
+      ? "adjusted-workday"
+      : candidate.isHoliday
+        ? "statutory-holiday"
+        : "normal";
+
+  return {
+    date: candidate.date,
+    name: typeof candidate.name === "string" ? candidate.name : "",
+    isHoliday: Boolean(candidate.isHoliday || type === "statutory-holiday"),
+    isWorkday: Boolean(candidate.isWorkday || type === "adjusted-workday"),
+    type,
+  };
+}
+
+function normalizeChinaHolidayPayload(payload: unknown, year: number): ChinaHolidayInfo[] {
+  const rawRecords =
+    Array.isArray(payload)
+      ? payload
+      : payload && typeof payload === "object" && Array.isArray((payload as { holidays?: unknown }).holidays)
+        ? (payload as { holidays: unknown[] }).holidays
+        : [];
+
+  return rawRecords
+    .map((record) => normalizeChinaHolidayInfo(record, year))
+    .filter((record): record is ChinaHolidayInfo => Boolean(record));
+}
+
+function loadCachedChinaHolidayYear(year: number): ChinaHolidayInfo[] | null {
+  try {
+    const rawData = window.localStorage.getItem(getChinaHolidayCacheKey(year));
+
+    if (!rawData) {
+      return null;
+    }
+
+    const parsedData = JSON.parse(rawData) as { records?: unknown; updatedAt?: unknown };
+    const updatedAt = typeof parsedData.updatedAt === "number" ? parsedData.updatedAt : 0;
+
+    if (Date.now() - updatedAt > CHINA_HOLIDAYS_CACHE_TTL_MS) {
+      return null;
+    }
+
+    return normalizeChinaHolidayPayload(parsedData.records, year);
+  } catch {
+    return null;
+  }
+}
+
+function saveCachedChinaHolidayYear(year: number, records: ChinaHolidayInfo[]) {
+  try {
+    window.localStorage.setItem(
+      getChinaHolidayCacheKey(year),
+      JSON.stringify({ records, updatedAt: Date.now() }),
+    );
+  } catch {
+    // localStorage may be unavailable in private or restricted browser modes.
+  }
+}
+
+async function fetchRemoteChinaHolidayYear(year: number): Promise<ChinaHolidayInfo[] | null> {
+  if (!CHINA_HOLIDAYS_REMOTE_URL) {
+    return null;
+  }
+
+  const url = CHINA_HOLIDAYS_REMOTE_URL.replace("{year}", String(year));
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    throw new Error("节假日远程数据读取失败");
+  }
+
+  const payload = await response.json();
+  const records = normalizeChinaHolidayPayload(payload, year);
+  return records.length > 0 ? records : null;
+}
+
+async function loadChinaHolidayYear(year: number): Promise<ChinaHolidayYearResult> {
+  const fallbackRecords = CHINA_HOLIDAY_FALLBACK_BY_YEAR[year] ?? [];
+  const cachedRecords = loadCachedChinaHolidayYear(year);
+
+  if (cachedRecords && cachedRecords.length > 0) {
+    return {
+      records: mergeChinaHolidayRecords(fallbackRecords, cachedRecords),
+      source: "cache",
+    };
+  }
+
+  try {
+    const remoteRecords = await fetchRemoteChinaHolidayYear(year);
+
+    if (remoteRecords && remoteRecords.length > 0) {
+      const records = mergeChinaHolidayRecords(fallbackRecords, remoteRecords);
+      saveCachedChinaHolidayYear(year, records);
+      return { records, source: "remote" };
+    }
+  } catch {
+    // Remote holiday data must never block date selection.
+  }
+
+  return {
+    records: fallbackRecords,
+    source: "fallback",
+  };
+}
+
+function readFiniteNumber(value: unknown): number | null {
+  const numberValue =
+    typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+
+  return Number.isFinite(numberValue) ? numberValue : null;
+}
+
+function normalizeWeatherSnapshot(value: unknown): WeatherSnapshot | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as Partial<WeatherSnapshot>;
+  const apparentTemperature = readFiniteNumber(candidate.apparentTemperature);
+  const humidity = readFiniteNumber(candidate.humidity);
+  const latitude = readFiniteNumber(candidate.latitude);
+  const longitude = readFiniteNumber(candidate.longitude);
+  const temperature = readFiniteNumber(candidate.temperature);
+  const updatedAt = readFiniteNumber(candidate.updatedAt);
+  const weatherCode = readFiniteNumber(candidate.weatherCode);
+  const windSpeed = readFiniteNumber(candidate.windSpeed);
+
+  if (latitude === null || longitude === null || temperature === null || updatedAt === null || weatherCode === null) {
+    return null;
+  }
+
+  return {
+    apparentTemperature,
+    humidity,
+    latitude,
+    longitude,
+    temperature,
+    updatedAt,
+    weatherCode,
+    windSpeed,
+  };
+}
+
+function loadCachedWeatherSnapshot(allowStale = false): WeatherSnapshot | null {
+  try {
+    const rawData = window.localStorage.getItem(WEATHER_CACHE_KEY);
+
+    if (!rawData) {
+      return null;
+    }
+
+    const snapshot = normalizeWeatherSnapshot(JSON.parse(rawData));
+
+    if (!snapshot) {
+      return null;
+    }
+
+    if (!allowStale && Date.now() - snapshot.updatedAt > WEATHER_CACHE_TTL_MS) {
+      return null;
+    }
+
+    return snapshot;
+  } catch {
+    return null;
+  }
+}
+
+function saveCachedWeatherSnapshot(snapshot: WeatherSnapshot) {
+  try {
+    window.localStorage.setItem(WEATHER_CACHE_KEY, JSON.stringify(snapshot));
+  } catch {
+    // Weather is a convenience widget; failing to cache should not affect planning.
+  }
+}
+
+function getWeatherCondition(weatherCode: number): WeatherCondition {
+  if (weatherCode === 0) {
+    return { icon: "☀️", text: "晴" };
+  }
+
+  if (weatherCode === 1 || weatherCode === 2) {
+    return { icon: "🌤️", text: "少云" };
+  }
+
+  if (weatherCode === 3) {
+    return { icon: "☁️", text: "阴" };
+  }
+
+  if (weatherCode === 45 || weatherCode === 48) {
+    return { icon: "🌫️", text: "雾" };
+  }
+
+  if ([51, 53, 55, 56, 57].includes(weatherCode)) {
+    return { icon: "🌦️", text: "毛毛雨" };
+  }
+
+  if ([61, 63, 65, 66, 67, 80, 81, 82].includes(weatherCode)) {
+    return { icon: "🌧️", text: "雨" };
+  }
+
+  if ([71, 73, 75, 77, 85, 86].includes(weatherCode)) {
+    return { icon: "❄️", text: "雪" };
+  }
+
+  if ([95, 96, 99].includes(weatherCode)) {
+    return { icon: "⛈️", text: "雷阵雨" };
+  }
+
+  return { icon: "🌡️", text: "天气" };
+}
+
+function formatWeatherTemperature(value: number): string {
+  return `${Math.round(value)}°C`;
+}
+
+function formatWeatherUpdatedTime(timestamp: number): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    hour12: false,
+    minute: "2-digit",
+  }).format(new Date(timestamp));
+}
+
+function isGeolocationPermissionDenied(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error as { code?: unknown }).code === 1,
+  );
+}
+
+function getWeatherErrorMessage(error: unknown): string {
+  if (isGeolocationPermissionDenied(error)) {
+    return "允许定位后显示天气";
+  }
+
+  if (
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error as { code?: unknown }).code === 3
+  ) {
+    return "定位超时，稍后重试";
+  }
+
+  return "天气更新失败";
+}
+
+function requestBrowserPosition(): Promise<GeolocationPosition> {
+  return new Promise((resolve, reject) => {
+    if (!("geolocation" in navigator)) {
+      reject(new Error("当前浏览器不支持定位"));
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(resolve, reject, {
+      enableHighAccuracy: false,
+      maximumAge: 10 * 60 * 1000,
+      timeout: 10 * 1000,
+    });
+  });
+}
+
+async function fetchWeatherSnapshot(latitude: number, longitude: number): Promise<WeatherSnapshot> {
+  const params = new URLSearchParams({
+    current: "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m",
+    latitude: latitude.toFixed(4),
+    longitude: longitude.toFixed(4),
+    timezone: "auto",
+  });
+  const response = await fetch(`${WEATHER_API_URL}?${params.toString()}`);
+
+  if (!response.ok) {
+    throw new Error("天气接口读取失败");
+  }
+
+  const payload = (await response.json()) as { current?: Record<string, unknown> };
+  const currentWeather = payload.current ?? {};
+  const temperature = readFiniteNumber(currentWeather.temperature_2m);
+  const weatherCode = readFiniteNumber(currentWeather.weather_code);
+
+  if (temperature === null || weatherCode === null) {
+    throw new Error("天气接口数据格式异常");
+  }
+
+  return {
+    apparentTemperature: readFiniteNumber(currentWeather.apparent_temperature),
+    humidity: readFiniteNumber(currentWeather.relative_humidity_2m),
+    latitude,
+    longitude,
+    temperature,
+    updatedAt: Date.now(),
+    weatherCode,
+    windSpeed: readFiniteNumber(currentWeather.wind_speed_10m),
+  };
+}
+
+function getCalendarMonthCells(monthDateValue: string): Array<{
+  dateValue: string;
+  isCurrentMonth: boolean;
+}> {
+  const monthStart = parseDateInputValue(monthDateValue);
+  const firstDayOffset = (monthStart.getDay() + 6) % 7;
+  const gridStart = new Date(monthStart.getFullYear(), monthStart.getMonth(), 1 - firstDayOffset);
+
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + index);
+
+    return {
+      dateValue: formatDateInput(date),
+      isCurrentMonth: date.getMonth() === monthStart.getMonth(),
+    };
+  });
+}
+
+function formatCalendarMonthLabel(monthDateValue: string): string {
+  const date = parseDateInputValue(monthDateValue);
+  return `${date.getFullYear()}年${date.getMonth() + 1}月`;
+}
+
 function formatDisplayDate(dateValue: string): string {
   return new Intl.DateTimeFormat("zh-CN", {
     month: "long",
@@ -1480,6 +2770,8 @@ type ExportDensity = {
   taskTitleSize: number;
   metaSize: number;
   noteSize: number;
+  titleLineHeight: number;
+  titlePaddingY: number;
   titleLines: number;
   noteLines: number;
   showNotes: boolean;
@@ -1500,6 +2792,8 @@ function getExportDensity(planCount: number, template: ExportTemplate): ExportDe
       taskTitleSize,
       metaSize: 13,
       noteSize: 14,
+      titleLineHeight: 1.38,
+      titlePaddingY: 2,
       titleLines: 3,
       noteLines: 2,
       showNotes: true,
@@ -1518,6 +2812,8 @@ function getExportDensity(planCount: number, template: ExportTemplate): ExportDe
       taskTitleSize,
       metaSize: 12,
       noteSize: 14,
+      titleLineHeight: 1.4,
+      titlePaddingY: 2,
       titleLines: 2,
       noteLines: 2,
       showNotes: true,
@@ -1533,27 +2829,51 @@ function getExportDensity(planCount: number, template: ExportTemplate): ExportDe
       cardPadding: 15,
       checkboxSize: 30,
       categorySize: 12,
-      taskTitleSize: Math.max(taskTitleSize - 2, 17),
+      taskTitleSize: Math.min(Math.max(taskTitleSize - 4, 19), 21),
       metaSize: 11,
       noteSize: 12,
+      titleLineHeight: 1.45,
+      titlePaddingY: 3,
       titleLines: 2,
       noteLines: 1,
       showNotes: true,
     };
   }
 
+  if (planCount <= 15) {
+    return {
+      columns: 3,
+      maxVisibleItems: 15,
+      gap: 10,
+      cardHeight: 142,
+      cardPadding: 13,
+      checkboxSize: 28,
+      categorySize: 11,
+      taskTitleSize: Math.min(Math.max(taskTitleSize - 5, 18), 19),
+      metaSize: 11,
+      noteSize: 0,
+      titleLineHeight: 1.48,
+      titlePaddingY: 3,
+      titleLines: 2,
+      noteLines: 0,
+      showNotes: false,
+    };
+  }
+
   if (planCount <= 24) {
     return {
       columns: 3,
-      maxVisibleItems: 18,
+      maxVisibleItems: 15,
       gap: 9,
-      cardHeight: 122,
+      cardHeight: 136,
       cardPadding: 12,
       checkboxSize: 26,
       categorySize: 10,
-      taskTitleSize: Math.max(taskTitleSize - 5, 15),
+      taskTitleSize: Math.min(Math.max(taskTitleSize - 6, 16), 18),
       metaSize: 10,
       noteSize: 0,
+      titleLineHeight: 1.48,
+      titlePaddingY: 3,
       titleLines: 2,
       noteLines: 0,
       showNotes: false,
@@ -1571,6 +2891,8 @@ function getExportDensity(planCount: number, template: ExportTemplate): ExportDe
     taskTitleSize: Math.max(taskTitleSize - 7, 13),
     metaSize: 9,
     noteSize: 0,
+    titleLineHeight: 1.5,
+    titlePaddingY: 2,
     titleLines: 2,
     noteLines: 0,
     showNotes: false,
@@ -1583,6 +2905,42 @@ function getTotalMinutes(plans: PlanItem[], key: "targetMinutes" | "actualMinute
 
 function formatTotalMinutes(minutes: number): string {
   return minutes > 0 ? `${minutes} 分钟` : "未设置";
+}
+
+function formatDashboardDuration(seconds: number): string {
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+
+  if (safeSeconds === 0) {
+    return "0 分钟";
+  }
+
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const remainingSeconds = safeSeconds % 60;
+
+  if (hours > 0) {
+    return minutes > 0 ? `${hours} 小时 ${minutes} 分钟` : `${hours} 小时`;
+  }
+
+  if (minutes > 0) {
+    return remainingSeconds > 0
+      ? `${minutes} 分钟 ${remainingSeconds} 秒`
+      : `${minutes} 分钟`;
+  }
+
+  return `${remainingSeconds} 秒`;
+}
+
+function formatDashboardMinutes(minutes: number): string {
+  return formatDashboardDuration(minutes * 60);
+}
+
+function formatSignedDashboardDuration(seconds: number): string {
+  if (seconds === 0) {
+    return "持平";
+  }
+
+  return `${seconds > 0 ? "+" : "-"}${formatDashboardDuration(Math.abs(seconds))}`;
 }
 
 const primaryPinkStickerPool = [
@@ -2364,7 +3722,15 @@ function getGenericExportStickerBottomPadding(planCount: number) {
     return 96;
   }
 
-  return 56;
+  if (planCount <= 15) {
+    return 82;
+  }
+
+  if (planCount <= 18) {
+    return 58;
+  }
+
+  return 44;
 }
 
 function getPrimaryPinkStickerBottomPadding(planCount: number) {
@@ -2438,6 +3804,14 @@ function getMedicalExportBoardStickers(template: ExportTemplate, plans: PlanItem
 
   const [stickerA, stickerB, stickerC] = getExportAudienceStickerSet(template, plans, selectedDate, 3);
 
+  if (planCount <= 15) {
+    return [
+      { src: stickerA, style: { bottom: "10px", left: "22%", opacity: 0.48, transform: "translateX(-50%) rotate(-5deg)", width: "72px" } },
+      { src: stickerB, style: { bottom: "10px", left: "50%", opacity: 0.48, transform: "translateX(-50%) rotate(-1deg)", width: "80px" } },
+      { src: stickerC, style: { bottom: "10px", left: "78%", opacity: 0.48, transform: "translateX(-50%) rotate(5deg)", width: "72px" } },
+    ];
+  }
+
   return [
     { src: stickerA, style: { bottom: "8px", left: "22%", opacity: 0.38, transform: "translateX(-50%) rotate(-5deg)", width: "50px" } },
     { src: stickerB, style: { bottom: "8px", left: "50%", opacity: 0.38, transform: "translateX(-50%) rotate(-1deg)", width: "56px" } },
@@ -2503,6 +3877,14 @@ function getGenericExportBoardStickers(template: ExportTemplate, plans: PlanItem
   }
 
   const [stickerA, stickerB, stickerC] = getExportAudienceStickerSet(template, plans, selectedDate, 3);
+
+  if (planCount <= 15) {
+    return [
+      { src: stickerA, style: { bottom: "10px", left: "18%", opacity: 0.44, transform: "translateX(-50%) rotate(-6deg)", width: "70px" } },
+      { src: stickerB, style: { bottom: "10px", left: "50%", opacity: 0.44, transform: "translateX(-50%) rotate(-2deg)", width: "78px" } },
+      { src: stickerC, style: { bottom: "10px", left: "82%", opacity: 0.44, transform: "translateX(-50%) rotate(6deg)", width: "70px" } },
+    ];
+  }
 
   return [
     { src: stickerA, style: { bottom: "10px", left: "144px", opacity: 0.34, transform: "rotate(-6deg)", width: "42px" } },
@@ -2601,27 +3983,27 @@ function getPrimaryPinkPageStickers(plans: PlanItem[], selectedDate: string) {
     return [
       {
         src: stickerA,
-        style: { bottom: "150px", left: "94px", opacity: 0.78, transform: "rotate(-8deg)", width: "86px" },
+        style: { bottom: "32px", left: "96px", opacity: 0.72, transform: "rotate(-8deg)", width: "72px" },
       },
       {
         src: stickerB,
-        style: { bottom: "154px", opacity: 0.78, right: "118px", transform: "rotate(7deg)", width: "88px" },
+        style: { bottom: "32px", opacity: 0.72, right: "118px", transform: "rotate(7deg)", width: "72px" },
       },
       {
         src: stickerC,
-        style: { bottom: "154px", left: "306px", opacity: 0.72, transform: "rotate(-4deg)", width: "84px" },
+        style: { bottom: "28px", left: "50%", opacity: 0.74, transform: "translateX(-50%) rotate(-2deg)", width: "82px" },
       },
       {
         src: stickerD,
-        style: { bottom: "158px", opacity: 0.72, right: "326px", transform: "rotate(4deg)", width: "82px" },
+        style: { bottom: "92px", left: "32%", opacity: 0.46, transform: "rotate(4deg)", width: "42px" },
       },
       {
         src: stickerE,
-        style: { bottom: "226px", left: "468px", opacity: 0.6, transform: "rotate(-3deg)", width: "56px" },
+        style: { bottom: "92px", opacity: 0.46, right: "32%", transform: "rotate(-3deg)", width: "42px" },
       },
       {
         src: stickerF,
-        style: { bottom: "228px", opacity: 0.6, right: "82px", transform: "rotate(8deg)", width: "56px" },
+        style: { bottom: "84px", opacity: 0.38, right: "82px", transform: "rotate(8deg)", width: "36px" },
       },
     ];
   }
@@ -2631,27 +4013,27 @@ function getPrimaryPinkPageStickers(plans: PlanItem[], selectedDate: string) {
   return [
     {
       src: stickerA,
-      style: { bottom: "150px", left: "86px", opacity: 0.66, transform: "rotate(-8deg)", width: "64px" },
+      style: { bottom: "18px", left: "86px", opacity: 0.52, transform: "rotate(-8deg)", width: "46px" },
     },
     {
       src: stickerB,
-      style: { bottom: "154px", opacity: 0.66, right: "92px", transform: "rotate(8deg)", width: "64px" },
+      style: { bottom: "18px", opacity: 0.52, right: "92px", transform: "rotate(8deg)", width: "46px" },
     },
     {
       src: stickerC,
-      style: { bottom: "160px", left: "318px", opacity: 0.58, transform: "rotate(-13deg)", width: "54px" },
+      style: { bottom: "16px", left: "318px", opacity: 0.44, transform: "rotate(-13deg)", width: "40px" },
     },
     {
       src: stickerD,
-      style: { bottom: "160px", opacity: 0.58, right: "318px", transform: "rotate(2deg)", width: "54px" },
+      style: { bottom: "16px", opacity: 0.44, right: "318px", transform: "rotate(2deg)", width: "40px" },
     },
     {
       src: stickerE,
-      style: { bottom: "214px", left: "470px", opacity: 0.5, transform: "rotate(-3deg)", width: "46px" },
+      style: { bottom: "48px", left: "470px", opacity: 0.34, transform: "rotate(-3deg)", width: "30px" },
     },
     {
       src: stickerF,
-      style: { bottom: "216px", opacity: 0.5, right: "70px", transform: "rotate(8deg)", width: "46px" },
+      style: { bottom: "48px", opacity: 0.34, right: "70px", transform: "rotate(8deg)", width: "30px" },
     },
   ];
 }
@@ -2766,25 +4148,47 @@ function ExportPrimaryPinkTemplate({
   encouragementText,
 }: ExportJournalTemplateProps) {
   const planCount = plans.length;
-  const columns = planCount <= 1 ? 1 : planCount > 10 ? 3 : 2;
-  const maxVisibleItems = planCount > 10 ? 15 : 12;
+  const maxVisibleItems = 15;
   const displayPlans = plans.slice(0, maxVisibleItems);
+  const visiblePlanCount = displayPlans.length;
+  const crowdedTaskGrid = visiblePlanCount > 12;
+  const columns = visiblePlanCount <= 1 ? 1 : crowdedTaskGrid ? 3 : 2;
   const overflowCount = Math.max(planCount - displayPlans.length, 0);
   const dateLabel = formatDisplayDateWithYear(selectedDate);
-  const denseTaskGrid = planCount > 8;
-  const taskTitleSize = planCount <= 4 ? 30 : planCount <= 8 ? 27 : 24;
-  const taskTitleLineClamp = planCount <= 8 ? undefined : 3;
-  const noteSize = planCount <= 4 ? 20 : planCount <= 8 ? 18 : 0;
-  const noteLineClamp = planCount <= 8 ? undefined : 1;
-  const showNotes = planCount <= 8;
-  const cardMinHeight = planCount <= 2 ? 380 : planCount <= 4 ? 270 : planCount <= 6 ? 172 : planCount <= 8 ? 150 : 116;
-  const taskTextIndent = 48;
-  const taskCardPaddingTop = denseTaskGrid ? 26 : 36;
-  const taskCardPaddingX = denseTaskGrid ? 18 : 22;
-  const taskCardPaddingBottom = denseTaskGrid ? 16 : 22;
-  const taskGridGap = denseTaskGrid ? "14px" : "18px";
+  const denseTaskGrid = visiblePlanCount > 8;
+  const compactTwoColumnGrid = visiblePlanCount > 6 && visiblePlanCount <= 8;
+  const taskTitleSize = visiblePlanCount <= 4 ? 30 : visiblePlanCount <= 8 ? 25 : crowdedTaskGrid ? 18 : 20;
+  const taskTitleLineClamp = denseTaskGrid || compactTwoColumnGrid ? 2 : visiblePlanCount <= 6 ? undefined : 3;
+  const taskTitleLineHeight = crowdedTaskGrid ? 1.48 : denseTaskGrid ? 1.46 : compactTwoColumnGrid ? 1.42 : 1.36;
+  const taskTitlePaddingY = denseTaskGrid || compactTwoColumnGrid ? 3 : 2;
+  const taskTitleLineHeightPx = taskTitleSize * taskTitleLineHeight;
+  const taskTitleMaxHeight = taskTitleLineClamp
+    ? taskTitleLineHeightPx * taskTitleLineClamp + taskTitlePaddingY * 2
+    : undefined;
+  const noteSize = visiblePlanCount <= 4 ? 20 : visiblePlanCount <= 6 ? 18 : compactTwoColumnGrid ? 16 : 0;
+  const noteLineClamp = compactTwoColumnGrid ? 1 : visiblePlanCount <= 6 ? undefined : 1;
+  const showNotes = visiblePlanCount <= 8;
+  const cardMinHeight = visiblePlanCount <= 2 ? 380 : visiblePlanCount <= 4 ? 270 : visiblePlanCount <= 6 ? 172 : 0;
+  const taskTextIndent = crowdedTaskGrid ? 28 : denseTaskGrid ? 36 : 48;
+  const taskCardPaddingTop = crowdedTaskGrid ? 14 : denseTaskGrid ? 18 : compactTwoColumnGrid ? 24 : 36;
+  const taskCardPaddingX = crowdedTaskGrid ? 14 : denseTaskGrid ? 18 : compactTwoColumnGrid ? 20 : 22;
+  const taskCardPaddingBottom = crowdedTaskGrid ? 12 : denseTaskGrid ? 14 : compactTwoColumnGrid ? 18 : 22;
+  const taskGridGap = crowdedTaskGrid ? "12px" : denseTaskGrid ? "20px" : compactTwoColumnGrid ? "22px" : "24px";
+  const taskBoardPaddingTop = crowdedTaskGrid ? 24 : denseTaskGrid ? 32 : compactTwoColumnGrid ? 36 : 42;
+  const taskBoardPaddingX = crowdedTaskGrid ? 24 : denseTaskGrid ? 32 : compactTwoColumnGrid ? 36 : 42;
+  const taskTitleGap = crowdedTaskGrid ? "8px" : denseTaskGrid ? "10px" : "12px";
+  const taskTitlePaddingRight = crowdedTaskGrid ? "4px" : denseTaskGrid ? "18px" : "30px";
+  const taskStatusWidth = crowdedTaskGrid ? "24px" : denseTaskGrid ? "30px" : "36px";
   const primaryStickerBottomPadding = getPrimaryPinkStickerBottomPadding(planCount);
-  const sectionRows = displayPlans.length <= 2 ? "auto" : displayPlans.length <= 4 ? "repeat(2, auto)" : undefined;
+  const taskRowCount = Math.max(1, Math.ceil(displayPlans.length / columns));
+  const sectionRows =
+    compactTwoColumnGrid || denseTaskGrid
+      ? `repeat(${taskRowCount}, minmax(0, 1fr))`
+      : displayPlans.length <= 2
+        ? "auto"
+        : displayPlans.length <= 4
+          ? "repeat(2, auto)"
+          : undefined;
   const footerText = encouragementText ?? template.footer;
   const dailyWord = getExportDailyWord(selectedDate, template);
   const dailyWordFontSize = getExportDailyWordFontSize(dailyWord.word, dailyWord.meaning);
@@ -3146,7 +4550,8 @@ function ExportPrimaryPinkTemplate({
               boxSizing: "border-box",
               flex: "1 1 auto",
               minHeight: 0,
-              padding: columns === 3 ? `18px 18px ${primaryStickerBottomPadding}px` : `24px 24px ${primaryStickerBottomPadding}px`,
+              overflow: "hidden",
+              padding: `${taskBoardPaddingTop}px ${taskBoardPaddingX}px ${primaryStickerBottomPadding}px`,
               position: "relative",
             }}
           >
@@ -3213,6 +4618,7 @@ function ExportPrimaryPinkTemplate({
                   height: "100%",
                   minHeight: 0,
                   position: "relative",
+                  width: "100%",
                   zIndex: 5,
                 }}
               >
@@ -3233,17 +4639,21 @@ function ExportPrimaryPinkTemplate({
                         background: item.completed
                           ? "linear-gradient(135deg, rgba(255,255,255,0.92), rgba(231,248,238,0.92))"
                           : "linear-gradient(135deg, rgba(255,255,255,0.98), rgba(255,248,251,0.94))",
-                        borderRadius: columns === 3 ? "20px" : "26px",
+                        borderRadius: denseTaskGrid ? "22px" : "26px",
                         boxShadow: "0 14px 30px rgba(154, 88, 123, 0.11)",
 	                        boxSizing: "border-box",
 	                        display: "flex",
 	                        flexDirection: "column",
+                          height: compactTwoColumnGrid || denseTaskGrid ? "100%" : undefined,
 	                        isolation: "isolate",
 	                        justifyContent: "flex-start",
-	                        minHeight: `${cardMinHeight}px`,
-                          overflow: "visible",
+                          maxWidth: "100%",
+                          minHeight: cardMinHeight ? `${cardMinHeight}px` : 0,
+                          minWidth: 0,
+                          overflow: "hidden",
 	                        padding: `${taskCardPaddingTop}px ${taskCardPaddingX}px ${taskCardPaddingBottom}px`,
 	                        position: "relative",
+                          width: "100%",
                           zIndex: 6,
 	                      }}
 	                    >
@@ -3255,13 +4665,13 @@ function ExportPrimaryPinkTemplate({
 	                          display: "flex",
 	                          fontSize: `${taskTitleSize}px`,
 	                          fontWeight: 800,
-	                          gap: columns === 3 ? "8px" : "12px",
-	                          lineHeight: 1.28,
+	                          gap: taskTitleGap,
+	                          lineHeight: `${taskTitleLineHeightPx}px`,
 	                          margin: 0,
 	                          maxWidth: "100%",
 	                          overflowWrap: "anywhere",
 	                          padding: 0,
-	                          paddingRight: columns === 3 ? 0 : "30px",
+	                          paddingRight: taskTitlePaddingRight,
 	                          position: "relative",
 	                          wordBreak: "break-word",
 	                          zIndex: 2,
@@ -3275,9 +4685,10 @@ function ExportPrimaryPinkTemplate({
 	                            display: "inline-block",
 	                            flex: "0 0 auto",
 	                            fontWeight: 800,
-	                            lineHeight: "inherit",
+	                            lineHeight: `${taskTitleLineHeightPx}px`,
+	                            paddingTop: `${taskTitlePaddingY}px`,
 	                            textAlign: "center",
-	                            width: columns === 3 ? "28px" : "36px",
+	                            width: taskStatusWidth,
 	                          }}
 	                        >
 	                          {item.completed ? "☑" : "☐"}
@@ -3287,13 +4698,15 @@ function ExportPrimaryPinkTemplate({
 	                          style={{
 	                            display: taskTitleLineClamp ? "-webkit-box" : "block",
 	                            flex: "1 1 auto",
+	                            boxSizing: "border-box",
+	                            lineHeight: `${taskTitleLineHeightPx}px`,
 	                            margin: 0,
+	                            maxHeight: taskTitleMaxHeight ? `${taskTitleMaxHeight}px` : undefined,
 	                            minWidth: 0,
 	                            overflow: taskTitleLineClamp ? "hidden" : "visible",
-	                            padding: 0,
+	                            padding: `${taskTitlePaddingY}px 0`,
 	                            WebkitBoxOrient: taskTitleLineClamp ? "vertical" : undefined,
 	                            WebkitLineClamp: taskTitleLineClamp,
-	                            lineHeight: "inherit",
 	                          }}
 	                        >
 	                          {item.title}
@@ -3308,10 +4721,10 @@ function ExportPrimaryPinkTemplate({
                             fontSize: `${noteSize}px`,
 	                            fontWeight: 750,
 	                            lineHeight: 1.45,
-	                            marginTop: columns === 3 ? "8px" : "10px",
+	                            marginTop: compactTwoColumnGrid ? "8px" : "10px",
 	                            overflow: noteLineClamp ? "hidden" : "visible",
                             overflowWrap: "anywhere",
-                            paddingLeft: columns === 3 ? 0 : `${taskTextIndent}px`,
+                            paddingLeft: `${taskTextIndent}px`,
                             position: "relative",
 	                            wordBreak: "break-word",
 	                            WebkitBoxOrient: noteLineClamp ? "vertical" : undefined,
@@ -3328,14 +4741,18 @@ function ExportPrimaryPinkTemplate({
                           className="export-task-time-row"
                           style={{
                             color: "#987486",
-                            fontSize: columns === 3 ? "15px" : "17px",
+                            display: denseTaskGrid ? "-webkit-box" : "block",
+                            fontSize: denseTaskGrid ? "15px" : "17px",
                             fontWeight: 750,
                             lineHeight: 1.42,
                             marginTop: noteVisible ? "8px" : "10px",
+                            overflow: denseTaskGrid ? "hidden" : "visible",
                             overflowWrap: "anywhere",
-                            paddingLeft: columns === 3 ? 0 : `${taskTextIndent}px`,
+                            paddingLeft: `${taskTextIndent}px`,
                             position: "relative",
                             wordBreak: "break-word",
+                            WebkitBoxOrient: denseTaskGrid ? "vertical" : undefined,
+                            WebkitLineClamp: denseTaskGrid ? 1 : undefined,
                             zIndex: 2,
                           }}
                         >
@@ -3428,6 +4845,9 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
   const footerText = encouragementText ?? template.footer;
   const dailyWord = getExportDailyWord(selectedDate, template);
   const isMedicalTemplate = template.id === "medical-study";
+  const exportTaskTitleLineHeightPx = density.taskTitleSize * density.titleLineHeight;
+  const exportTaskTitleMaxHeight =
+    exportTaskTitleLineHeightPx * density.titleLines + density.titlePaddingY * 2;
   const dailyWordFontSize = isMedicalTemplate
     ? getMedicalDailyWordFontSize(dailyWord.word, dailyWord.meaning)
     : getExportDailyWordFontSize(dailyWord.word, dailyWord.meaning);
@@ -3438,7 +4858,7 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
   const borderWidth = template.cardBorderStyle === "double" ? "4px" : "2px";
   const cardBorderStyle = template.cardBorderStyle === "double" ? "double" : "solid";
   const decorativeBorder = `${borderWidth} ${cardBorderStyle}`;
-  const shouldClampExportTaskText = plans.length > 10;
+  const shouldClampExportTaskText = plans.length > 6;
   const primarySticker = template.decorations[0] ?? "✦";
   const secondarySticker = template.decorations[1] ?? "⭐";
   const thirdSticker = template.decorations[2] ?? "♡";
@@ -4003,7 +5423,7 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
 	                      gap: density.columns === 3 ? "8px" : "10px",
 	                      justifyContent: "flex-start",
 	                      minHeight: `${density.cardHeight}px`,
-                        overflow: "visible",
+                        overflow: "hidden",
 	                      padding: `${density.cardPadding}px`,
                       position: "relative",
                       zIndex: 4,
@@ -4081,14 +5501,16 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
                       }}
                     >
                       <div
+                        className="export-task-line"
                         style={{
                           alignItems: "flex-start",
                           color: item.completed ? template.muted : template.ink,
                           display: "flex",
                           gap: density.columns === 3 ? "8px" : "12px",
                           fontSize: `${density.taskTitleSize}px`,
-                          fontWeight: 850,
-                          lineHeight: 1.28,
+                          fontWeight: 800,
+                          letterSpacing: 0,
+                          lineHeight: `${exportTaskTitleLineHeightPx}px`,
                           marginBottom: "0",
                           overflowWrap: "anywhere",
                           wordBreak: "break-word",
@@ -4096,22 +5518,28 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
                       >
                         <span
                           aria-hidden="true"
+                          className="export-task-status"
                           style={{
                             color: item.completed ? cardAccent : template.checkbox,
                             flex: "0 0 auto",
                             fontWeight: 800,
-                            lineHeight: "inherit",
+                            lineHeight: `${exportTaskTitleLineHeightPx}px`,
+                            paddingTop: `${density.titlePaddingY}px`,
                           }}
                         >
                           {item.completed ? "☑" : "☐"}
                         </span>
                         <span
+                          className="export-task-text"
                           style={{
                             display: shouldClampExportTaskText ? "-webkit-box" : "block",
                             flex: "1 1 auto",
-                            lineHeight: "inherit",
+                            boxSizing: "border-box",
+                            lineHeight: `${exportTaskTitleLineHeightPx}px`,
+                            maxHeight: shouldClampExportTaskText ? `${exportTaskTitleMaxHeight}px` : undefined,
                             minWidth: 0,
                             overflow: shouldClampExportTaskText ? "hidden" : "visible",
+                            padding: `${density.titlePaddingY}px 0`,
                             textDecoration: "none",
                             WebkitBoxOrient: shouldClampExportTaskText ? "vertical" : undefined,
                             WebkitLineClamp: shouldClampExportTaskText ? density.titleLines : undefined,
@@ -4123,6 +5551,7 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
 
                       {noteVisible ? (
                         <div
+                          className="export-task-note"
                           style={{
                             color: template.muted,
                             display: shouldClampExportTaskText ? "-webkit-box" : "block",
@@ -4144,6 +5573,7 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
 
                       {durationText ? (
                         <div
+                          className="export-task-time-row"
                           style={{
                             color: template.muted,
                             fontSize: `${Math.max(density.metaSize + 3, 14)}px`,
@@ -4242,21 +5672,372 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
   );
 }
 
+type ChinaHolidayDatePickerProps = {
+  calendarMonthDate: string;
+  holidayMap: Map<string, ChinaHolidayInfo>;
+  holidaySourceByYear: Record<number, ChinaHolidayDataSource>;
+  onCalendarMonthDateChange: (dateValue: string) => void;
+  onSelectDate: (dateValue: string) => void;
+  selectedDate: string;
+  summaryAside?: ReactNode;
+  today: string;
+};
+
+type WeatherWidgetProps = {
+  onRefresh: () => void;
+  weatherState: WeatherState;
+};
+
+function WeatherWidget({ onRefresh, weatherState }: WeatherWidgetProps) {
+  const snapshot = weatherState.data;
+  const condition = snapshot ? getWeatherCondition(snapshot.weatherCode) : null;
+  const isLoading = weatherState.status === "loading" || weatherState.isRefreshing;
+  const detailText = snapshot
+    ? `${condition?.text ?? "天气"} · ${snapshot.humidity !== null ? `湿度 ${Math.round(snapshot.humidity)}%` : `更新 ${formatWeatherUpdatedTime(snapshot.updatedAt)}`}`
+    : weatherState.message || "等待定位";
+
+  return (
+    <button
+      aria-label={snapshot ? "刷新天气" : "获取天气"}
+      className="flex min-h-[3.8rem] w-full items-center gap-2 rounded-2xl border border-sky-100 bg-sky-50/75 px-3 py-2 text-left shadow-sm outline-none transition hover:bg-sky-100/75 focus:border-sky-300 focus:ring-4 focus:ring-sky-100"
+      type="button"
+      onClick={onRefresh}
+    >
+      <span aria-hidden="true" className="shrink-0 text-xl leading-none">
+        {condition?.icon ?? (isLoading ? "🌡️" : "☀️")}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-black text-sky-800">
+          {snapshot ? formatWeatherTemperature(snapshot.temperature) : isLoading ? "更新中" : "天气"}
+        </span>
+        <span className="mt-0.5 block truncate text-[11px] font-bold text-sky-700/80">
+          {isLoading && snapshot ? "正在更新" : detailText}
+        </span>
+      </span>
+    </button>
+  );
+}
+
+function ChinaHolidayDatePicker({
+  calendarMonthDate,
+  holidayMap,
+  holidaySourceByYear,
+  onCalendarMonthDateChange,
+  onSelectDate,
+  selectedDate,
+  summaryAside,
+  today,
+}: ChinaHolidayDatePickerProps) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [dateSearchInput, setDateSearchInput] = useState("");
+  const [dateSearchError, setDateSearchError] = useState("");
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const selectedHolidayInfo = getChinaHolidayInfo(selectedDate, holidayMap);
+  const calendarCells = useMemo(
+    () => getCalendarMonthCells(calendarMonthDate),
+    [calendarMonthDate],
+  );
+  const visibleYear = getDateInputYear(calendarMonthDate);
+  const dataSource = holidaySourceByYear[visibleYear] ?? "fallback";
+  const sourceText =
+    dataSource === "remote" ? "远程数据" : dataSource === "cache" ? "缓存数据" : "本地兜底";
+  const selectedSpecialText = getChinaSpecialDateText(selectedHolidayInfo);
+  const selectedLunarText = formatChinaLunarDisplayDate(selectedDate);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target instanceof Node ? event.target : null;
+
+      if (target && rootRef.current?.contains(target)) {
+        return;
+      }
+
+      setIsOpen(false);
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [isOpen]);
+
+  const openCalendar = () => {
+    onCalendarMonthDateChange(getMonthStartDateValue(selectedDate));
+    setIsOpen((current) => !current);
+  };
+
+  const selectDate = (dateValue: string) => {
+    onSelectDate(dateValue);
+    onCalendarMonthDateChange(getMonthStartDateValue(dateValue));
+    setDateSearchInput("");
+    setDateSearchError("");
+    setIsOpen(false);
+  };
+
+  const handleDateSearchSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const parsedDate = parseDateSearchInput(
+      dateSearchInput,
+      getDateInputYear(selectedDate),
+      holidayMap,
+    );
+
+    if (!parsedDate) {
+      setDateSearchError("请输入有效日期或节日名称");
+      return;
+    }
+
+    selectDate(parsedDate);
+  };
+
+  return (
+    <div className="relative" ref={rootRef}>
+      <form className="mb-2 flex gap-2" onSubmit={handleDateSearchSubmit}>
+        <label className="sr-only" htmlFor="planner-date-search">
+          日期直达
+        </label>
+        <input
+          className="min-w-0 flex-1 rounded-2xl border border-pink-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] shadow-sm outline-none transition placeholder:text-[#b8aabd] focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+          id="planner-date-search"
+          inputMode="text"
+          placeholder="2026年05月20日 / 除夕"
+          value={dateSearchInput}
+          onChange={(event) => {
+            setDateSearchInput(event.target.value);
+            setDateSearchError("");
+          }}
+        />
+        <button
+          className="shrink-0 rounded-2xl bg-pink-50 px-3 py-2 text-sm font-black text-pink-600 transition hover:bg-pink-100 disabled:opacity-50"
+          disabled={!dateSearchInput.trim()}
+          type="submit"
+        >
+          前往
+        </button>
+      </form>
+      {dateSearchError ? (
+        <p className="-mt-1 mb-2 text-xs font-bold text-rose-600">{dateSearchError}</p>
+      ) : null}
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <button
+          aria-expanded={isOpen}
+          className="flex min-h-[3.8rem] min-w-0 flex-1 items-center justify-between gap-3 rounded-2xl border border-pink-100 bg-white px-4 py-3 text-left text-[#46394f] shadow-sm outline-none transition hover:bg-pink-50/50 focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+          id="planner-date"
+          type="button"
+          onClick={openCalendar}
+        >
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-black">
+              {formatDisplayDateWithYear(selectedDate)}
+            </span>
+          </span>
+          <span aria-hidden="true" className="shrink-0 text-xl leading-none">
+            📅
+          </span>
+        </button>
+        {summaryAside ? <div className="min-w-0 sm:w-36 sm:shrink-0">{summaryAside}</div> : null}
+      </div>
+
+      <AnimatePresence>
+        {isOpen ? (
+          <motion.div
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            className="absolute right-0 top-[calc(100%+10px)] z-[9999] w-[min(92vw,24rem)] rounded-[1.5rem] border border-pink-100 bg-white/95 p-3 shadow-2xl shadow-pink-200/50 backdrop-blur"
+            data-export-ignore="true"
+            exit={{ opacity: 0, y: -6, scale: 0.98 }}
+            initial={{ opacity: 0, y: -6, scale: 0.98 }}
+            transition={{ duration: 0.18, ease: "easeOut" }}
+          >
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <button
+                aria-label="上一月"
+                className="flex h-9 w-9 items-center justify-center rounded-full bg-pink-50 text-lg font-black text-pink-600 transition hover:bg-pink-100"
+                type="button"
+                onClick={() => onCalendarMonthDateChange(addMonthsToDateValue(calendarMonthDate, -1))}
+              >
+                ‹
+              </button>
+              <div className="text-center">
+                <p className="text-base font-black text-[#46394f]">
+                  {formatCalendarMonthLabel(calendarMonthDate)}
+                </p>
+                <p className="mt-0.5 text-[11px] font-bold text-[#8b7b91]">
+                  节假日：{sourceText}
+                </p>
+              </div>
+              <button
+                aria-label="下一月"
+                className="flex h-9 w-9 items-center justify-center rounded-full bg-pink-50 text-lg font-black text-pink-600 transition hover:bg-pink-100"
+                type="button"
+                onClick={() => onCalendarMonthDateChange(addMonthsToDateValue(calendarMonthDate, 1))}
+              >
+                ›
+              </button>
+            </div>
+
+            <div className="mb-2 grid grid-cols-7 gap-1 text-center text-[11px] font-black text-[#9b8ca4]">
+              {WEEKDAY_LABELS.map((weekday) => (
+                <span key={weekday}>周{weekday}</span>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-7 gap-1">
+              {calendarCells.map(({ dateValue, isCurrentMonth }) => {
+                const holidayInfo = getChinaHolidayInfo(dateValue, holidayMap);
+                const isSelected = dateValue === selectedDate;
+                const isToday = dateValue === today;
+                const dayNumber = Number(dateValue.slice(8, 10));
+                const badgeText = holidayInfo.isHoliday
+                  ? "休"
+                  : holidayInfo.isWorkday
+                    ? "班"
+                    : "";
+                const holidayName = getChinaCalendarDateName(holidayInfo);
+                const lunarLabel = formatChinaLunarCellLabel(dateValue);
+                const toneClass = isSelected
+                  ? "border-pink-400 bg-[#ff8fbc] text-white shadow-sm shadow-pink-200"
+                  : holidayInfo.type === "statutory-holiday"
+                    ? "border-rose-100 bg-rose-50 text-rose-700 hover:bg-rose-100"
+                    : holidayInfo.type === "adjusted-workday"
+                      ? "border-amber-100 bg-amber-50 text-amber-800 hover:bg-amber-100"
+                      : holidayInfo.type === "weekend"
+                        ? "border-slate-100 bg-slate-50/80 text-[#65566f] hover:bg-white"
+                        : holidayInfo.type === "observance"
+                          ? "border-violet-100 bg-violet-50/70 text-violet-800 hover:bg-violet-100"
+                        : "border-white bg-white/80 text-[#46394f] hover:bg-pink-50";
+
+                return (
+                  <button
+                    aria-label={`${dateValue} ${holidayName} ${lunarLabel ? `农历${lunarLabel}` : ""}`.trim()}
+                    className={`relative flex min-h-[4.25rem] flex-col items-start rounded-xl border px-1.5 py-1 text-left transition focus:outline-none focus:ring-4 focus:ring-pink-100 ${toneClass} ${
+                      isCurrentMonth ? "" : "opacity-35"
+                    } ${isToday && !isSelected ? "ring-2 ring-sky-200" : ""}`}
+                    key={dateValue}
+                    type="button"
+                    onClick={() => selectDate(dateValue)}
+                  >
+                    {badgeText ? (
+                      <span
+                        className={`absolute right-1 top-1 rounded-full px-1 text-[10px] font-black leading-4 ${
+                          isSelected
+                            ? "bg-white/90 text-pink-600"
+                            : holidayInfo.isWorkday
+                              ? "bg-amber-200 text-amber-900"
+                              : "bg-rose-200 text-rose-700"
+                        }`}
+                      >
+                        {badgeText}
+                      </span>
+                    ) : null}
+                    <span className="text-sm font-black tabular-nums">{dayNumber}</span>
+                    <span className="mt-auto w-full min-w-0">
+                      {holidayName ? (
+                        <span
+                          className={`block w-full truncate text-[10px] font-black leading-3 ${
+                            isSelected ? "text-white/95" : ""
+                          }`}
+                        >
+                          {holidayName}
+                        </span>
+                      ) : null}
+                      {lunarLabel ? (
+                        <span
+                          className={`block w-full truncate text-[9px] font-bold leading-3 ${
+                            isSelected
+                              ? "text-white/85"
+                              : holidayName
+                                ? "text-[#8b7b91]"
+                                : "text-[#9b8ca4]"
+                          }`}
+                        >
+                          {lunarLabel}
+                        </span>
+                      ) : (
+                        <span className="block h-3" />
+                      )}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-pink-50 pt-3">
+              <p className="min-w-0 text-xs font-bold text-[#8b7b91]">
+                选中：{selectedSpecialText || "无特殊节日"}
+                {selectedLunarText ? ` · 农历${selectedLunarText}` : ""}
+              </p>
+              <button
+                className="rounded-full bg-sky-50 px-3 py-1.5 text-xs font-black text-sky-700 transition hover:bg-sky-100"
+                type="button"
+                onClick={() => selectDate(today)}
+              >
+                今天
+              </button>
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 function App() {
   const today = useMemo(() => formatDateInput(new Date()), []);
   const [selectedDate, setSelectedDate] = useState<string>(today);
+  const [calendarMonthDate, setCalendarMonthDate] = useState<string>(() =>
+    getMonthStartDateValue(today),
+  );
+  const [chinaHolidayRecordsByYear, setChinaHolidayRecordsByYear] = useState<
+    Record<number, ChinaHolidayInfo[]>
+  >(() => CHINA_HOLIDAY_FALLBACK_BY_YEAR);
+  const [chinaHolidaySourceByYear, setChinaHolidaySourceByYear] = useState<
+    Record<number, ChinaHolidayDataSource>
+  >(
+    () =>
+      Object.fromEntries(
+        Object.keys(CHINA_HOLIDAY_FALLBACK_BY_YEAR).map((year) => [Number(year), "fallback"]),
+      ) as Record<number, ChinaHolidayDataSource>,
+  );
+  const [weatherState, setWeatherState] = useState<WeatherState>(() => {
+    const cachedWeather = loadCachedWeatherSnapshot();
+
+    return cachedWeather
+      ? {
+          data: cachedWeather,
+          isRefreshing: false,
+          message: "",
+          status: "ready",
+        }
+      : {
+          data: null,
+          isRefreshing: false,
+          message: "等待定位",
+          status: "idle",
+        };
+  });
   const [plansByDate, setPlansByDate] = useState<PlanBook>(() => loadPlanBook());
   const [form, setForm] = useState<PlanForm>(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [taskInlineEdit, setTaskInlineEdit] = useState<TaskInlineFieldEdit | null>(null);
+  const [inlineTitleDraft, setInlineTitleDraft] = useState<string>("");
+  const [inlineNoteDraft, setInlineNoteDraft] = useState<string>("");
+  const [targetMinutesEditDraft, setTargetMinutesEditDraft] = useState<string>("");
+  const [targetMinutesEditError, setTargetMinutesEditError] = useState<string>("");
   const [completionFeedback, setCompletionFeedback] = useState<CompletionFeedback | null>(null);
   const [actualEditId, setActualEditId] = useState<string | null>(null);
   const [actualMinutesDraft, setActualMinutesDraft] = useState<string>("");
   const [actualMinutesError, setActualMinutesError] = useState<string>("");
   const [planSearchQuery, setPlanSearchQuery] = useState<string>("");
   const [isPlanSearchOpen, setIsPlanSearchOpen] = useState<boolean>(false);
+  const [isTimeDashboardOpen, setIsTimeDashboardOpen] = useState<boolean>(false);
   const [highlightedTaskId, setHighlightedTaskId] = useState<string | null>(null);
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [dragOverPriority, setDragOverPriority] = useState<TaskPriority | null>(null);
+  const [taskDropTarget, setTaskDropTarget] = useState<TaskDropTarget | null>(null);
   const [taskTimersByTaskId, setTaskTimersByTaskId] = useState<TaskTimersByTaskId>({});
   const [timerTick, setTimerTick] = useState<number>(() => Date.now());
   const [timerNotice, setTimerNotice] = useState<string>("");
@@ -4295,11 +6076,69 @@ function App() {
   const timerNoticeTimer = useRef<number | null>(null);
   const highlightedTaskTimer = useRef<number | null>(null);
   const cloudTimer = useRef<number | null>(null);
+  const weatherPermissionDenied = useRef<boolean>(false);
+  const skipInlineBlurSave = useRef<boolean>(false);
   const cloudReady = useRef<boolean>(false);
   const latestPlanBook = useRef<PlanBook>(plansByDate);
   const latestDeletedItemIds = useRef<string[]>(deletedItemIds);
   const latestCustomCategories = useRef<CustomCategory[]>(customCategories);
   const currentUserId = currentUser?.id ?? null;
+
+  const refreshWeather = useCallback(async (options: WeatherRefreshOptions = {}) => {
+    if (weatherPermissionDenied.current && !options.force) {
+      return;
+    }
+
+    if (!("geolocation" in navigator)) {
+      setWeatherState((current) => ({
+        data: current.data,
+        isRefreshing: false,
+        message: "当前浏览器不支持定位",
+        status: current.data ? "ready" : "unavailable",
+      }));
+      return;
+    }
+
+    setWeatherState((current) => ({
+      data: current.data,
+      isRefreshing: true,
+      message: options.silent && current.data ? current.message : "正在更新天气",
+      status: current.data ? "ready" : "loading",
+    }));
+
+    try {
+      const position = await requestBrowserPosition();
+      const snapshot = await fetchWeatherSnapshot(
+        position.coords.latitude,
+        position.coords.longitude,
+      );
+
+      weatherPermissionDenied.current = false;
+      saveCachedWeatherSnapshot(snapshot);
+      setWeatherState({
+        data: snapshot,
+        isRefreshing: false,
+        message: "",
+        status: "ready",
+      });
+    } catch (error) {
+      const staleWeather = loadCachedWeatherSnapshot(true);
+      const fallbackMessage = getWeatherErrorMessage(error);
+      const denied = isGeolocationPermissionDenied(error);
+
+      weatherPermissionDenied.current = denied;
+      setWeatherState((current) => {
+        const fallbackData = current.data ?? staleWeather;
+
+        return {
+          data: fallbackData,
+          isRefreshing: false,
+          message: fallbackMessage,
+          status: denied ? "permission-denied" : fallbackData ? "ready" : "error",
+        };
+      });
+    }
+  }, []);
 
   const categoryOptions = useMemo(
     () => [
@@ -4312,6 +6151,17 @@ function App() {
     ],
     [customCategories],
   );
+  const chinaHolidayMap = useMemo(() => {
+    const holidayMap = new Map<string, ChinaHolidayInfo>();
+
+    Object.values(chinaHolidayRecordsByYear)
+      .flat()
+      .forEach((record) => {
+        holidayMap.set(record.date, record);
+      });
+
+    return holidayMap;
+  }, [chinaHolidayRecordsByYear]);
   const exportTemplateGroups = useMemo(
     () =>
       Array.from(new Set(EXPORT_TEMPLATES.map((template) => template.audience))).map((audience) => ({
@@ -4332,12 +6182,86 @@ function App() {
     () =>
       PRIORITY_OPTIONS.map((priorityOption) => ({
         ...priorityOption,
-        plans: plans.filter((item) => normalizePriority(item.priority) === priorityOption.id),
+        plans: getSortedPlansForPriority(plans, priorityOption.id),
       })),
     [plans],
   );
   const completedCount = plans.filter((item) => item.completed).length;
   const progress = plans.length > 0 ? Math.round((completedCount / plans.length) * 100) : 0;
+  const dailyTimeStats = useMemo<DailyTimeStats>(() => {
+    const targetTotalMinutes = getTotalMinutes(plans, "targetMinutes");
+    const savedActualMinutes = getTotalMinutes(plans, "actualMinutes");
+    const completedPlans = plans.filter((item) => item.completed);
+    const unfinishedPlans = plans.filter((item) => !item.completed);
+    const plannedTimePlans = plans.filter((item) => item.targetMinutes);
+    const temporaryTimerSeconds = plans.reduce((totalSeconds, item) => {
+      const timer = taskTimersByTaskId[item.id];
+
+      if (
+        !timer ||
+        item.completed ||
+        item.actualMinutes ||
+        (!timer.forwardHasStarted && !timer.isRunning)
+      ) {
+        return totalSeconds;
+      }
+
+      return totalSeconds + getTaskTimerElapsedSeconds(timer, timerTick);
+    }, 0);
+    const liveActualSeconds = savedActualMinutes * 60 + temporaryTimerSeconds;
+    const targetTotalSeconds = targetTotalMinutes * 60;
+    const comparableSavedActualMinutes = getTotalMinutes(plannedTimePlans, "actualMinutes");
+    const comparableTemporaryTimerSeconds = plannedTimePlans.reduce((totalSeconds, item) => {
+      const timer = taskTimersByTaskId[item.id];
+
+      if (
+        !timer ||
+        item.completed ||
+        item.actualMinutes ||
+        (!timer.forwardHasStarted && !timer.isRunning)
+      ) {
+        return totalSeconds;
+      }
+
+      return totalSeconds + getTaskTimerElapsedSeconds(timer, timerTick);
+    }, 0);
+    const comparableActualSeconds =
+      comparableSavedActualMinutes * 60 + comparableTemporaryTimerSeconds;
+    const unplannedActualSeconds = Math.max(0, liveActualSeconds - comparableActualSeconds);
+    const actualPercent =
+      targetTotalSeconds > 0
+        ? Math.round((comparableActualSeconds / targetTotalSeconds) * 100)
+        : 0;
+
+    return {
+      targetTotalMinutes,
+      savedActualMinutes,
+      temporaryTimerSeconds,
+      liveActualSeconds,
+      comparableActualSeconds,
+      differenceSeconds:
+        targetTotalSeconds > 0 ? comparableActualSeconds - targetTotalSeconds : null,
+      unplannedActualSeconds,
+      completedActualMinutes: getTotalMinutes(completedPlans, "actualMinutes"),
+      incompleteActualMinutes: getTotalMinutes(unfinishedPlans, "actualMinutes"),
+      unfinishedTargetMinutes: getTotalMinutes(unfinishedPlans, "targetMinutes"),
+      missingTargetCount: plans.filter((item) => !item.targetMinutes).length,
+      missingActualCount: plans.filter((item) => !item.actualMinutes).length,
+      activeTimerCount: plans.filter((item) => taskTimersByTaskId[item.id]?.isRunning).length,
+      trackedTimerCount: plans.filter((item) => {
+        const timer = taskTimersByTaskId[item.id];
+        return Boolean(
+          timer &&
+            !item.completed &&
+            !item.actualMinutes &&
+            (timer.forwardHasStarted || timer.isRunning),
+        );
+      }).length,
+      completedCount: completedPlans.length,
+      actualPercent,
+      actualProgress: Math.min(100, actualPercent),
+    };
+  }, [plans, taskTimersByTaskId, timerTick]);
 
   useEffect(() => {
     savePlanBook(plansByDate);
@@ -4356,6 +6280,18 @@ function App() {
     saveCustomCategories(customCategories);
     latestCustomCategories.current = customCategories;
   }, [customCategories]);
+
+  useEffect(() => {
+    refreshWeather({ silent: true });
+
+    const intervalId = window.setInterval(() => {
+      refreshWeather({ silent: true });
+    }, WEATHER_REFRESH_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [refreshWeather]);
 
   useEffect(() => {
     return () => {
@@ -4431,6 +6367,34 @@ function App() {
     });
     setTimerTick(Date.now());
   }, [taskTimersByTaskId, timerTick]);
+
+  useEffect(() => {
+    let isCancelled = false;
+    const years = Array.from(
+      new Set([getDateInputYear(selectedDate), getDateInputYear(calendarMonthDate)]),
+    );
+
+    years.forEach((year) => {
+      void loadChinaHolidayYear(year).then((result) => {
+        if (isCancelled) {
+          return;
+        }
+
+        setChinaHolidayRecordsByYear((currentRecords) => ({
+          ...currentRecords,
+          [year]: result.records,
+        }));
+        setChinaHolidaySourceByYear((currentSources) => ({
+          ...currentSources,
+          [year]: result.source,
+        }));
+      });
+    });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [calendarMonthDate, selectedDate]);
 
   useEffect(() => {
     if (!isSupabaseConfigured) {
@@ -4606,55 +6570,124 @@ function App() {
     }, 2400);
   };
 
+  const clearTaskDragState = () => {
+    setDraggedTaskId(null);
+    setDragOverPriority(null);
+    setTaskDropTarget(null);
+  };
+
+  const getTaskDropPlacement = (event: DragEvent<HTMLElement>): Exclude<TaskDropPlacement, "end"> => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+  };
+
   const updateTaskPriority = (itemId: string, priority: TaskPriority) => {
     const nextPriority = normalizePriority(priority);
     const updatedAt = Date.now();
 
-    updatePlansForSelectedDate((currentPlans) =>
-      currentPlans.map((item) =>
-        item.id === itemId && normalizePriority(item.priority) !== nextPriority
-          ? {
-              ...item,
-              priority: nextPriority,
-              updatedAt,
-            }
-          : item,
-      ),
-    );
+    updatePlansForSelectedDate((currentPlans) => {
+      const currentItem = currentPlans.find((item) => item.id === itemId);
+
+      if (!currentItem || normalizePriority(currentItem.priority) === nextPriority) {
+        return currentPlans;
+      }
+
+      return movePlanItemToPosition(currentPlans, itemId, nextPriority, null, "end", updatedAt);
+    });
   };
 
   const handleTaskDragStart = (event: DragEvent<HTMLElement>, item: PlanItem) => {
     setDraggedTaskId(item.id);
+    setTaskDropTarget(null);
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", item.id);
   };
 
   const handleTaskDragEnd = () => {
-    setDraggedTaskId(null);
-    setDragOverPriority(null);
+    clearTaskDragState();
   };
 
   const handlePriorityDragOver = (event: DragEvent<HTMLElement>, priority: TaskPriority) => {
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
     setDragOverPriority(priority);
+
+    const targetElement = event.target instanceof Element ? event.target : null;
+    const isOverTaskCard = Boolean(targetElement?.closest("[data-task-card='true']"));
+
+    if (!isOverTaskCard) {
+      setTaskDropTarget({ priority, itemId: null, placement: "end" });
+    }
   };
 
   const handlePriorityDrop = (event: DragEvent<HTMLElement>, priority: TaskPriority) => {
     event.preventDefault();
     const itemId = event.dataTransfer.getData("text/plain") || draggedTaskId;
+    const targetElement = event.target instanceof Element ? event.target : null;
+    const isOverTaskCard = Boolean(targetElement?.closest("[data-task-card='true']"));
 
-    if (itemId) {
-      updateTaskPriority(itemId, priority);
+    if (itemId && !isOverTaskCard) {
+      updatePlansForSelectedDate((currentPlans) =>
+        movePlanItemToPosition(currentPlans, itemId, priority, null, "end", Date.now()),
+      );
     }
 
-    setDraggedTaskId(null);
-    setDragOverPriority(null);
+    clearTaskDragState();
+  };
+
+  const handleTaskDragOver = (
+    event: DragEvent<HTMLElement>,
+    priority: TaskPriority,
+    targetItemId: string,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    setDragOverPriority(priority);
+
+    if (draggedTaskId === targetItemId) {
+      setTaskDropTarget(null);
+      return;
+    }
+
+    setTaskDropTarget({
+      priority,
+      itemId: targetItemId,
+      placement: getTaskDropPlacement(event),
+    });
+  };
+
+  const handleTaskDrop = (
+    event: DragEvent<HTMLElement>,
+    priority: TaskPriority,
+    targetItemId: string,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const itemId = event.dataTransfer.getData("text/plain") || draggedTaskId;
+    const placement = getTaskDropPlacement(event);
+
+    if (itemId && itemId !== targetItemId) {
+      updatePlansForSelectedDate((currentPlans) =>
+        movePlanItemToPosition(
+          currentPlans,
+          itemId,
+          priority,
+          targetItemId,
+          placement,
+          Date.now(),
+        ),
+      );
+    }
+
+    clearTaskDragState();
   };
 
   const jumpToPlanSearchResult = (result: PlanSearchResult) => {
     setSelectedDate(result.date);
+    setCalendarMonthDate(getMonthStartDateValue(result.date));
     resetForm();
+    cancelTaskInlineEdit();
     setActualEditId(null);
     setActualMinutesDraft("");
     setActualMinutesError("");
@@ -4871,8 +6904,22 @@ function App() {
     }
 
     if (editingId) {
-      updatePlansForSelectedDate((currentPlans) =>
-        currentPlans.map((item) =>
+      updatePlansForSelectedDate((currentPlans) => {
+        const currentItem = currentPlans.find((item) => item.id === editingId);
+        const priorityChanged =
+          currentItem && normalizePriority(currentItem.priority) !== normalizePriority(form.priority);
+        const basePlans = priorityChanged
+          ? movePlanItemToPosition(
+              currentPlans,
+              editingId,
+              normalizePriority(form.priority),
+              null,
+              "end",
+              updatedAt,
+            )
+          : currentPlans;
+
+        return basePlans.map((item) =>
           item.id === editingId
             ? {
                 ...item,
@@ -4884,8 +6931,8 @@ function App() {
                 updatedAt,
               }
             : item,
-        ),
-      );
+        );
+      });
       resetForm();
       return;
     }
@@ -4903,19 +6950,135 @@ function App() {
       updatedAt,
     };
 
-    updatePlansForSelectedDate((currentPlans) => [nextPlan, ...currentPlans]);
+    updatePlansForSelectedDate((currentPlans) =>
+      sortPlansByDisplayOrder([
+        {
+          ...nextPlan,
+          sortOrder: getTopSortOrderForPriority(currentPlans, form.priority),
+        },
+        ...currentPlans,
+      ]),
+    );
     resetForm();
   };
 
+  const shouldSaveTaskInlineBlur = () => {
+    if (!skipInlineBlurSave.current) {
+      return true;
+    }
+
+    skipInlineBlurSave.current = false;
+    return false;
+  };
+
+  const cancelTaskInlineEdit = (skipNextBlurSave = false) => {
+    skipInlineBlurSave.current = skipNextBlurSave;
+    setTaskInlineEdit(null);
+    setInlineTitleDraft("");
+    setInlineNoteDraft("");
+    setTargetMinutesEditDraft("");
+    setTargetMinutesEditError("");
+
+    if (skipNextBlurSave) {
+      window.setTimeout(() => {
+        skipInlineBlurSave.current = false;
+      }, 0);
+    }
+  };
+
+  const startTaskInlineEdit = (item: PlanItem, field: TaskInlineField) => {
+    if (editingId) {
+      resetForm();
+    }
+
+    setTaskInlineEdit({ itemId: item.id, field });
+    setInlineTitleDraft(field === "title" ? item.title : "");
+    setInlineNoteDraft(field === "note" ? item.note : "");
+    setTargetMinutesEditDraft(
+      field === "targetMinutes" && item.targetMinutes ? String(item.targetMinutes) : "",
+    );
+    setTargetMinutesEditError("");
+    setActualEditId(null);
+    setActualMinutesDraft("");
+    setActualMinutesError("");
+  };
+
   const handleEdit = (item: PlanItem) => {
-    setEditingId(item.id);
-    setForm({
-      title: item.title,
-      category: item.category,
-      priority: normalizePriority(item.priority),
-      note: item.note,
-      targetMinutes: item.targetMinutes ? String(item.targetMinutes) : "",
-    });
+    startTaskInlineEdit(item, "note");
+  };
+
+  const updateTaskCategory = (id: string, category: Category) => {
+    updatePlansForSelectedDate((currentPlans) =>
+      currentPlans.map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              category,
+              updatedAt: Date.now(),
+            }
+          : item,
+      ),
+    );
+    cancelTaskInlineEdit();
+  };
+
+  const saveInlineTitle = (id: string) => {
+    const title = inlineTitleDraft.trim();
+
+    if (!title) {
+      cancelTaskInlineEdit();
+      return;
+    }
+
+    updatePlansForSelectedDate((currentPlans) =>
+      currentPlans.map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              title,
+              updatedAt: Date.now(),
+            }
+          : item,
+      ),
+    );
+    cancelTaskInlineEdit();
+  };
+
+  const saveInlineNote = (id: string) => {
+    updatePlansForSelectedDate((currentPlans) =>
+      currentPlans.map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              note: inlineNoteDraft.trim(),
+              updatedAt: Date.now(),
+            }
+          : item,
+      ),
+    );
+    cancelTaskInlineEdit();
+  };
+
+  const saveTargetMinutesEdit = (id: string) => {
+    const targetMinutes = parseOptionalMinutes(targetMinutesEditDraft);
+
+    if (targetMinutes === null) {
+      setTargetMinutesEditError("请输入正整数分钟，或留空");
+      return;
+    }
+
+    updatePlansForSelectedDate((currentPlans) =>
+      currentPlans.map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              targetMinutes,
+              updatedAt: Date.now(),
+            }
+          : item,
+      ),
+    );
+    cancelTaskInlineEdit();
   };
 
   const handleDelete = (id: string) => {
@@ -4929,6 +7092,9 @@ function App() {
       setActualMinutesDraft("");
       setActualMinutesError("");
     }
+    if (taskInlineEdit?.itemId === id) {
+      cancelTaskInlineEdit();
+    }
     setTaskTimersByTaskId((currentTimers) => {
       const nextTimers = { ...currentTimers };
       delete nextTimers[id];
@@ -4937,6 +7103,7 @@ function App() {
   };
 
   const startActualMinutesEdit = (item: PlanItem) => {
+    cancelTaskInlineEdit();
     setActualEditId(item.id);
     setActualMinutesDraft(item.actualMinutes ? String(item.actualMinutes) : "");
     setActualMinutesError("");
@@ -4946,6 +7113,13 @@ function App() {
     setActualEditId(null);
     setActualMinutesDraft("");
     setActualMinutesError("");
+  };
+
+  const selectPlannerDate = (dateValue: string) => {
+    setSelectedDate(dateValue);
+    resetForm();
+    cancelTaskInlineEdit();
+    cancelActualMinutesEdit();
   };
 
   const saveActualMinutes = (id: string) => {
@@ -5119,6 +7293,7 @@ function App() {
     updatePlansForSelectedDate(() => []);
     setDeletedItemIds((current) => uniqueValues([...current, ...plans.map((item) => item.id)]));
     cancelActualMinutesEdit();
+    cancelTaskInlineEdit();
     setTaskTimersByTaskId({});
     clearTimerNotice();
     resetForm();
@@ -5188,6 +7363,165 @@ function App() {
 
     pdf.save(`今日计划手帐-${selectedDate}.pdf`);
   };
+
+  const timeDifferenceToneClass =
+    dailyTimeStats.differenceSeconds === null
+      ? "border-slate-100 bg-slate-50 text-slate-700"
+      : dailyTimeStats.differenceSeconds > 0
+      ? "border-rose-100 bg-rose-50 text-rose-700"
+      : dailyTimeStats.differenceSeconds < 0
+        ? "border-emerald-100 bg-emerald-50 text-emerald-700"
+        : "border-slate-100 bg-slate-50 text-slate-700";
+  const timeDifferenceDetail =
+    dailyTimeStats.differenceSeconds === null
+      ? "没有可比较的目标"
+      : dailyTimeStats.differenceSeconds > 0
+      ? "实际已超计划"
+      : dailyTimeStats.differenceSeconds < 0
+        ? "实际少于计划"
+        : "实际与计划持平";
+  const timeDifferenceValue =
+    dailyTimeStats.differenceSeconds === null
+      ? "暂无计划"
+      : formatSignedDashboardDuration(dailyTimeStats.differenceSeconds);
+  const dailyTimeStatCards = [
+    {
+      label: "计划总用时",
+      value: formatDashboardMinutes(dailyTimeStats.targetTotalMinutes),
+      detail: `${dailyTimeStats.missingTargetCount} 项未填目标`,
+      className: "border-sky-100 bg-sky-50 text-sky-700",
+    },
+    {
+      label: "实际总用时",
+      value: formatDashboardDuration(dailyTimeStats.liveActualSeconds),
+      detail:
+        dailyTimeStats.temporaryTimerSeconds > 0
+          ? `含计时 ${formatTimerSeconds(dailyTimeStats.temporaryTimerSeconds)}`
+          : `已记录 ${formatDashboardMinutes(dailyTimeStats.savedActualMinutes)}`,
+      className: "border-violet-100 bg-violet-50 text-violet-700",
+    },
+    {
+      label: "用时差值",
+      value: timeDifferenceValue,
+      detail: timeDifferenceDetail,
+      className: timeDifferenceToneClass,
+    },
+  ];
+  const getLiveActualSecondsForPlan = (item: PlanItem) => {
+    const timer = taskTimersByTaskId[item.id];
+    const liveTimerSeconds =
+      timer && !item.completed && !item.actualMinutes && (timer.forwardHasStarted || timer.isRunning)
+        ? getTaskTimerElapsedSeconds(timer, timerTick)
+        : 0;
+
+    return (item.actualMinutes ?? 0) * 60 + liveTimerSeconds;
+  };
+  const categoryTimeChartItems = Array.from(
+    plans.reduce((categoryMap, item) => {
+      const key = item.category || "未分类";
+      const current = categoryMap.get(key) ?? {
+        actualSeconds: 0,
+        count: 0,
+        label: key,
+        targetSeconds: 0,
+      };
+
+      current.count += 1;
+      current.targetSeconds += (item.targetMinutes ?? 0) * 60;
+      current.actualSeconds += getLiveActualSecondsForPlan(item);
+      categoryMap.set(key, current);
+      return categoryMap;
+    }, new Map<string, { actualSeconds: number; count: number; label: string; targetSeconds: number }>()),
+  )
+    .map(([, value]) => value)
+    .filter((item) => item.targetSeconds > 0 || item.actualSeconds > 0)
+    .sort((left, right) => right.actualSeconds + right.targetSeconds - (left.actualSeconds + left.targetSeconds))
+    .slice(0, 5);
+  const priorityTimeChartItems = PRIORITY_OPTIONS.map((priorityOption) => {
+    const priorityPlans = plans.filter((item) => normalizePriority(item.priority) === priorityOption.id);
+
+    return {
+      actualSeconds: priorityPlans.reduce(
+        (totalSeconds, item) => totalSeconds + getLiveActualSecondsForPlan(item),
+        0,
+      ),
+      count: priorityPlans.length,
+      hint: priorityOption.hint,
+      icon: priorityOption.icon,
+      id: priorityOption.id,
+      label: priorityOption.name,
+      targetSeconds: getTotalMinutes(priorityPlans, "targetMinutes") * 60,
+    };
+  }).filter((item) => item.count > 0);
+  const taskTimeChartItems = plans
+    .map((item) => {
+      const targetSeconds = (item.targetMinutes ?? 0) * 60;
+      const actualSeconds = getLiveActualSecondsForPlan(item);
+
+      return {
+        actualSeconds,
+        id: item.id,
+        targetSeconds,
+        title: item.title || "未命名计划",
+      };
+    })
+    .filter((item) => item.targetSeconds > 0 || item.actualSeconds > 0)
+    .slice(0, 6);
+  const taskTimeChartMaxSeconds = Math.max(
+    ...taskTimeChartItems.flatMap((item) => [item.targetSeconds, item.actualSeconds]),
+    60,
+  );
+  const chartPalette = ["#38bdf8", "#a78bfa", "#fbbf24", "#34d399", "#fb7185"];
+  const categoryChartMaxSeconds = Math.max(
+    ...categoryTimeChartItems.flatMap((item) => [item.targetSeconds, item.actualSeconds]),
+    60,
+  );
+  const categoryVisualizationItems = categoryTimeChartItems.map((item, index) => ({
+    ...item,
+    actualHeight:
+      item.actualSeconds > 0 ? Math.max(8, Math.min(100, (item.actualSeconds / categoryChartMaxSeconds) * 100)) : 0,
+    color: chartPalette[index % chartPalette.length],
+    targetHeight:
+      item.targetSeconds > 0 ? Math.max(8, Math.min(100, (item.targetSeconds / categoryChartMaxSeconds) * 100)) : 0,
+  }));
+  const priorityChartStyleById = {
+    high: {
+      accentColor: "#f43f5e",
+      backgroundColor: "#fff1f2",
+      borderColor: "#fecdd3",
+      targetColor: "#7dd3fc",
+    },
+    medium: {
+      accentColor: "#0ea5e9",
+      backgroundColor: "#f0f9ff",
+      borderColor: "#bae6fd",
+      targetColor: "#a78bfa",
+    },
+    low: {
+      accentColor: "#10b981",
+      backgroundColor: "#ecfdf5",
+      borderColor: "#bbf7d0",
+      targetColor: "#fbbf24",
+    },
+  } satisfies Record<
+    TaskPriority,
+    {
+      accentColor: string;
+      backgroundColor: string;
+      borderColor: string;
+      targetColor: string;
+    }
+  >;
+  const priorityVisualizationItems = priorityTimeChartItems.map((item) => {
+    const localMaxSeconds = Math.max(item.targetSeconds, item.actualSeconds, 60);
+
+    return {
+      ...item,
+      ...priorityChartStyleById[item.id],
+      actualHeight: item.actualSeconds > 0 ? Math.max(8, (item.actualSeconds / localMaxSeconds) * 100) : 0,
+      targetHeight: item.targetSeconds > 0 ? Math.max(8, (item.targetSeconds / localMaxSeconds) * 100) : 0,
+    };
+  });
 
   return (
     <main className="min-h-screen bg-[#fff8ef] bg-[linear-gradient(180deg,#fff8ef_0%,#f6f1ff_48%,#edf8ff_100%)] px-4 py-6 text-[#46394f] sm:px-6 lg:px-8">
@@ -5277,19 +7611,24 @@ function App() {
             ) : null}
           </div>
 
-          <div className="flex flex-col gap-3 sm:min-w-80">
+          <div className="flex flex-col gap-3 sm:min-w-80 md:min-w-[28rem]">
             <label className="text-sm font-bold text-[#6f5d78]" htmlFor="planner-date">
               选择日期
             </label>
-            <input
-              className="rounded-2xl border border-pink-100 bg-white px-4 py-3 text-[#46394f] shadow-sm outline-none transition focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
-              id="planner-date"
-              type="date"
-              value={selectedDate}
-              onChange={(event) => {
-                setSelectedDate(event.target.value);
-                resetForm();
-              }}
+            <ChinaHolidayDatePicker
+              calendarMonthDate={calendarMonthDate}
+              holidayMap={chinaHolidayMap}
+              holidaySourceByYear={chinaHolidaySourceByYear}
+              selectedDate={selectedDate}
+              summaryAside={
+                <WeatherWidget
+                  weatherState={weatherState}
+                  onRefresh={() => refreshWeather({ force: true })}
+                />
+              }
+              today={today}
+              onCalendarMonthDateChange={setCalendarMonthDate}
+              onSelectDate={selectPlannerDate}
             />
           </div>
         </header>
@@ -5756,6 +8095,346 @@ function App() {
                 </div>
               </div>
 
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-[1.15rem] border border-white/80 bg-white/55 px-3 py-2">
+                <div className="min-w-0">
+                  <p className="text-xs font-black text-[#5a4b63]">今日任务</p>
+                  <p className="mt-0.5 text-[11px] font-bold text-[#8b7b91]">
+                    {plans.length > 0
+                      ? `计划 ${formatDashboardMinutes(dailyTimeStats.targetTotalMinutes)} · 实际 ${formatDashboardDuration(dailyTimeStats.liveActualSeconds)}`
+                      : "先添加任务，再查看统计"}
+                  </p>
+                </div>
+                <button
+                  className="rounded-full bg-[#8b5cf6] px-3 py-1.5 text-xs font-black text-white shadow-sm shadow-violet-100 transition hover:bg-[#7c4de8] focus:outline-none focus:ring-4 focus:ring-violet-100"
+                  data-export-ignore="true"
+                  type="button"
+                  onClick={() => setIsTimeDashboardOpen(true)}
+                >
+                  查看用时看板
+                </button>
+              </div>
+
+              {createPortal(
+                <AnimatePresence>
+                  {isTimeDashboardOpen ? (
+                    <motion.div
+                    animate={{ opacity: 1 }}
+                    className="fixed inset-0 z-[9999] flex items-center justify-center overflow-y-auto bg-[#2d2433]/45 px-4 py-5 backdrop-blur-sm"
+                    data-export-ignore="true"
+                    exit={{ opacity: 0 }}
+                    initial={{ opacity: 0 }}
+                    onClick={() => setIsTimeDashboardOpen(false)}
+                  >
+                    <motion.div
+                      animate={{ opacity: 1, scale: 1, y: 0 }}
+                      className="w-full max-w-[980px]"
+                      exit={{ opacity: 0, scale: 0.98, y: 8 }}
+                      initial={{ opacity: 0, scale: 0.98, y: 8 }}
+                      transition={{ duration: 0.18 }}
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      <section
+                        aria-label="每日用时统计看板"
+                        className="max-h-[calc(100vh-2.5rem)] overflow-y-auto rounded-[1.5rem] border border-white/80 bg-white p-4 shadow-2xl shadow-violet-200/40"
+                      >
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h4 className="text-lg font-black text-[#4b3a59]">每日用时统计</h4>
+                    <p className="mt-0.5 text-sm font-bold text-[#8b7b91]">
+                      {plans.length > 0 ? `当前 ${plans.length} 项任务` : "暂无用时数据"}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-full bg-white px-3 py-1 text-xs font-black text-[#7a6b84]">
+                      {dailyTimeStats.activeTimerCount > 0
+                        ? `${dailyTimeStats.activeTimerCount} 项计时中`
+                        : "实时更新"}
+                    </span>
+                    <button
+                      className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-[#6d5d75] transition hover:bg-slate-200 focus:outline-none focus:ring-4 focus:ring-slate-100"
+                      type="button"
+                      onClick={() => setIsTimeDashboardOpen(false)}
+                    >
+                      关闭
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                  {dailyTimeStatCards.map((card) => (
+                    <div
+                      className={`rounded-[1rem] border px-3 py-2.5 ${card.className}`}
+                      key={card.label}
+                    >
+                      <p className="text-xs font-black opacity-75">{card.label}</p>
+                      <p className="mt-1 break-words text-2xl font-black leading-tight">
+                        {card.value}
+                      </p>
+                      <p className="mt-1 text-xs font-bold opacity-75">{card.detail}</p>
+                    </div>
+                  ))}
+                  <div className="flex items-center justify-between gap-3 rounded-[1rem] border border-violet-100 bg-violet-50 px-3 py-2.5 text-violet-700">
+                    <div>
+                      <p className="text-xs font-black opacity-75">实际 / 计划</p>
+                      <p className="mt-2 text-sm font-bold leading-tight opacity-75">按目标完成比例</p>
+                    </div>
+                    <div
+                      className="relative flex h-24 w-24 shrink-0 items-center justify-center rounded-full"
+                      style={{
+                        background: `conic-gradient(#8b5cf6 ${dailyTimeStats.actualProgress * 3.6}deg, #eaf2ff 0deg)`,
+                      }}
+                    >
+                      <div className="absolute inset-3 flex flex-col items-center justify-center rounded-full bg-white text-center shadow-sm">
+                        <span className="text-xl font-black text-[#4b3a59]">
+                          {dailyTimeStats.targetTotalMinutes > 0
+                            ? `${dailyTimeStats.actualPercent}%`
+                            : "暂无"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                  <div className="rounded-[1.15rem] border border-white/80 bg-white/70 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <p className="text-base font-black text-[#5a4b63]">按分类统计</p>
+                      <span className="text-xs font-black text-[#8b7b91]">
+                        {categoryVisualizationItems.length > 0 ? `${categoryVisualizationItems.length} 组` : "暂无用时数据"}
+                      </span>
+                    </div>
+                    {categoryVisualizationItems.length > 0 ? (
+                      <div className="rounded-[1.2rem] border-2 border-sky-200 bg-sky-100/55 p-2.5 shadow-inner shadow-sky-100">
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {categoryVisualizationItems.map((item) => (
+                            <div
+                              className="rounded-[1rem] border p-2.5"
+                              key={item.label}
+                              style={{
+                                background: `linear-gradient(180deg, ${item.color}16 0%, #ffffff 100%)`,
+                                borderColor: `${item.color}55`,
+                              }}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="inline-flex min-w-0 items-center gap-1.5 text-sm font-black text-[#5a4b63]">
+                                  <span
+                                    className="h-2.5 w-2.5 shrink-0 rounded-full"
+                                    style={{ backgroundColor: item.color }}
+                                  />
+                                  <span className="truncate">{item.label}</span>
+                                </span>
+                                <span className="shrink-0 rounded-full bg-white/80 px-2 py-0.5 text-sm font-black text-[#8b7b91]">
+                                  {item.count} 项
+                                </span>
+                              </div>
+                              <div className="mt-2 flex h-32 items-end justify-center gap-5 rounded-[0.9rem] bg-white/70 px-2 py-2">
+                                {[
+                                  {
+                                    color: "#7dd3fc",
+                                    height: item.targetHeight,
+                                    label: "计划",
+                                    value: item.targetSeconds,
+                                  },
+                                  {
+                                    color: "#a78bfa",
+                                    height: item.actualHeight,
+                                    label: "实际",
+                                    value: item.actualSeconds,
+                                  },
+                                ].map((bar) => (
+                                  <div className="flex min-w-0 flex-col items-center gap-1" key={bar.label}>
+                                    <span className="whitespace-nowrap text-center text-xs font-black leading-tight text-[#786981]">
+                                      {formatDashboardDuration(bar.value)}
+                                    </span>
+                                    <div className="flex h-20 w-8 items-end rounded-full bg-white p-0.5 shadow-inner">
+                                      <div
+                                        className="w-full rounded-full"
+                                        style={{ backgroundColor: bar.color, height: `${bar.height}%` }}
+                                      />
+                                    </div>
+                                    <span className="text-xs font-black text-[#8b7b91]">{bar.label}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="rounded-[1rem] border border-dashed border-slate-100 bg-slate-50/70 px-3 py-4 text-center text-xs font-black text-[#8b7b91]">
+                        暂无用时数据
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="rounded-[1.15rem] border border-white/80 bg-white/70 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <p className="text-base font-black text-[#5a4b63]">按优先级统计</p>
+                      <span className="text-xs font-black text-[#8b7b91]">
+                        {priorityVisualizationItems.length > 0 ? `${priorityVisualizationItems.length} 组` : "暂无用时数据"}
+                      </span>
+                    </div>
+                    {priorityVisualizationItems.length > 0 ? (
+                      <div className="rounded-[1.2rem] border-2 border-violet-200 bg-violet-100/55 p-2.5 shadow-inner shadow-violet-100">
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {priorityVisualizationItems.map((item) => (
+                            <div
+                              className="rounded-[1rem] border p-2.5"
+                              key={item.label}
+                              style={{ backgroundColor: item.backgroundColor, borderColor: item.borderColor }}
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="min-w-0">
+                                  <p className="truncate text-sm font-black text-[#5a4b63]">
+                                    {item.icon} {item.label}
+                                  </p>
+                                  <p className="mt-0.5 truncate text-xs font-bold text-[#8b7b91]">{item.hint}</p>
+                                </div>
+                                <span className="shrink-0 rounded-full bg-white/80 px-2 py-0.5 text-sm font-black text-[#8b7b91]">
+                                  {item.count} 项
+                                </span>
+                              </div>
+                              <div className="mt-2 flex h-32 items-end justify-center gap-6 rounded-[0.9rem] bg-white/70 px-2 py-2">
+                                <div className="flex w-12 flex-col items-center justify-end gap-1">
+                                  <span className="whitespace-nowrap text-center text-xs font-black leading-tight text-[#786981]">
+                                    {formatDashboardDuration(item.targetSeconds)}
+                                  </span>
+                                  <div className="flex h-20 w-8 items-end rounded-full bg-sky-50 p-0.5">
+                                    <div
+                                      className="w-full rounded-full"
+                                      style={{ backgroundColor: item.targetColor, height: `${item.targetHeight}%` }}
+                                    />
+                                  </div>
+                                  <span className="text-xs font-black text-[#8b7b91]">计划</span>
+                                </div>
+                                <div className="flex w-12 flex-col items-center justify-end gap-1">
+                                  <span className="whitespace-nowrap text-center text-xs font-black leading-tight text-[#786981]">
+                                    {formatDashboardDuration(item.actualSeconds)}
+                                  </span>
+                                  <div className="flex h-20 w-8 items-end rounded-full bg-white p-0.5 shadow-inner">
+                                    <div
+                                      className="w-full rounded-full"
+                                      style={{ backgroundColor: item.accentColor, height: `${item.actualHeight}%` }}
+                                    />
+                                  </div>
+                                  <span className="text-xs font-black text-[#8b7b91]">实际</span>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="rounded-[1rem] border border-dashed border-slate-100 bg-slate-50/70 px-3 py-4 text-center text-xs font-black text-[#8b7b91]">
+                        暂无用时数据
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="mt-3 rounded-[1.15rem] border border-white/80 bg-white/70 p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="text-base font-black text-[#5a4b63]">任务计划 / 实际柱状图</p>
+                    <span className="text-xs font-black text-[#8b7b91]">
+                      {taskTimeChartItems.length > 0 ? `${taskTimeChartItems.length} 项有用时数据` : "暂无用时数据"}
+                    </span>
+                  </div>
+                  {taskTimeChartItems.length > 0 ? (
+                    <div className="overflow-x-auto">
+                      <div className="flex min-w-max items-stretch gap-3 rounded-[1rem] bg-[#faf7fb] px-3 pb-3 pt-3">
+                        {taskTimeChartItems.map((item) => (
+                          <div
+                            className="flex w-32 shrink-0 flex-col items-center rounded-[1rem] border border-violet-100 bg-white/80 px-2 py-2 shadow-sm shadow-violet-100/60"
+                            key={item.id}
+                          >
+                            <div className="flex h-36 items-end justify-center gap-2">
+                              {[
+                                {
+                                  colorClass: "bg-sky-300",
+                                  label: "计划",
+                                  value: item.targetSeconds,
+                                },
+                                {
+                                  colorClass: "bg-violet-400",
+                                  label: "实际",
+                                  value: item.actualSeconds,
+                                },
+                              ].map((bar) => (
+                                <div className="flex h-full w-12 flex-col items-center justify-end gap-1" key={bar.label}>
+                                  <span className="whitespace-nowrap text-center text-xs font-black leading-tight text-[#786981]">
+                                    {formatDashboardDuration(bar.value)}
+                                  </span>
+                                  <div className="flex h-24 w-8 items-end rounded-full bg-white p-0.5 shadow-inner">
+                                    <div
+                                      className={`w-full rounded-full ${bar.colorClass}`}
+                                      style={{
+                                        height:
+                                          bar.value > 0
+                                            ? `${Math.max(6, Math.min(100, (bar.value / taskTimeChartMaxSeconds) * 100))}%`
+                                            : "0%",
+                                      }}
+                                    />
+                                  </div>
+                                  <span className="text-xs font-black text-[#8b7b91]">
+                                    {bar.label}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                            <p className="mt-2 w-full truncate text-center text-sm font-black text-[#5a4b63]">
+                              {item.title}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded-[1rem] border border-dashed border-slate-100 bg-slate-50/70 px-3 py-4 text-center text-xs font-black text-[#8b7b91]">
+                      暂无用时数据
+                    </div>
+                  )}
+
+                  <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-bold text-[#7b6c84]">
+                    <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2.5 py-1 text-sky-700">
+                      <span className="h-2 w-2 rounded-full bg-sky-300" />
+                      计划
+                    </span>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2.5 py-1 text-violet-700">
+                      <span className="h-2 w-2 rounded-full bg-violet-400" />
+                      实际
+                    </span>
+                    <span className="inline-flex items-center rounded-full bg-white/80 px-2.5 py-1 leading-none">
+                      实际总用时包含未完成任务已记录/计时用时
+                    </span>
+                    <span className="inline-flex items-center rounded-full bg-white/80 px-2.5 py-1 leading-none">
+                      已记录 {formatDashboardMinutes(dailyTimeStats.savedActualMinutes)}
+                    </span>
+                    {dailyTimeStats.unplannedActualSeconds > 0 ? (
+                      <span className="inline-flex items-center rounded-full bg-white/80 px-2.5 py-1 leading-none text-slate-700">
+                        未设目标实际 {formatDashboardDuration(dailyTimeStats.unplannedActualSeconds)} 未纳入差值
+                      </span>
+                    ) : null}
+                    {dailyTimeStats.temporaryTimerSeconds > 0 ? (
+                      <span className="inline-flex items-center rounded-full bg-white/80 px-2.5 py-1 leading-none text-violet-700">
+                        进行中 +{formatTimerSeconds(dailyTimeStats.temporaryTimerSeconds)}
+                      </span>
+                    ) : null}
+                    <span className="inline-flex items-center rounded-full bg-white/80 px-2.5 py-1 leading-none">
+                      未完成计划 {formatDashboardMinutes(dailyTimeStats.unfinishedTargetMinutes)}
+                    </span>
+                    <span className="inline-flex items-center rounded-full bg-white/80 px-2.5 py-1 leading-none">
+                      未填实际 {dailyTimeStats.missingActualCount} 项
+                    </span>
+                  </div>
+                </div>
+              </section>
+                    </motion.div>
+                    </motion.div>
+                  ) : null}
+                </AnimatePresence>,
+                document.body,
+              )}
+
               <AnimatePresence>
                 {timerNotice ? (
                   <motion.div
@@ -5782,6 +8461,9 @@ function App() {
                 <div className="flex flex-col gap-4">
                   {plansByPriority.map((prioritySection) => {
                     const isDragOver = dragOverPriority === prioritySection.id;
+                    const isDropAtSectionEnd =
+                      taskDropTarget?.priority === prioritySection.id &&
+                      taskDropTarget.itemId === null;
 
                     return (
                       <section
@@ -5789,9 +8471,23 @@ function App() {
                           isDragOver ? prioritySection.activeClass : prioritySection.sectionClass
                         }`}
                         key={prioritySection.id}
-                        onDragLeave={() => {
+                        onDragLeave={(event) => {
+                          const relatedTarget = event.relatedTarget;
+                          const relatedNode =
+                            relatedTarget &&
+                            typeof (relatedTarget as { nodeType?: unknown }).nodeType === "number"
+                              ? (relatedTarget as globalThis.Node)
+                              : null;
+
+                          if (relatedNode && event.currentTarget.contains(relatedNode)) {
+                            return;
+                          }
+
                           if (dragOverPriority === prioritySection.id) {
                             setDragOverPriority(null);
+                          }
+                          if (taskDropTarget?.priority === prioritySection.id) {
+                            setTaskDropTarget(null);
                           }
                         }}
                         onDragOver={(event) => handlePriorityDragOver(event, prioritySection.id)}
@@ -5820,6 +8516,12 @@ function App() {
                             {prioritySection.plans.map((item) => {
                     const style = getCategoryStyle(item.category, customCategories);
                     const priorityOption = getPriorityOption(item.priority);
+                    const activeCardDropPlacement =
+                      taskDropTarget?.priority === prioritySection.id &&
+                      taskDropTarget.itemId === item.id &&
+                      taskDropTarget.placement !== "end"
+                        ? taskDropTarget.placement
+                        : null;
                     const timerForItem = taskTimersByTaskId[item.id] ?? null;
                     const timerElapsedSeconds = timerForItem
                       ? getTaskTimerElapsedSeconds(timerForItem, timerTick)
@@ -5844,6 +8546,14 @@ function App() {
                     const activeCountdownSeconds = hasCountdownTiming
                       ? timerForItem?.countdownInitialSeconds
                       : null;
+                    const activeInlineField =
+                      taskInlineEdit?.itemId === item.id ? taskInlineEdit.field : null;
+                    const isCategoryEditing = activeInlineField === "category";
+                    const isTargetMinutesEditing = activeInlineField === "targetMinutes";
+                    const isTitleEditing = activeInlineField === "title";
+                    const isNoteEditing = activeInlineField === "note";
+                    const isActualEditing = actualEditId === item.id;
+                    const isCardInputEditing = Boolean(activeInlineField) || isActualEditing;
 
                     return (
                       <motion.article
@@ -5864,15 +8574,39 @@ function App() {
                             : draggedTaskId === item.id
                               ? "opacity-70 ring-4 ring-white/80"
                             : ""
-                        } cursor-grab active:cursor-grabbing`}
-                        draggable
+                        } ${
+                          activeCardDropPlacement
+                            ? "ring-4 ring-pink-200 ring-offset-2 ring-offset-white"
+                            : ""
+                        } ${isCardInputEditing ? "" : "cursor-grab active:cursor-grabbing"}`}
+                        data-task-card="true"
+                        draggable={!isCardInputEditing}
                         id={item.id ? `task-${item.id}` : undefined}
                         initial={{ opacity: 0, y: 12 }}
                         key={item.id}
                         onDragEndCapture={handleTaskDragEnd}
-                        onDragStartCapture={(event) => handleTaskDragStart(event, item)}
+                        onDragOver={(event) =>
+                          handleTaskDragOver(event, prioritySection.id, item.id)
+                        }
+                        onDragStartCapture={(event) => {
+                          if (isCardInputEditing) {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            return;
+                          }
+
+                          handleTaskDragStart(event, item);
+                        }}
+                        onDrop={(event) => handleTaskDrop(event, prioritySection.id, item.id)}
                         transition={{ duration: 0.42, ease: "easeOut" }}
                       >
+                        {activeCardDropPlacement ? (
+                          <div
+                            className={`pointer-events-none absolute left-4 right-4 z-30 h-1.5 rounded-full bg-[#ff8fbc] shadow-sm shadow-pink-200 ${
+                              activeCardDropPlacement === "before" ? "top-1" : "bottom-1"
+                            }`}
+                          />
+                        ) : null}
                         <div className="absolute -right-5 -top-5 h-14 w-14 rounded-full border-8 border-white/60 bg-white/30" />
                         <AnimatePresence>
                           {completionFeedback?.itemId === item.id ? (
@@ -5881,7 +8615,13 @@ function App() {
                         </AnimatePresence>
                         <div className="relative flex gap-2.5">
                           <div className="flex w-16 shrink-0 flex-col items-center gap-1.5">
-                            <div className="flex h-12 w-12 items-center justify-center overflow-hidden rounded-2xl border border-white/80 bg-white text-[1.18rem] leading-none shadow-sm">
+                            <button
+                              aria-label="编辑分类"
+                              className="flex h-12 w-12 items-center justify-center overflow-hidden rounded-2xl border border-white/80 bg-white text-[1.18rem] leading-none shadow-sm transition hover:bg-white/90 focus:outline-none focus:ring-4 focus:ring-pink-100"
+                              data-export-ignore="true"
+                              type="button"
+                              onClick={() => startTaskInlineEdit(item, "category")}
+                            >
                               <span
                                 aria-label={style.caption}
                                 className="inline-flex whitespace-nowrap leading-none"
@@ -5889,35 +8629,65 @@ function App() {
                               >
                                 {style.emoji}
                               </span>
-                            </div>
-                            <span
-                              className={`max-w-full truncate whitespace-nowrap rounded-full bg-white/80 px-2 py-1 text-xs font-black ${style.accent}`}
-                              title={item.category}
-                            >
-                              {item.category}
-                            </span>
+                            </button>
+                            {isCategoryEditing ? (
+                              <select
+                                autoFocus
+                                className={`-mx-2 w-20 rounded-full border border-white bg-white/95 px-1.5 py-1 text-xs font-black outline-none transition focus:border-pink-300 focus:ring-4 focus:ring-pink-100 ${style.accent}`}
+                                data-export-ignore="true"
+                                draggable={false}
+                                value={item.category}
+                                onBlur={() => cancelTaskInlineEdit()}
+                                onChange={(event) => updateTaskCategory(item.id, event.target.value)}
+                                onDragStartCapture={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                }}
+                              >
+                                {categoryOptions.map((category) => (
+                                  <option key={category.id} value={category.name}>
+                                    {category.icon} {category.name}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : (
+                              <button
+                                className={`max-w-full truncate whitespace-nowrap rounded-full bg-white/80 px-2 py-1 text-xs font-black transition hover:bg-white focus:outline-none focus:ring-4 focus:ring-pink-100 ${style.accent}`}
+                                data-export-ignore="true"
+                                title={item.category}
+                                type="button"
+                                onClick={() => startTaskInlineEdit(item, "category")}
+                              >
+                                {item.category}
+                              </button>
+                            )}
                           </div>
                           <div className="min-w-0 flex-1">
                             <div className="mb-1.5 flex flex-nowrap items-center justify-between gap-2">
-                                <label
-                                  className={`min-w-[8.75rem] shrink-0 rounded-full px-2.5 py-1 text-xs font-black ${priorityOption.badgeClass}`}
-                                  data-export-ignore="true"
+                              <label
+                                className={`min-w-[8.75rem] shrink-0 rounded-full px-2.5 py-1 text-xs font-black ${priorityOption.badgeClass}`}
+                                data-export-ignore="true"
+                              >
+                                <span className="sr-only">优先级</span>
+                                <select
+                                  className="w-full bg-transparent text-xs font-black outline-none"
+                                  draggable={false}
+                                  value={normalizePriority(item.priority)}
+                                  onChange={(event) =>
+                                    updateTaskPriority(item.id, normalizePriority(event.target.value))
+                                  }
+                                  onDragStartCapture={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                  }}
                                 >
-                                  <span className="sr-only">优先级</span>
-                                  <select
-                                    className="w-full bg-transparent text-xs font-black outline-none"
-                                    value={normalizePriority(item.priority)}
-                                    onChange={(event) =>
-                                      updateTaskPriority(item.id, normalizePriority(event.target.value))
-                                    }
-                                  >
-                                    {PRIORITY_OPTIONS.map((option) => (
-                                      <option key={option.id} value={option.id}>
-                                        {option.icon} {option.name}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </label>
+                                  {PRIORITY_OPTIONS.map((option) => (
+                                    <option key={option.id} value={option.id}>
+                                      {option.icon} {option.name}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
                               <button
                                 className={`flex min-h-7 shrink-0 items-center gap-1.5 rounded-full px-3 py-1 text-xs font-black transition ${
                                   item.completed
@@ -5946,19 +8716,80 @@ function App() {
                               </button>
                             </div>
                             <div className="flex items-baseline">
-                              <h3
-                                className={`min-w-0 flex-1 break-words text-lg font-black text-[#41354b] ${
-                                  item.completed ? "line-through decoration-2 opacity-60" : ""
-                                }`}
-                              >
-                                {item.title}
-                              </h3>
+                              {isTitleEditing ? (
+                                <input
+                                  autoFocus
+                                  className="min-w-0 flex-1 rounded-xl border border-pink-200 bg-white/95 px-2.5 py-1 text-lg font-black text-[#41354b] outline-none transition focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+                                  data-export-ignore="true"
+                                  draggable={false}
+                                  maxLength={48}
+                                  value={inlineTitleDraft}
+                                  onBlur={() => {
+                                    if (shouldSaveTaskInlineBlur()) {
+                                      saveInlineTitle(item.id);
+                                    }
+                                  }}
+                                  onChange={(event) => setInlineTitleDraft(event.target.value)}
+                                  onDragStartCapture={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                  }}
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Enter") {
+                                      event.preventDefault();
+                                      saveInlineTitle(item.id);
+                                    }
+                                    if (event.key === "Escape") {
+                                      cancelTaskInlineEdit(true);
+                                    }
+                                  }}
+                                />
+                              ) : (
+                                <h3
+                                  className={`min-w-0 flex-1 break-words text-lg font-black text-[#41354b] ${
+                                    item.completed ? "line-through decoration-2 opacity-60" : ""
+                                  }`}
+                                  onDoubleClick={() => startTaskInlineEdit(item, "title")}
+                                >
+                                  {item.title}
+                                </h3>
+                              )}
                             </div>
-                            {item.note ? (
+                            {isNoteEditing ? (
+                              <textarea
+                                autoFocus
+                                className="mt-1 min-h-12 w-full resize-none rounded-xl border border-pink-100 bg-white/95 px-2.5 py-1.5 text-sm font-bold leading-5 text-[#74667d] outline-none transition focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+                                data-export-ignore="true"
+                                draggable={false}
+                                maxLength={160}
+                                placeholder="可选"
+                                value={inlineNoteDraft}
+                                onBlur={() => {
+                                  if (shouldSaveTaskInlineBlur()) {
+                                    saveInlineNote(item.id);
+                                  }
+                                }}
+                                onChange={(event) => setInlineNoteDraft(event.target.value)}
+                                onDragStartCapture={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                }}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Escape") {
+                                    cancelTaskInlineEdit(true);
+                                  }
+                                  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                                    event.preventDefault();
+                                    saveInlineNote(item.id);
+                                  }
+                                }}
+                              />
+                            ) : item.note ? (
                               <p
                                 className={`mt-1 whitespace-pre-wrap break-words text-sm leading-5 text-[#74667d] ${
                                   item.completed ? "opacity-60" : ""
                                 }`}
+                                onDoubleClick={() => startTaskInlineEdit(item, "note")}
                               >
                                 {item.note}
                               </p>
@@ -5967,23 +8798,85 @@ function App() {
                         </div>
 
                         <div className="relative mt-2 flex w-full flex-row flex-wrap items-center justify-start gap-2 text-xs font-black text-[#74667d] sm:gap-3">
-                          <span className="inline-flex min-h-7 shrink-0 items-center rounded-full bg-white/70 px-2.5 py-0.5">
-                            目标：{formatMinutes(item.targetMinutes)}
-                          </span>
+                          {isTargetMinutesEditing ? (
+                            <form
+                              className="inline-flex min-h-7 shrink-0 items-center rounded-full bg-white/80 px-2.5 py-0.5"
+                              data-export-ignore="true"
+                              onDragStartCapture={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                              }}
+                              onSubmit={(event) => {
+                                event.preventDefault();
+                                saveTargetMinutesEdit(item.id);
+                              }}
+                            >
+                              <span className="mr-1 whitespace-nowrap">目标：</span>
+                              <input
+                                autoFocus
+                                className="w-16 bg-transparent text-xs font-black text-[#46394f] outline-none"
+                                draggable={false}
+                                inputMode="numeric"
+                                min={1}
+                                pattern="[1-9][0-9]*"
+                                placeholder="分钟"
+                                step={1}
+                                type="text"
+                                value={targetMinutesEditDraft}
+                                onBlur={() => {
+                                  if (shouldSaveTaskInlineBlur()) {
+                                    saveTargetMinutesEdit(item.id);
+                                  }
+                                }}
+                                onChange={(event) => {
+                                  const nextValue = event.target.value;
+
+                                  if (nextValue === "" || /^[1-9]\d*$/.test(nextValue)) {
+                                    setTargetMinutesEditDraft(nextValue);
+                                  }
+                                  setTargetMinutesEditError("");
+                                }}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Escape") {
+                                    cancelTaskInlineEdit(true);
+                                  }
+                                }}
+                              />
+                            </form>
+                          ) : (
+                            <button
+                              aria-label="编辑目标用时"
+                              className="inline-flex min-h-7 shrink-0 items-center rounded-full bg-white/70 px-2.5 py-0.5 text-left transition hover:bg-white hover:text-pink-700 focus:outline-none focus:ring-4 focus:ring-pink-100"
+                              data-export-ignore="true"
+                              type="button"
+                              onClick={() => startTaskInlineEdit(item, "targetMinutes")}
+                            >
+                              目标：{formatMinutes(item.targetMinutes)}
+                            </button>
+                          )}
                           <button
-                            aria-label="编辑实际用时"
-                            className="inline-flex min-h-7 shrink-0 items-center rounded-full bg-white/70 px-2.5 py-0.5 text-left transition hover:bg-white hover:text-sky-700 focus:outline-none focus:ring-4 focus:ring-sky-100"
-                            type="button"
-                            onClick={() => startActualMinutesEdit(item)}
-                          >
-                            实际：{formatMinutes(item.actualMinutes)}
-                            <span className="ml-1 text-[10px] text-sky-500/80">可改</span>
-                          </button>
+                              aria-label="编辑实际用时"
+                              className="inline-flex min-h-7 shrink-0 items-center rounded-full bg-white/70 px-2.5 py-0.5 text-left transition hover:bg-white hover:text-sky-700 focus:outline-none focus:ring-4 focus:ring-sky-100"
+                              type="button"
+                              onClick={() => startActualMinutesEdit(item)}
+                            >
+                              实际：{formatMinutes(item.actualMinutes)}
+                              <span className="ml-1 text-[10px] text-sky-500/80">可改</span>
+                            </button>
+                          {targetMinutesEditError ? (
+                            <p className="w-full text-xs font-bold text-rose-600">
+                              {targetMinutesEditError}
+                            </p>
+                          ) : null}
                         </div>
-                        {actualEditId === item.id ? (
+                        {isActualEditing ? (
                           <form
                             className="relative mt-2 flex w-full flex-col gap-2 rounded-[1rem] bg-white/70 p-2 sm:flex-row sm:items-end"
                             data-export-ignore="true"
+                            onDragStartCapture={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                            }}
                             onSubmit={(event) => {
                               event.preventDefault();
                               saveActualMinutes(item.id);
@@ -5996,6 +8889,7 @@ function App() {
                               实际用时（分钟）
                               <input
                                 className="mt-1 w-full rounded-xl border border-sky-100 bg-white px-3 py-1.5 text-sm font-bold text-[#46394f] outline-none transition placeholder:text-[#b8aabd] focus:border-sky-300 focus:ring-4 focus:ring-sky-100"
+                                draggable={false}
                                 id={`actual-minutes-${item.id}`}
                                 inputMode="numeric"
                                 min={1}
@@ -6075,7 +8969,7 @@ function App() {
                                   type="button"
                                   onClick={() => handleEdit(item)}
                                 >
-                                  编辑
+                                  备注
                                 </button>
                                 <button
                                   className="rounded-full bg-white/80 px-2.5 py-1 text-xs font-bold text-rose-600 transition hover:bg-white"
@@ -6104,7 +8998,7 @@ function App() {
                                     >
                                       <span aria-hidden="true">⏳</span>
                                     </button>
-                                    <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-1 -translate-x-1/2 whitespace-nowrap rounded-full bg-white px-2.5 py-1 text-[10px] font-black text-[#6c5e75] opacity-0 shadow-sm ring-1 ring-violet-100 transition-opacity duration-100 group-hover:opacity-100 group-focus-within:opacity-100">
+                                    <span aria-hidden="true" className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-1 -translate-x-1/2 whitespace-nowrap rounded-full bg-white px-2.5 py-1 text-[10px] font-black text-[#6c5e75] opacity-0 shadow-sm ring-1 ring-violet-100 transition-opacity duration-100 group-hover:opacity-100">
                                       {option.title}
                                     </span>
                                   </span>
@@ -6121,6 +9015,9 @@ function App() {
                       </motion.article>
                     );
                             })}
+                            {isDropAtSectionEnd ? (
+                              <div className="col-span-full h-1.5 rounded-full bg-[#ff8fbc] shadow-sm shadow-pink-200" />
+                            ) : null}
                           </div>
                         )}
                       </section>
@@ -6135,7 +9032,7 @@ function App() {
         <div
           aria-hidden="true"
           style={{
-            left: "-12000px",
+            left: 0,
             pointerEvents: "none",
             position: "fixed",
             top: 0,
