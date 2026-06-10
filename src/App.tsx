@@ -4,6 +4,7 @@ import { createPortal, flushSync } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
+import pptxgen from "pptxgenjs";
 import {
   getCurrentSession,
   getDailyPlannerUserData,
@@ -37,6 +38,8 @@ const STORAGE_KEY = "daily-planner-journal-v1";
 const LEGACY_SYNC_STATE_KEY = "daily-planner-journal-sync-v1";
 const DELETED_ITEM_IDS_KEY = "daily-planner-journal-deleted-v1";
 const CUSTOM_CATEGORIES_KEY = "daily-planner-journal-custom-categories-v1";
+const COMPLEX_PROJECTS_KEY = "daily-planner-journal-complex-projects-v1";
+const MOOD_BOOK_KEY = "daily-planner-journal-moods-v1";
 const SYNC_DEBOUNCE_MS = 800;
 const COUNTDOWN_OPTIONS = [
   {
@@ -120,6 +123,58 @@ const PRIORITY_OPTIONS = [
 type TaskPriority = (typeof PRIORITY_OPTIONS)[number]["id"];
 const DEFAULT_PRIORITY: TaskPriority = "medium";
 const SORT_ORDER_STEP = 1000;
+const MOOD_OPTIONS = [
+  {
+    id: "low",
+    icon: "🌧️",
+    label: "低落",
+    score: 1,
+    swatch: "#fb7185",
+    toneClass: "border-rose-100 bg-rose-50 text-rose-700",
+  },
+  {
+    id: "tired",
+    icon: "😮‍💨",
+    label: "疲惫",
+    score: 2,
+    swatch: "#f59e0b",
+    toneClass: "border-amber-100 bg-amber-50 text-amber-800",
+  },
+  {
+    id: "calm",
+    icon: "🍃",
+    label: "平静",
+    score: 3,
+    swatch: "#38bdf8",
+    toneClass: "border-sky-100 bg-sky-50 text-sky-700",
+  },
+  {
+    id: "focused",
+    icon: "🎯",
+    label: "专注",
+    score: 4,
+    swatch: "#8b5cf6",
+    toneClass: "border-violet-100 bg-violet-50 text-violet-700",
+  },
+  {
+    id: "happy",
+    icon: "☀️",
+    label: "开心",
+    score: 5,
+    swatch: "#22c55e",
+    toneClass: "border-emerald-100 bg-emerald-50 text-emerald-700",
+  },
+  {
+    id: "energized",
+    icon: "✨",
+    label: "高能",
+    score: 6,
+    swatch: "#ec4899",
+    toneClass: "border-pink-100 bg-pink-50 text-pink-700",
+  },
+] as const;
+type MoodId = (typeof MOOD_OPTIONS)[number]["id"];
+const DEFAULT_MOOD_ID: MoodId = "calm";
 
 type CustomCategory = {
   id: string;
@@ -143,6 +198,51 @@ type PlanItem = {
 };
 
 type PlanBook = Record<string, PlanItem[]>;
+type ComplexProjectStatus = "active" | "completed" | "archived";
+type ComplexProjectPhaseTimeEntry = {
+  id: string;
+  date: string;
+  startedAt: number;
+  endedAt?: number;
+  durationSeconds: number;
+};
+type ComplexProjectPhase = {
+  id: string;
+  title: string;
+  note: string;
+  startDate: string;
+  endDate: string;
+  completed: boolean;
+  timeEntries: ComplexProjectPhaseTimeEntry[];
+  completedAt?: number;
+  updatedAt?: number;
+};
+type ComplexProject = {
+  id: string;
+  title: string;
+  category: Category;
+  priority: TaskPriority;
+  note: string;
+  startDate: string;
+  endDate: string;
+  status: ComplexProjectStatus;
+  phases: ComplexProjectPhase[];
+  sourceTaskId?: string;
+  createdAt: number;
+  updatedAt?: number;
+  archivedAt?: number;
+};
+type ComplexProjectBook = Record<string, ComplexProject>;
+type MoodEntry = {
+  id: string;
+  date: string;
+  moodId: MoodId;
+  note: string;
+  timestamp: number;
+  createdAt: number;
+  updatedAt?: number;
+};
+type MoodBook = Record<string, MoodEntry[]>;
 type PlanSearchResult = {
   key: string;
   date: string;
@@ -152,6 +252,9 @@ type PlanSearchResult = {
 type DailyTimeStats = {
   targetTotalMinutes: number;
   savedActualMinutes: number;
+  projectActualSeconds: number;
+  projectSessionCount: number;
+  projectActiveTimerCount: number;
   temporaryTimerSeconds: number;
   liveActualSeconds: number;
   comparableActualSeconds: number;
@@ -178,9 +281,48 @@ type CloudPayload = {
   plansByDate: PlanBook;
   deletedItemIds: string[];
   customCategories: CustomCategory[];
+  complexProjects: ComplexProject[];
+  moodBook: MoodBook;
 };
 
 type AuthMode = "sign-in" | "sign-up" | "forgot" | "update-password";
+type WorkspaceTab = "tasks" | "projects" | "time" | "export";
+type TodayWorkspaceSectionId = "longProjects" | TaskPriority;
+type TodayWorkspaceCollapsedState = Record<TodayWorkspaceSectionId, boolean>;
+
+const DEFAULT_TODAY_WORKSPACE_COLLAPSED_STATE: TodayWorkspaceCollapsedState = {
+  longProjects: true,
+  high: true,
+  medium: true,
+  low: true,
+};
+
+const WORKSPACE_TABS: Array<{
+  id: WorkspaceTab;
+  label: string;
+  toneClass: string;
+}> = [
+  {
+    id: "tasks",
+    label: "今日任务",
+    toneClass: "border-emerald-100 bg-emerald-50 text-emerald-700 shadow-sm shadow-emerald-100/70",
+  },
+  {
+    id: "projects",
+    label: "复杂项目",
+    toneClass: "border-violet-100 bg-violet-50 text-violet-700 shadow-sm shadow-violet-100/70",
+  },
+  {
+    id: "time",
+    label: "用时统计",
+    toneClass: "border-sky-100 bg-sky-50 text-sky-700 shadow-sm shadow-sky-100/70",
+  },
+  {
+    id: "export",
+    label: "导出/复盘",
+    toneClass: "border-amber-100 bg-amber-50 text-amber-800 shadow-sm shadow-amber-100/70",
+  },
+];
 
 type AuthForm = {
   email: string;
@@ -195,6 +337,15 @@ type CompletionFeedback = {
   detail: string;
   completionRate: number;
   variantIndex: number;
+};
+
+type ComplexProjectCompletionFeedback = {
+  id: number;
+  projectId: string;
+  phaseId: string;
+  phaseTitle: string;
+  progressPercent: number;
+  projectCompleted: boolean;
 };
 
 type TaskTimerState = {
@@ -226,6 +377,33 @@ type PlanForm = {
   priority: TaskPriority;
   note: string;
   targetMinutes: string;
+};
+
+type ComplexProjectForm = {
+  title: string;
+  category: Category;
+  priority: TaskPriority;
+  note: string;
+  startDate: string;
+  endDate: string;
+};
+
+type ComplexProjectPhaseForm = {
+  title: string;
+  note: string;
+  startDate: string;
+  endDate: string;
+  completed: boolean;
+};
+
+type ComplexProjectPhaseEdit = {
+  projectId: string;
+  phaseId: string | null;
+};
+type ComplexProjectPhaseTimeDetailTarget = {
+  projectId: string;
+  phaseId: string;
+  date: string;
 };
 
 type TaskInlineField = "category" | "targetMinutes" | "title" | "note";
@@ -1031,6 +1209,1396 @@ const emptyForm: PlanForm = {
   targetMinutes: "",
 };
 
+function createEmptyComplexProjectForm(dateValue: string): ComplexProjectForm {
+  return {
+    title: "",
+    category: "学习",
+    priority: DEFAULT_PRIORITY,
+    note: "",
+    startDate: dateValue,
+    endDate: dateValue,
+  };
+}
+
+function createComplexProjectFormFromProject(project: ComplexProject): ComplexProjectForm {
+  return {
+    title: project.title,
+    category: project.category,
+    priority: normalizePriority(project.priority),
+    note: project.note,
+    startDate: project.startDate,
+    endDate: project.endDate,
+  };
+}
+
+function createEmptyComplexProjectPhaseForm(
+  project: Pick<ComplexProject, "startDate" | "endDate"> | null,
+  fallbackDate: string,
+): ComplexProjectPhaseForm {
+  const startDate = project?.startDate || fallbackDate;
+
+  return {
+    title: "",
+    note: "",
+    startDate,
+    endDate: project?.endDate || startDate,
+    completed: false,
+  };
+}
+
+function createComplexProjectPhaseFormFromPhase(
+  phase: ComplexProjectPhase,
+): ComplexProjectPhaseForm {
+  return {
+    title: phase.title,
+    note: phase.note,
+    startDate: phase.startDate,
+    endDate: phase.endDate,
+    completed: phase.completed,
+  };
+}
+
+function getComplexProjectProgress(project: ComplexProject) {
+  const total = project.phases.length;
+  const completed = project.phases.filter((phase) => phase.completed).length;
+  const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+  return { completed, percent, total };
+}
+
+function sortComplexProjectPhases(phases: ComplexProjectPhase[]): ComplexProjectPhase[] {
+  return phases
+    .map((phase, index) => ({ index, phase }))
+    .sort((left, right) => {
+      const startDateDifference = left.phase.startDate.localeCompare(right.phase.startDate);
+
+      if (startDateDifference !== 0) {
+        return startDateDifference;
+      }
+
+      const endDateDifference = left.phase.endDate.localeCompare(right.phase.endDate);
+
+      if (endDateDifference !== 0) {
+        return endDateDifference;
+      }
+
+      return left.index - right.index;
+    })
+    .map(({ phase }) => phase);
+}
+
+function isDateInRange(dateValue: string, startDate: string, endDate: string): boolean {
+  return dateValue >= startDate && dateValue <= endDate;
+}
+
+function getCurrentComplexProjectPhase(
+  project: ComplexProject,
+  dateValue: string,
+): ComplexProjectPhase | null {
+  const currentPhases = sortComplexProjectPhases(project.phases).filter((phase) =>
+    isDateInRange(dateValue, phase.startDate, phase.endDate),
+  );
+
+  return (
+    currentPhases.find((phase) => !phase.completed) ??
+    currentPhases[0] ??
+    null
+  );
+}
+
+function getComplexProjectStatusLabel(status: ComplexProjectStatus): string {
+  if (status === "completed") {
+    return "已完成";
+  }
+
+  if (status === "archived") {
+    return "已归档";
+  }
+
+  return "进行中";
+}
+
+const GANTT_TIMELINE_BASE_WIDTH = 620;
+const GANTT_TIMELINE_MIN_WIDTH = 680;
+const GANTT_LANE_COLUMN_WIDTH = 72;
+const GANTT_LABEL_COLUMN_WIDTH = 220;
+const GANTT_ROW_HEIGHT_PX = 96;
+const GANTT_EXPORT_HORIZONTAL_PADDING = 96;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const GANTT_PHASE_PALETTE = [
+  { background: "#1f8bc3", soft: "#e8f4fb", text: "#ffffff" },
+  { background: "#f59e0b", soft: "#fff4db", text: "#ffffff" },
+  { background: "#d63a0c", soft: "#fff0e9", text: "#ffffff" },
+  { background: "#fff200", soft: "#fffbd2", text: "#9a5f00" },
+  { background: "#41a82e", soft: "#edf8e9", text: "#ffffff" },
+  { background: "#a22b91", soft: "#f8ebf7", text: "#ffffff" },
+] as const;
+
+type ComplexProjectGanttUnit = "day" | "week" | "month";
+type ComplexProjectGanttPhaseColor = (typeof GANTT_PHASE_PALETTE)[number];
+
+type ComplexProjectGanttTick = {
+  dateValue: string;
+  label: string;
+  leftPercent: number;
+  widthPercent: number;
+};
+
+type ComplexProjectGanttPhaseLayout = {
+  dateLabelPlacement: "inside" | "below";
+  durationDays: number;
+  endPercent: number;
+  labelAlign: "start" | "end";
+  leftPercent: number;
+  phase: ComplexProjectPhase;
+  shortDateLabel: string;
+  widthPercent: number;
+};
+
+type ComplexProjectGanttModel = {
+  chartMinWidth: number;
+  phaseLayouts: ComplexProjectGanttPhaseLayout[];
+  tickMinWidth: number;
+  ticks: ComplexProjectGanttTick[];
+  totalDays: number;
+  unit: ComplexProjectGanttUnit;
+  unitCount: number;
+};
+
+type ComplexProjectGanttAxisMarker = {
+  dateValue: string;
+  isBoundary: boolean;
+  label: string;
+  leftPercent: number;
+};
+
+type ComplexProjectGanttLayoutMetrics = {
+  ganttGridTemplateColumns: string;
+  ganttMinWidth: number;
+  rowHeightPx: number;
+  timelineMinWidth: number;
+};
+
+type XmindTopic = {
+  children?: {
+    attached: XmindTopic[];
+  };
+  class: "topic";
+  id: string;
+  title: string;
+};
+
+function addDays(date: Date, days: number): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
+}
+
+function getInclusiveDayCount(startDate: string, endDate: string): number {
+  const start = parseDateInputValue(startDate);
+  const end = parseDateInputValue(endDate);
+  const difference = Math.round((end.getTime() - start.getTime()) / MS_PER_DAY);
+
+  return Math.max(1, difference + 1);
+}
+
+function getGanttShortDateLabel(dateValue: string): string {
+  const date = parseDateInputValue(dateValue);
+
+  return `${date.getMonth() + 1}/${date.getDate()}`;
+}
+
+function getGanttShortDateRangeLabel(startDate: string, endDate: string): string {
+  const startLabel = getGanttShortDateLabel(startDate);
+  const endLabel = getGanttShortDateLabel(endDate);
+
+  return startLabel === endLabel ? startLabel : `${startLabel}-${endLabel}`;
+}
+
+function getGanttMonthLabel(dateValue: string): string {
+  const date = parseDateInputValue(dateValue);
+
+  return `${date.getMonth() + 1}月`;
+}
+
+function getDaysBetweenDates(startDate: Date, endDate: Date): number {
+  return Math.round((endDate.getTime() - startDate.getTime()) / MS_PER_DAY);
+}
+
+function getGanttPhaseColor(index: number): ComplexProjectGanttPhaseColor {
+  return GANTT_PHASE_PALETTE[index % GANTT_PHASE_PALETTE.length];
+}
+
+function getComplexProjectGanttModel(project: ComplexProject): ComplexProjectGanttModel {
+  const totalDays = getInclusiveDayCount(project.startDate, project.endDate);
+  const unit: ComplexProjectGanttUnit =
+    totalDays <= 30 ? "day" : totalDays <= 90 ? "week" : "month";
+  const unitSize = unit === "day" ? 1 : 7;
+  const unitCount = Math.max(
+    1,
+    unit === "month" ? 1 : Math.ceil(totalDays / unitSize),
+  );
+  const projectStart = parseDateInputValue(project.startDate);
+  const projectEndExclusive = addDays(projectStart, totalDays);
+  const ticks: ComplexProjectGanttTick[] =
+    unit === "month"
+      ? (() => {
+          const monthTicks: ComplexProjectGanttTick[] = [];
+          let cursor = new Date(
+            projectStart.getFullYear(),
+            projectStart.getMonth(),
+            projectStart.getDate(),
+          );
+
+          while (cursor < projectEndExclusive) {
+            const nextMonthStart = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+            const nextCursor =
+              nextMonthStart < projectEndExclusive ? nextMonthStart : projectEndExclusive;
+            const startOffset = Math.max(0, getDaysBetweenDates(projectStart, cursor));
+            const segmentDays = Math.max(1, getDaysBetweenDates(cursor, nextCursor));
+            const dateValue = formatDateInput(cursor);
+
+            const endDateValue = formatDateInput(addDays(nextCursor, -1));
+
+            monthTicks.push({
+              dateValue,
+              label: getGanttShortDateRangeLabel(dateValue, endDateValue),
+              leftPercent: (startOffset / totalDays) * 100,
+              widthPercent: (segmentDays / totalDays) * 100,
+            });
+            cursor = nextCursor;
+          }
+
+          return monthTicks.length > 0
+            ? monthTicks
+            : [
+                {
+                  dateValue: project.startDate,
+                  label: getGanttMonthLabel(project.startDate),
+                  leftPercent: 0,
+                  widthPercent: 100,
+                },
+              ];
+        })()
+      : Array.from({ length: unitCount }, (_, index) => {
+          const startOffset = index * unitSize;
+          const segmentDays = Math.max(1, Math.min(unitSize, totalDays - startOffset));
+          const tickDate = addDays(projectStart, startOffset);
+          const dateValue = formatDateInput(tickDate);
+          const endDateValue = formatDateInput(addDays(tickDate, segmentDays - 1));
+
+          return {
+            dateValue,
+            label:
+              unit === "day"
+                ? getGanttShortDateLabel(dateValue)
+                : getGanttShortDateRangeLabel(dateValue, endDateValue),
+            leftPercent: (startOffset / totalDays) * 100,
+            widthPercent: (segmentDays / totalDays) * 100,
+          };
+        });
+  const resolvedUnitCount = ticks.length;
+  const tickMinWidth = unit === "day" ? 42 : unit === "week" ? 78 : 94;
+  const chartMinWidth = Math.max(GANTT_TIMELINE_BASE_WIDTH, resolvedUnitCount * tickMinWidth);
+
+  const phaseLayouts = sortComplexProjectPhases(project.phases).map((phase) => {
+    const phaseStartOffset = Math.max(
+      0,
+      Math.round(
+        (parseDateInputValue(phase.startDate).getTime() - projectStart.getTime()) / MS_PER_DAY,
+      ),
+    );
+    const phaseEndOffset = Math.min(
+      totalDays - 1,
+      Math.max(
+        phaseStartOffset,
+        Math.round(
+          (parseDateInputValue(phase.endDate).getTime() - projectStart.getTime()) / MS_PER_DAY,
+        ),
+      ),
+    );
+    const durationDays = Math.max(1, phaseEndOffset - phaseStartOffset + 1);
+    const widthPercent = Math.max((durationDays / totalDays) * 100, 0.5);
+    const leftPercent = Math.min(99.5, (phaseStartOffset / totalDays) * 100);
+    const estimatedBarWidth = (chartMinWidth * widthPercent) / 100;
+    const dateLabelPlacement: ComplexProjectGanttPhaseLayout["dateLabelPlacement"] =
+      estimatedBarWidth >= 92 ? "inside" : "below";
+    const labelAlign: ComplexProjectGanttPhaseLayout["labelAlign"] =
+      leftPercent + widthPercent >= 84 ? "end" : "start";
+
+    return {
+      dateLabelPlacement,
+      durationDays,
+      endPercent: Math.min(100, leftPercent + widthPercent),
+      labelAlign,
+      leftPercent,
+      phase,
+      shortDateLabel: getGanttShortDateRangeLabel(phase.startDate, phase.endDate),
+      widthPercent,
+    };
+  });
+
+  return {
+    chartMinWidth,
+    phaseLayouts,
+    tickMinWidth,
+    ticks,
+    totalDays,
+    unit,
+    unitCount: resolvedUnitCount,
+  };
+}
+
+function getComplexProjectGanttLayoutMetrics(
+  model: ComplexProjectGanttModel,
+): ComplexProjectGanttLayoutMetrics {
+  const timelineMinWidth = Math.max(GANTT_TIMELINE_MIN_WIDTH, model.chartMinWidth);
+  const ganttGridTemplateColumns = `${GANTT_LANE_COLUMN_WIDTH}px ${GANTT_LABEL_COLUMN_WIDTH}px minmax(${timelineMinWidth}px, 1fr)`;
+  const ganttMinWidth = GANTT_LANE_COLUMN_WIDTH + GANTT_LABEL_COLUMN_WIDTH + timelineMinWidth;
+
+  return {
+    ganttGridTemplateColumns,
+    ganttMinWidth,
+    rowHeightPx: GANTT_ROW_HEIGHT_PX,
+    timelineMinWidth,
+  };
+}
+
+function getComplexProjectGanttExportMinWidth(project: ComplexProject): number {
+  const model = getComplexProjectGanttModel(project);
+  const { ganttMinWidth } = getComplexProjectGanttLayoutMetrics(model);
+
+  return ganttMinWidth + GANTT_EXPORT_HORIZONTAL_PADDING;
+}
+
+function getComplexProjectGanttAxisMarkers(
+  project: ComplexProject,
+  model: ComplexProjectGanttModel,
+): ComplexProjectGanttAxisMarker[] {
+  const projectStart = parseDateInputValue(project.startDate);
+  const markerMap = new Map<string, ComplexProjectGanttAxisMarker>();
+  const addMarker = (dateValue: string, useEndPosition = false, isBoundary = false) => {
+    const rawOffset = getDaysBetweenDates(projectStart, parseDateInputValue(dateValue));
+    const offset = Math.max(0, Math.min(model.totalDays, rawOffset + (useEndPosition ? 1 : 0)));
+    const leftPercent =
+      dateValue === project.startDate && !useEndPosition ? 0 : (offset / model.totalDays) * 100;
+    const existing = markerMap.get(dateValue);
+
+    markerMap.set(dateValue, {
+      dateValue,
+      isBoundary: Boolean(existing?.isBoundary || isBoundary),
+      label: getGanttShortDateLabel(dateValue),
+      leftPercent: existing ? Math.max(existing.leftPercent, leftPercent) : leftPercent,
+    });
+  };
+
+  addMarker(project.startDate);
+  model.phaseLayouts.forEach(({ phase }) => {
+    addMarker(phase.startDate);
+    addMarker(phase.endDate, true, true);
+  });
+  addMarker(project.endDate, true);
+
+  const minVisibleGapPercent = model.unit === "day" ? 5 : model.unit === "week" ? 7 : 8;
+
+  return Array.from(markerMap.values())
+    .sort((left, right) => left.leftPercent - right.leftPercent)
+    .reduce<ComplexProjectGanttAxisMarker[]>((visibleMarkers, marker) => {
+      const previous = visibleMarkers[visibleMarkers.length - 1];
+
+      if (!previous || Math.abs(marker.leftPercent - previous.leftPercent) >= minVisibleGapPercent) {
+        visibleMarkers.push(marker);
+        return visibleMarkers;
+      }
+
+      if (marker.isBoundary && !previous.isBoundary) {
+        visibleMarkers[visibleMarkers.length - 1] = marker;
+      }
+
+      return visibleMarkers;
+    }, []);
+}
+
+function sanitizeExportFileNamePart(value: string): string {
+  const cleaned = value
+    .trim()
+    .replace(/[\\/:*?"<>|]/g, "-")
+    .replace(/\s+/g, " ")
+    .slice(0, 48);
+
+  return cleaned || "未命名项目";
+}
+
+async function captureGanttElement(element: HTMLElement): Promise<HTMLCanvasElement> {
+  if ("fonts" in document) {
+    await document.fonts.ready;
+  }
+
+  await waitForImages(element);
+
+  const elementRect = element.getBoundingClientRect();
+  const ganttContent = element.querySelector<HTMLElement>("[data-gantt-content]");
+  const contentWidth = ganttContent
+    ? Math.ceil(
+        Math.max(0, ganttContent.getBoundingClientRect().left - elementRect.left) +
+          ganttContent.scrollWidth +
+          32,
+      )
+    : 0;
+  const width = Math.max(Math.ceil(element.scrollWidth), contentWidth);
+  const height = Math.ceil(element.scrollHeight);
+
+  return html2canvas(element, {
+    backgroundColor: "#fffaf4",
+    height,
+    logging: false,
+    onclone: (_clonedDocument, clonedElement) => {
+      clonedElement.style.overflow = "visible";
+      clonedElement.style.width = `${width}px`;
+      clonedElement.querySelectorAll<HTMLElement>("[data-gantt-scroll-region]").forEach((node) => {
+        node.style.overflow = "visible";
+      });
+      clonedElement.querySelectorAll<HTMLElement>("[data-gantt-legend-item]").forEach((node) => {
+        node.style.alignItems = "center";
+        node.style.columnGap = "8px";
+        node.style.display = "inline-grid";
+        node.style.gridTemplateColumns = "36px max-content";
+        node.style.height = "32px";
+        node.style.lineHeight = "16px";
+      });
+      clonedElement.querySelectorAll<HTMLElement>("[data-gantt-legend-text]").forEach((node) => {
+        node.style.display = "block";
+        node.style.height = "16px";
+        node.style.lineHeight = "16px";
+        node.style.transform = "translateY(-6px)";
+        node.style.whiteSpace = "nowrap";
+      });
+      clonedElement.querySelectorAll<HTMLElement>("[data-gantt-legend-swatch]").forEach((node) => {
+        node.style.alignSelf = "center";
+        node.style.display = "block";
+      });
+      clonedElement.querySelectorAll<HTMLElement>("[data-gantt-legend-pill]").forEach((node) => {
+        node.style.alignItems = "center";
+        node.style.display = "inline-grid";
+        node.style.height = "32px";
+        node.style.justifyContent = "center";
+        node.style.lineHeight = "16px";
+      });
+      clonedElement.querySelectorAll<HTMLElement>("[data-gantt-priority-pill]").forEach((node) => {
+        node.style.alignItems = "center";
+        node.style.columnGap = "6px";
+        node.style.display = "inline-grid";
+        node.style.gridAutoFlow = "column";
+        node.style.height = "32px";
+        node.style.justifyContent = "center";
+        node.style.lineHeight = "16px";
+      });
+      clonedElement.querySelectorAll<HTMLElement>("[data-gantt-label-text]").forEach((node) => {
+        node.style.lineHeight = "1.6";
+        node.style.overflow = "visible";
+        node.style.whiteSpace = "normal";
+      });
+    },
+    scale: 2,
+    useCORS: true,
+    width,
+    windowHeight: height,
+    windowWidth: width,
+  });
+}
+
+function downloadBlob(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+
+  link.download = fileName;
+  link.href = url;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 800);
+}
+
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+
+  for (let index = 0; index < table.length; index += 1) {
+    let value = index;
+
+    for (let bitIndex = 0; bitIndex < 8; bitIndex += 1) {
+      value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    }
+
+    table[index] = value >>> 0;
+  }
+
+  return table;
+})();
+
+function getCrc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+
+  bytes.forEach((byte) => {
+    crc = CRC32_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  });
+
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function writeUint16LittleEndian(target: Uint8Array, offset: number, value: number) {
+  target[offset] = value & 0xff;
+  target[offset + 1] = (value >>> 8) & 0xff;
+}
+
+function writeUint32LittleEndian(target: Uint8Array, offset: number, value: number) {
+  target[offset] = value & 0xff;
+  target[offset + 1] = (value >>> 8) & 0xff;
+  target[offset + 2] = (value >>> 16) & 0xff;
+  target[offset + 3] = (value >>> 24) & 0xff;
+}
+
+function toBlobPart(bytes: Uint8Array): BlobPart {
+  const buffer = new ArrayBuffer(bytes.byteLength);
+
+  new Uint8Array(buffer).set(bytes);
+  return buffer;
+}
+
+function createStoredZipBlob(
+  entries: Array<{ content: string | Uint8Array; path: string }>,
+): Blob {
+  const encoder = new TextEncoder();
+  const localParts: Uint8Array[] = [];
+  const centralParts: Uint8Array[] = [];
+  let offset = 0;
+
+  entries.forEach((entry) => {
+    const nameBytes = encoder.encode(entry.path);
+    const contentBytes =
+      typeof entry.content === "string" ? encoder.encode(entry.content) : entry.content;
+    const crc32 = getCrc32(contentBytes);
+    const localHeader = new Uint8Array(30 + nameBytes.length);
+
+    writeUint32LittleEndian(localHeader, 0, 0x04034b50);
+    writeUint16LittleEndian(localHeader, 4, 20);
+    writeUint16LittleEndian(localHeader, 6, 0);
+    writeUint16LittleEndian(localHeader, 8, 0);
+    writeUint16LittleEndian(localHeader, 10, 0);
+    writeUint16LittleEndian(localHeader, 12, 0);
+    writeUint32LittleEndian(localHeader, 14, crc32);
+    writeUint32LittleEndian(localHeader, 18, contentBytes.length);
+    writeUint32LittleEndian(localHeader, 22, contentBytes.length);
+    writeUint16LittleEndian(localHeader, 26, nameBytes.length);
+    writeUint16LittleEndian(localHeader, 28, 0);
+    localHeader.set(nameBytes, 30);
+
+    const centralHeader = new Uint8Array(46 + nameBytes.length);
+    writeUint32LittleEndian(centralHeader, 0, 0x02014b50);
+    writeUint16LittleEndian(centralHeader, 4, 20);
+    writeUint16LittleEndian(centralHeader, 6, 20);
+    writeUint16LittleEndian(centralHeader, 8, 0);
+    writeUint16LittleEndian(centralHeader, 10, 0);
+    writeUint16LittleEndian(centralHeader, 12, 0);
+    writeUint16LittleEndian(centralHeader, 14, 0);
+    writeUint32LittleEndian(centralHeader, 16, crc32);
+    writeUint32LittleEndian(centralHeader, 20, contentBytes.length);
+    writeUint32LittleEndian(centralHeader, 24, contentBytes.length);
+    writeUint16LittleEndian(centralHeader, 28, nameBytes.length);
+    writeUint16LittleEndian(centralHeader, 30, 0);
+    writeUint16LittleEndian(centralHeader, 32, 0);
+    writeUint16LittleEndian(centralHeader, 34, 0);
+    writeUint16LittleEndian(centralHeader, 36, 0);
+    writeUint32LittleEndian(centralHeader, 38, 0);
+    writeUint32LittleEndian(centralHeader, 42, offset);
+    centralHeader.set(nameBytes, 46);
+
+    localParts.push(localHeader, contentBytes);
+    centralParts.push(centralHeader);
+    offset += localHeader.length + contentBytes.length;
+  });
+
+  const centralDirectorySize = centralParts.reduce((sum, part) => sum + part.length, 0);
+  const endOfCentralDirectory = new Uint8Array(22);
+  writeUint32LittleEndian(endOfCentralDirectory, 0, 0x06054b50);
+  writeUint16LittleEndian(endOfCentralDirectory, 4, 0);
+  writeUint16LittleEndian(endOfCentralDirectory, 6, 0);
+  writeUint16LittleEndian(endOfCentralDirectory, 8, entries.length);
+  writeUint16LittleEndian(endOfCentralDirectory, 10, entries.length);
+  writeUint32LittleEndian(endOfCentralDirectory, 12, centralDirectorySize);
+  writeUint32LittleEndian(endOfCentralDirectory, 16, offset);
+  writeUint16LittleEndian(endOfCentralDirectory, 20, 0);
+
+  return new Blob([...localParts, ...centralParts, endOfCentralDirectory].map(toBlobPart), {
+    type: "application/vnd.xmind.workbook",
+  });
+}
+
+function createXmindTopic(title: string, children: XmindTopic[] = []): XmindTopic {
+  return {
+    ...(children.length > 0 ? { children: { attached: children } } : {}),
+    class: "topic",
+    id: createId(),
+    title,
+  };
+}
+
+function createComplexProjectXmindBlob(project: ComplexProject): Blob {
+  const progress = getComplexProjectProgress(project);
+  const priorityOption = getPriorityOption(project.priority);
+  const sortedPhases = sortComplexProjectPhases(project.phases);
+  const phaseTopics = sortedPhases.map((phase) =>
+    createXmindTopic(phase.title, [
+      createXmindTopic(`日期范围：${phase.startDate} 至 ${phase.endDate}`),
+      createXmindTopic(`完成状态：${phase.completed ? "已完成" : "未完成"}`),
+      createXmindTopic(`备注：${phase.note || "无"}`),
+    ]),
+  );
+  const overviewTopics = [
+    createXmindTopic(`分类：${project.category}`),
+    createXmindTopic(`优先级：${priorityOption.name}`),
+    createXmindTopic(`项目日期：${project.startDate} 至 ${project.endDate}`),
+    createXmindTopic(`项目状态：${getComplexProjectStatusLabel(project.status)}`),
+    createXmindTopic(`阶段进度：${progress.completed} / ${progress.total}（${progress.percent}%）`),
+    createXmindTopic(`备注：${project.note || "无"}`),
+  ];
+  const sheetId = createId();
+  const content = [
+    {
+      class: "sheet",
+      id: sheetId,
+      rootTopic: createXmindTopic(project.title, [
+        createXmindTopic("项目概览", overviewTopics),
+        createXmindTopic(
+          "阶段计划",
+          phaseTopics.length > 0 ? phaseTopics : [createXmindTopic("暂未添加阶段")],
+        ),
+        createXmindTopic("风险与调整记录", [createXmindTopic("可在 Xmind 中继续补充")]),
+        createXmindTopic("复盘", [createXmindTopic("可在项目完成后补充经验与下一步")]),
+      ]),
+      title: project.title,
+      topicPositioning: "fixed",
+    },
+  ];
+  const metadata = {
+    activeSheetId: sheetId,
+    creator: {
+      name: "每日计划手帐",
+      version: "0.1.0",
+    },
+    modified: new Date(project.updatedAt ?? project.createdAt).toISOString(),
+  };
+  const manifest = {
+    "file-entries": {
+      "content.json": {},
+      "manifest.json": {},
+      "metadata.json": {},
+    },
+  };
+
+  return createStoredZipBlob([
+    { content: JSON.stringify(content, null, 2), path: "content.json" },
+    { content: JSON.stringify(metadata, null, 2), path: "metadata.json" },
+    { content: JSON.stringify(manifest, null, 2), path: "manifest.json" },
+  ]);
+}
+
+const PPTX_FONT_FACE = "Microsoft YaHei";
+const PPTX_SLIDE_WIDTH = 13.333;
+const PPTX_SLIDE_HEIGHT = 7.5;
+const PPTX_GANTT_ROWS_PER_SLIDE = 6;
+
+type PptxInstance = InstanceType<typeof pptxgen>;
+type PptxSlide = ReturnType<PptxInstance["addSlide"]>;
+type PptxTextOptions = NonNullable<Parameters<PptxSlide["addText"]>[1]>;
+
+function getPptxHexColor(color: string): string {
+  return color.replace("#", "").toUpperCase();
+}
+
+function clampPptxPosition(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function chunkItems<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+
+  return chunks;
+}
+
+function addEditablePptxText(slide: PptxSlide, text: string, options: PptxTextOptions) {
+  slide.addText(text, {
+    breakLine: false,
+    color: "26364D",
+    fit: "shrink",
+    fontFace: PPTX_FONT_FACE,
+    margin: 0.02,
+    valign: "middle",
+    ...options,
+  });
+}
+
+function addEditablePptxPill(
+  slide: PptxSlide,
+  pptx: PptxInstance,
+  text: string,
+  options: {
+    fillColor: string;
+    fontSize?: number;
+    h: number;
+    textColor: string;
+    w: number;
+    x: number;
+    y: number;
+  },
+) {
+  slide.addShape(pptx.ShapeType.roundRect, {
+    fill: { color: options.fillColor },
+    h: options.h,
+    line: { color: options.fillColor, transparency: 100 },
+    w: options.w,
+    x: options.x,
+    y: options.y,
+  });
+  addEditablePptxText(slide, text, {
+    align: "center",
+    bold: true,
+    color: options.textColor,
+    fontSize: options.fontSize ?? 7,
+    h: options.h,
+    margin: 0,
+    w: options.w,
+    x: options.x,
+    y: options.y,
+  });
+}
+
+function getEditablePptxTextWidth(text: string, minWidth: number, maxWidth: number): number {
+  const estimatedWidth = Array.from(text).reduce(
+    (width, character) => width + (character.charCodeAt(0) > 255 ? 0.15 : 0.075),
+    0.16,
+  );
+
+  return clampPptxPosition(estimatedWidth, minWidth, maxWidth);
+}
+
+async function createComplexProjectGanttEditablePptx(project: ComplexProject): Promise<void> {
+  const pptx = new pptxgen();
+  const progress = getComplexProjectProgress(project);
+  const priorityOption = getPriorityOption(project.priority);
+  const model = getComplexProjectGanttModel(project);
+  const axisMarkers = getComplexProjectGanttAxisMarkers(project, model);
+  const phasePages = chunkItems(model.phaseLayouts, PPTX_GANTT_ROWS_PER_SLIDE);
+  const pages = phasePages.length > 0 ? phasePages : [[]];
+  const timelineScaleLabel =
+    model.unit === "day" ? "按天显示" : model.unit === "week" ? "按周显示" : "按月显示";
+
+  pptx.layout = "LAYOUT_WIDE";
+  pptx.author = "每日计划手帐";
+  pptx.company = "每日计划手帐";
+  pptx.subject = "复杂项目甘特图";
+  pptx.title = project.title;
+  pptx.theme = {
+    bodyFontFace: PPTX_FONT_FACE,
+    headFontFace: PPTX_FONT_FACE,
+  };
+
+  pages.forEach((phaseRows, pageIndex) => {
+    const slide = pptx.addSlide();
+    const cardX = 0.18;
+    const cardY = 0.12;
+    const cardW = PPTX_SLIDE_WIDTH - cardX * 2;
+    const cardH = PPTX_SLIDE_HEIGHT - cardY * 2;
+    const innerX = 0.5;
+    const innerW = PPTX_SLIDE_WIDTH - innerX * 2;
+    const laneW = 0.9;
+    const labelW = 2.85;
+    const chartX = innerX + laneW + labelW;
+    const chartW = innerW - laneW - labelW;
+    const headerY = 0.42;
+    const legendY = 1.5;
+    const axisLabelY = 2.32;
+    const axisY = 2.58;
+    const tableY = 3.02;
+    const rowH = phaseRows.length >= 6 ? 0.62 : phaseRows.length >= 5 ? 0.72 : 0.84;
+    const tableH = Math.max(0.88, phaseRows.length * rowH);
+    const pageLabel =
+      pages.length > 1 ? `第 ${pageIndex + 1} / ${pages.length} 页` : "";
+
+    slide.background = { color: "FFFAF4" };
+    slide.addShape(pptx.ShapeType.rect, {
+      fill: { color: "FFFAF4" },
+      h: PPTX_SLIDE_HEIGHT,
+      line: { color: "FFFAF4", transparency: 100 },
+      w: PPTX_SLIDE_WIDTH,
+      x: 0,
+      y: 0,
+    });
+    slide.addShape(pptx.ShapeType.roundRect, {
+      fill: { color: "F3F8FD" },
+      h: cardH,
+      line: { color: "DBEAFE", transparency: 0, width: 0.65 },
+      w: cardW,
+      x: cardX,
+      y: cardY,
+    });
+
+    addEditablePptxText(slide, "复杂项目甘特图", {
+      bold: true,
+      color: "0369A1",
+      fontSize: 8,
+      h: 0.28,
+      margin: 0.01,
+      w: 1.88,
+      x: innerX,
+      y: headerY - 0.02,
+    });
+    addEditablePptxText(slide, project.title, {
+      bold: true,
+      color: "26364D",
+      fontSize: 22,
+      h: 0.38,
+      w: 4.4,
+      x: innerX,
+      y: headerY + 0.28,
+    });
+    addEditablePptxText(
+      slide,
+      `计划安排：${getGanttShortDateRangeLabel(project.startDate, project.endDate)} · 阶段 ${progress.total} 项 · 已完成 ${progress.completed} 项 · ${timelineScaleLabel}`,
+      {
+        bold: true,
+        color: "5D6B7E",
+        fontSize: 10,
+        h: 0.24,
+        w: 5.9,
+        x: innerX,
+        y: headerY + 0.78,
+      },
+    );
+
+    let legendX = innerX;
+    const legendItems = model.phaseLayouts.slice(0, 4);
+    (legendItems.length > 0 ? legendItems : [{ phase: null }]).forEach((item, index) => {
+      const phaseTitle = item.phase?.title ?? "阶段任务";
+      const color = getGanttPhaseColor(index);
+      const textW = getEditablePptxTextWidth(phaseTitle, 0.55, 1.45);
+
+      slide.addShape(pptx.ShapeType.roundRect, {
+        fill: { color: getPptxHexColor(color.background) },
+        h: 0.12,
+        line: { color: getPptxHexColor(color.background), transparency: 100 },
+        w: 0.42,
+        x: legendX,
+        y: legendY + 0.09,
+      });
+      addEditablePptxText(slide, phaseTitle, {
+        bold: true,
+        color: "5D6B7E",
+        fontSize: 8,
+        h: 0.22,
+        w: textW,
+        x: legendX + 0.55,
+        y: legendY + 0.02,
+      });
+      legendX += 0.55 + textW + 0.38;
+    });
+    if (model.phaseLayouts.length > 4) {
+      addEditablePptxText(slide, `+${model.phaseLayouts.length - 4} 个阶段`, {
+        bold: true,
+        color: "5D6B7E",
+        fontSize: 8,
+        h: 0.22,
+        w: 0.8,
+        x: legendX,
+        y: legendY + 0.02,
+      });
+      legendX += 0.95;
+    }
+    addEditablePptxPill(slide, pptx, project.category, {
+      fillColor: "FFFFFF",
+      h: 0.32,
+      textColor: "0369A1",
+      w: Math.max(0.65, getEditablePptxTextWidth(project.category, 0.5, 1.1) + 0.25),
+      x: legendX,
+      y: legendY - 0.03,
+    });
+    addEditablePptxPill(slide, pptx, `${priorityOption.icon} ${priorityOption.name}`, {
+      fillColor: "FFFFFF",
+      h: 0.32,
+      textColor: "6D28D9",
+      w: 1.15,
+      x: legendX + 1,
+      y: legendY - 0.03,
+    });
+
+    slide.addShape(pptx.ShapeType.line, {
+      h: 0,
+      line: { color: "9EB9D2", transparency: 0, width: 0.8 },
+      w: chartW,
+      x: chartX,
+      y: axisY,
+    });
+    axisMarkers.forEach((marker) => {
+      const markerX = chartX + (marker.leftPercent / 100) * chartW;
+      const labelW = 0.58;
+      const labelX =
+        marker.leftPercent <= 2
+          ? markerX
+          : marker.leftPercent >= 98
+            ? markerX - labelW
+            : markerX - labelW / 2;
+
+      slide.addShape(pptx.ShapeType.line, {
+        h: 0.2,
+        line: { color: "9EB9D2", transparency: 12, width: 0.45 },
+        w: 0,
+        x: markerX,
+        y: axisY - 0.08,
+      });
+      addEditablePptxText(slide, marker.label, {
+        align: marker.leftPercent <= 2 ? "left" : marker.leftPercent >= 98 ? "right" : "center",
+        bold: true,
+        color: "516477",
+        fontSize: 8,
+        h: 0.2,
+        margin: 0,
+        w: labelW,
+        x: clampPptxPosition(labelX, chartX, chartX + chartW - labelW),
+        y: axisLabelY,
+      });
+    });
+
+    if (phaseRows.length === 0) {
+      slide.addShape(pptx.ShapeType.roundRect, {
+        fill: { color: "FFFFFF", transparency: 8 },
+        h: 0.7,
+        line: { color: "BAE6FD", dashType: "dash", width: 0.8 },
+        w: innerW,
+        x: innerX,
+        y: tableY,
+      });
+      addEditablePptxText(slide, "暂无阶段，添加阶段后即可生成甘特图横条。", {
+        align: "center",
+        bold: true,
+        color: "66788A",
+        fontSize: 10,
+        h: 0.22,
+        w: innerW,
+        x: innerX,
+        y: tableY + 0.24,
+      });
+      return;
+    }
+
+    slide.addShape(pptx.ShapeType.roundRect, {
+      fill: { color: "FFFFFF", transparency: 8 },
+      h: tableH,
+      line: { color: "DBEAFE", transparency: 0, width: 0.7 },
+      w: innerW,
+      x: innerX,
+      y: tableY,
+    });
+    slide.addShape(pptx.ShapeType.roundRect, {
+      fill: { color: "43A62D" },
+      h: tableH,
+      line: { color: "43A62D", transparency: 100 },
+      w: laneW,
+      x: innerX,
+      y: tableY,
+    });
+    addEditablePptxText(slide, "项目\n阶段", {
+      align: "center",
+      bold: true,
+      breakLine: false,
+      color: "FFFFFF",
+      fontSize: 18,
+      fit: "shrink",
+      h: tableH,
+      margin: 0.02,
+      valign: "middle",
+      w: laneW,
+      x: innerX,
+      y: tableY,
+    });
+
+    phaseRows.forEach(({ phase }, rowIndex) => {
+      const globalRowIndex = pageIndex * PPTX_GANTT_ROWS_PER_SLIDE + rowIndex;
+      const color = getGanttPhaseColor(globalRowIndex);
+      const rowY = tableY + rowIndex * rowH;
+      const statusFill = phase.completed ? "D1FAE5" : "FEF3C7";
+      const statusText = phase.completed ? "047857" : "92400E";
+
+      slide.addShape(pptx.ShapeType.rect, {
+        fill: { color: getPptxHexColor(color.soft) },
+        h: rowH,
+        line: { color: "EAF3FB", transparency: 0, width: 0.4 },
+        w: labelW,
+        x: innerX + laneW,
+        y: rowY,
+      });
+      addEditablePptxText(slide, phase.title, {
+        bold: true,
+        color: "334155",
+        fontSize: 9,
+        h: 0.2,
+        w: labelW - 0.8,
+        x: innerX + laneW + 0.18,
+        y: rowY + rowH * 0.22,
+      });
+      addEditablePptxPill(slide, pptx, phase.completed ? "已完成" : "未完成", {
+        fillColor: statusFill,
+        fontSize: 6.5,
+        h: 0.2,
+        textColor: statusText,
+        w: 0.58,
+        x: innerX + laneW + labelW - 0.72,
+        y: rowY + rowH * 0.2,
+      });
+      addEditablePptxText(slide, `${phase.startDate} 至 ${phase.endDate}`, {
+        bold: true,
+        color: "66788A",
+        fontSize: 7.5,
+        h: 0.2,
+        w: labelW - 0.35,
+        x: innerX + laneW + 0.18,
+        y: rowY + rowH * 0.56,
+      });
+      if (phase.note) {
+        addEditablePptxText(slide, phase.note, {
+          bold: true,
+          color: "8A98A8",
+          fontSize: 6.5,
+          h: 0.16,
+          w: labelW - 0.35,
+          x: innerX + laneW + 0.18,
+          y: rowY + rowH * 0.78,
+        });
+      }
+
+      slide.addShape(pptx.ShapeType.rect, {
+        fill: { color: "FFFFFF" },
+        h: rowH,
+        line: { color: "EAF3FB", transparency: 0, width: 0.4 },
+        w: chartW,
+        x: chartX,
+        y: rowY,
+      });
+    });
+
+    axisMarkers.forEach((marker) => {
+      const markerX = chartX + (marker.leftPercent / 100) * chartW;
+
+      slide.addShape(pptx.ShapeType.line, {
+        h: tableH,
+        line: {
+          color: marker.isBoundary ? "EF4444" : "EAF3FB",
+          dashType: marker.isBoundary ? "dash" : undefined,
+          transparency: marker.isBoundary ? 12 : 0,
+          width: marker.isBoundary ? 0.55 : 0.35,
+        },
+        w: 0,
+        x: markerX,
+        y: tableY,
+      });
+    });
+
+    phaseRows.forEach(({ leftPercent, phase, widthPercent }, rowIndex) => {
+      const globalRowIndex = pageIndex * PPTX_GANTT_ROWS_PER_SLIDE + rowIndex;
+      const color = getGanttPhaseColor(globalRowIndex);
+      const rowY = tableY + rowIndex * rowH;
+      const barX = chartX + (leftPercent / 100) * chartW;
+      const barW = Math.max(0.16, (widthPercent / 100) * chartW);
+
+      slide.addShape(pptx.ShapeType.roundRect, {
+        fill: { color: getPptxHexColor(color.background) },
+        h: 0.32,
+        line: { color: getPptxHexColor(color.background), transparency: 100 },
+        w: barW,
+        x: barX,
+        y: rowY + rowH / 2 - 0.16,
+      });
+    });
+
+    if (pageLabel) {
+      addEditablePptxText(slide, pageLabel, {
+        align: "right",
+        bold: true,
+        color: "66788A",
+        fontSize: 7,
+        h: 0.18,
+        w: 1.2,
+        x: PPTX_SLIDE_WIDTH - 1.62,
+        y: PPTX_SLIDE_HEIGHT - 0.42,
+      });
+    }
+  });
+
+  await pptx.writeFile({
+    compression: true,
+    fileName: `复杂项目甘特图-${sanitizeExportFileNamePart(project.title)}.pptx`,
+  });
+}
+
+function ComplexProjectGanttChart({ project }: { project: ComplexProject }) {
+  const progress = getComplexProjectProgress(project);
+  const priorityOption = getPriorityOption(project.priority);
+  const model = getComplexProjectGanttModel(project);
+  const phaseRows = model.phaseLayouts;
+  const { ganttGridTemplateColumns, ganttMinWidth, rowHeightPx, timelineMinWidth } =
+    getComplexProjectGanttLayoutMetrics(model);
+  const timelineScaleLabel =
+    model.unit === "day" ? "按天显示" : model.unit === "week" ? "按周显示" : "按月显示";
+  const axisMarkers = getComplexProjectGanttAxisMarkers(project, model);
+  const legendItems = phaseRows.slice(0, 4);
+
+  return (
+    <section
+      className="rounded-[1.35rem] border border-sky-100 bg-[#f3f8fd] p-4 text-[#26364d] shadow-sm shadow-sky-100"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-5">
+        <div className="min-w-0">
+          <p className="text-xs font-black text-sky-700">复杂项目甘特图</p>
+          <h4 className="mt-1 break-words text-xl font-black">
+            {project.title}
+          </h4>
+          <p className="mt-2 text-sm font-bold leading-6 text-[#5d6b7e]">
+            计划安排：{getGanttShortDateRangeLabel(project.startDate, project.endDate)} · 阶段{" "}
+            {progress.total} 项 · 已完成 {progress.completed} 项 · {timelineScaleLabel}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-x-6 gap-y-3 text-xs font-bold leading-4 text-[#5d6b7e]">
+          {legendItems.length > 0 ? (
+            legendItems.map(({ phase }, index) => {
+              const color = getGanttPhaseColor(index);
+
+              return (
+                <span
+                  className="inline-grid h-8 grid-cols-[2.25rem_max-content] items-center gap-2 leading-4"
+                  data-gantt-legend-item="true"
+                  key={phase.id}
+                >
+                  <span
+                    className="block h-3 w-9 self-center rounded-full"
+                    data-gantt-legend-swatch="true"
+                    style={{ backgroundColor: color.background }}
+                  />
+                  <span
+                    className="block h-4 translate-y-[-1px] whitespace-nowrap leading-4"
+                    data-gantt-legend-text="true"
+                  >
+                    {phase.title}
+                  </span>
+                </span>
+              );
+            })
+          ) : (
+            <span
+              className="inline-grid h-8 grid-cols-[2.25rem_max-content] items-center gap-2 leading-4"
+              data-gantt-legend-item="true"
+            >
+              <span
+                className="block h-3 w-9 self-center rounded-full bg-sky-600"
+                data-gantt-legend-swatch="true"
+              />
+              <span
+                className="block h-4 translate-y-[-1px] whitespace-nowrap leading-4"
+                data-gantt-legend-text="true"
+              >
+                阶段任务
+              </span>
+            </span>
+          )}
+          {phaseRows.length > 4 ? <span>+{phaseRows.length - 4} 个阶段</span> : null}
+          <span
+            className="inline-grid h-8 min-w-16 place-items-center rounded-full bg-white/90 px-4 font-black leading-4 text-sky-700"
+            data-gantt-legend-pill="true"
+          >
+            <span
+              className="block h-4 translate-y-[-1px] whitespace-nowrap leading-4"
+              data-gantt-legend-text="true"
+            >
+              {project.category}
+            </span>
+          </span>
+          <span
+            className="inline-grid h-8 min-w-28 grid-flow-col items-center justify-center gap-1.5 rounded-full bg-white/90 px-4 font-black leading-4 text-violet-700"
+            data-gantt-legend-pill="true"
+            data-gantt-priority-pill="true"
+          >
+            <span
+              className="block h-4 w-4 translate-y-[-1px] text-center text-[13px] leading-4"
+              data-gantt-legend-text="true"
+            >
+              {priorityOption.icon}
+            </span>
+            <span
+              className="block h-4 translate-y-[-1px] whitespace-nowrap leading-4"
+              data-gantt-legend-text="true"
+            >
+              {priorityOption.name}
+            </span>
+          </span>
+        </div>
+      </div>
+
+      <div className="mt-6 overflow-x-auto pb-2" data-gantt-scroll-region="true">
+        <div data-gantt-content="true" style={{ minWidth: ganttMinWidth }}>
+          <div
+            className="grid items-end"
+            style={{
+              gridTemplateColumns: ganttGridTemplateColumns,
+            }}
+          >
+            <div />
+            <div />
+            <div className="relative h-16" style={{ minWidth: timelineMinWidth }}>
+              <span aria-hidden="true" className="absolute left-0 right-0 top-8 border-t border-[#9eb9d2]" />
+              {axisMarkers.map((marker) => (
+                <span
+                  aria-hidden="true"
+                  className="absolute top-7 h-4 border-l border-[#9eb9d2]"
+                  key={`${marker.dateValue}-${marker.leftPercent}-axis-line`}
+                  style={{ left: `${marker.leftPercent}%` }}
+                />
+              ))}
+              {axisMarkers.map((marker) => {
+                const alignClass =
+                  marker.leftPercent <= 2
+                    ? "text-left"
+                    : marker.leftPercent >= 98
+                      ? "text-right"
+                      : "-translate-x-1/2 text-center";
+                const labelStyle =
+                  marker.leftPercent >= 98
+                    ? { right: 0 }
+                    : { left: `${marker.leftPercent}%` };
+
+                return (
+                  <span
+                    className={`absolute top-0 whitespace-nowrap text-xs font-bold text-[#516477] ${alignClass}`}
+                    key={`${marker.dateValue}-${marker.leftPercent}`}
+                    style={labelStyle}
+                  >
+                    {marker.label}
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+
+          {phaseRows.length > 0 ? (
+            <div
+              className="grid overflow-hidden rounded-[1.15rem] border border-sky-100 bg-white/90 shadow-sm shadow-sky-100"
+              style={{
+                gridTemplateColumns: ganttGridTemplateColumns,
+              }}
+            >
+              <div
+                className="flex items-center justify-center border-r border-sky-100 bg-[#43a62d] px-2 text-center text-lg font-black leading-8 text-white"
+                style={{ minHeight: phaseRows.length * rowHeightPx }}
+              >
+                <span>
+                  项目
+                  <br />
+                  阶段
+                </span>
+              </div>
+
+              <div className="border-r border-sky-100">
+                {phaseRows.map(({ phase }, index) => (
+                  <div
+                    className="flex min-w-0 flex-col justify-center overflow-visible border-b border-sky-50 px-4 last:border-b-0"
+                    key={`${phase.id}-label`}
+                    style={{
+                      backgroundColor: getGanttPhaseColor(index).soft,
+                      height: rowHeightPx,
+                    }}
+                  >
+                    <div className="flex min-w-0 items-start justify-between gap-2">
+                      <p
+                        className="min-w-0 break-words text-sm font-black leading-6 text-[#334155]"
+                        data-gantt-label-text="true"
+                        title={phase.title}
+                      >
+                        {phase.title}
+                      </p>
+                      <span
+                        className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-black ${
+                          phase.completed
+                            ? "bg-emerald-100 text-emerald-700"
+                            : "bg-amber-100 text-amber-800"
+                        }`}
+                      >
+                        {phase.completed ? "已完成" : "未完成"}
+                      </span>
+                    </div>
+                    <p
+                      className="mt-1 break-words text-xs font-bold leading-6 text-[#66788a]"
+                      data-gantt-label-text="true"
+                    >
+                      {phase.startDate} 至 {phase.endDate}
+                    </p>
+                    {phase.note ? (
+                      <p
+                        className="mt-0.5 break-words text-[10px] font-bold leading-5 text-[#8a98a8]"
+                        data-gantt-label-text="true"
+                      >
+                        {phase.note}
+                      </p>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+
+              <div className="relative" style={{ minWidth: timelineMinWidth }}>
+                {axisMarkers.map((marker) => (
+                  <span
+                    aria-hidden="true"
+                    className={`absolute inset-y-0 z-10 border-l ${
+                      marker.isBoundary ? "border-dashed border-red-500" : "border-sky-50"
+                    }`}
+                    key={`${marker.dateValue}-${marker.leftPercent}-body`}
+                    style={{ left: `${marker.leftPercent}%` }}
+                  />
+                ))}
+                {phaseRows.map(
+                  ({ leftPercent, phase, widthPercent }, index) => {
+                    const color = getGanttPhaseColor(index);
+
+                    return (
+                      <div
+                        className="relative border-b border-sky-50 last:border-b-0"
+                        key={`${phase.id}-timeline`}
+                        style={{ height: rowHeightPx }}
+                      >
+                        <div
+                          className="absolute top-1/2 z-20 flex h-8 -translate-y-1/2 items-center justify-center rounded-xl px-2 text-xs font-black leading-4 shadow-sm"
+                          style={{
+                            backgroundColor: color.background,
+                            color: color.text,
+                            left: `${leftPercent}%`,
+                            minWidth: 16,
+                            width: `${widthPercent}%`,
+                          }}
+                          title={`${phase.title}：${phase.startDate} 至 ${phase.endDate}`}
+                        />
+                      </div>
+                    );
+                  },
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-[1rem] border border-dashed border-sky-200 bg-white/80 px-3 py-8 text-center text-sm font-black text-[#66788a]">
+              暂无阶段，添加阶段后即可生成甘特图横条。
+            </div>
+          )}
+        </div>
+      </div>
+
+    </section>
+  );
+}
+
 const CHINA_HOLIDAYS_CACHE_PREFIX = "daily-planner-china-holidays";
 const CHINA_HOLIDAYS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const CHINA_HOLIDAYS_REMOTE_URL: string = "";
@@ -1307,6 +2875,329 @@ function saveCustomCategories(customCategories: CustomCategory[]) {
   }
 }
 
+function loadMoodBook(): MoodBook {
+  try {
+    const rawData = window.localStorage.getItem(MOOD_BOOK_KEY);
+    return normalizeMoodBook(rawData ? JSON.parse(rawData) : {});
+  } catch {
+    return {};
+  }
+}
+
+function saveMoodBook(moodBook: MoodBook) {
+  try {
+    window.localStorage.setItem(MOOD_BOOK_KEY, JSON.stringify(moodBook));
+  } catch {
+    // localStorage may be unavailable in private or restricted browser modes.
+  }
+}
+
+const COMPLEX_PROJECT_STATUSES: ComplexProjectStatus[] = ["active", "completed", "archived"];
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function normalizeText(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value.trim() : fallback;
+}
+
+function normalizeComplexProjectNote(value: unknown): string {
+  const note = normalizeText(value);
+
+  if (note.includes("检查导出甘特图") || note.includes("PPT 版一致性")) {
+    return "";
+  }
+
+  return note;
+}
+
+function normalizeTimestamp(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function normalizeDateInputString(value: unknown, fallback: string): string {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  const trimmedValue = value.trim();
+  const match = trimmedValue.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+  if (!match) {
+    return fallback;
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(year, month - 1, day);
+
+  return date.getFullYear() === year &&
+    date.getMonth() === month - 1 &&
+    date.getDate() === day
+    ? trimmedValue
+    : fallback;
+}
+
+function isMoodId(value: unknown): value is MoodId {
+  return MOOD_OPTIONS.some((option) => option.id === value);
+}
+
+function getMoodOption(moodId: unknown) {
+  return MOOD_OPTIONS.find((option) => option.id === moodId) ?? MOOD_OPTIONS[2];
+}
+
+function normalizeMoodEntry(value: unknown, fallbackDate: string): MoodEntry | null {
+  if (!isPlainObject(value)) {
+    return null;
+  }
+
+  const moodId = isMoodId(value.moodId) ? value.moodId : null;
+
+  if (!moodId) {
+    return null;
+  }
+
+  const timestamp = normalizeTimestamp(value.timestamp) ?? Date.now();
+  const date = normalizeDateInputString(value.date, fallbackDate || getTimestampDateValue(timestamp));
+  const createdAt = normalizeTimestamp(value.createdAt) ?? timestamp;
+  const updatedAt = normalizeTimestamp(value.updatedAt) ?? createdAt;
+
+  return {
+    id: normalizeText(value.id) || createId(),
+    date,
+    moodId,
+    note: normalizeText(value.note).slice(0, 180),
+    timestamp,
+    createdAt,
+    updatedAt,
+  };
+}
+
+function normalizeMoodBook(value: unknown): MoodBook {
+  if (!isPlainObject(value)) {
+    return {};
+  }
+
+  return Object.entries(value).reduce<MoodBook>((result, [date, entries]) => {
+    const fallbackDate = normalizeDateInputString(date, formatDateInput(new Date()));
+
+    if (!Array.isArray(entries)) {
+      return result;
+    }
+
+    const normalizedEntries = entries
+      .map((entry) => normalizeMoodEntry(entry, fallbackDate))
+      .filter((entry): entry is MoodEntry => Boolean(entry))
+      .sort((left, right) => left.timestamp - right.timestamp);
+
+    if (normalizedEntries.length > 0) {
+      result[fallbackDate] = normalizedEntries;
+    }
+
+    return result;
+  }, {});
+}
+
+function normalizeDateRange(startDate: unknown, endDate: unknown, fallbackDate: string) {
+  const normalizedStartDate = normalizeDateInputString(startDate, fallbackDate);
+  const normalizedEndDate = normalizeDateInputString(endDate, normalizedStartDate);
+
+  return normalizedStartDate <= normalizedEndDate
+    ? { endDate: normalizedEndDate, startDate: normalizedStartDate }
+    : { endDate: normalizedStartDate, startDate: normalizedStartDate };
+}
+
+function normalizeDurationSeconds(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : 0;
+}
+
+function getTimestampDateValue(timestamp: number): string {
+  return formatDateInput(new Date(timestamp));
+}
+
+function normalizeComplexProjectPhaseTimeEntry(
+  value: unknown,
+  fallbackDate: string,
+): ComplexProjectPhaseTimeEntry | null {
+  if (!isPlainObject(value)) {
+    return null;
+  }
+
+  const startedAt = normalizeTimestamp(value.startedAt);
+
+  if (!startedAt) {
+    return null;
+  }
+
+  const endedAt = normalizeTimestamp(value.endedAt);
+  const date = normalizeDateInputString(value.date, getTimestampDateValue(startedAt) || fallbackDate);
+  const computedDuration =
+    endedAt && endedAt >= startedAt ? Math.floor((endedAt - startedAt) / 1000) : 0;
+  const durationSeconds = normalizeDurationSeconds(value.durationSeconds) || computedDuration;
+
+  return {
+    id: normalizeText(value.id) || createId(),
+    date,
+    startedAt,
+    ...(endedAt && endedAt >= startedAt ? { endedAt } : {}),
+    durationSeconds,
+  };
+}
+
+function normalizeComplexProjectStatus(value: unknown): ComplexProjectStatus {
+  return COMPLEX_PROJECT_STATUSES.includes(value as ComplexProjectStatus)
+    ? (value as ComplexProjectStatus)
+    : "active";
+}
+
+function normalizeComplexProjectPhase(
+  value: unknown,
+  fallbackDate: string,
+): ComplexProjectPhase | null {
+  if (!isPlainObject(value)) {
+    return null;
+  }
+
+  const { endDate, startDate } = normalizeDateRange(value.startDate, value.endDate, fallbackDate);
+  const title = normalizeText(value.title, "未命名阶段");
+  const updatedAt = normalizeTimestamp(value.updatedAt);
+  const completedAt = normalizeTimestamp(value.completedAt);
+  const timeEntries = Array.isArray(value.timeEntries)
+    ? value.timeEntries
+        .map((entry) => normalizeComplexProjectPhaseTimeEntry(entry, startDate))
+        .filter((entry): entry is ComplexProjectPhaseTimeEntry => Boolean(entry))
+    : [];
+
+  return {
+    id: normalizeText(value.id) || createId(),
+    title: title || "未命名阶段",
+    note: normalizeText(value.note),
+    startDate,
+    endDate,
+    completed: value.completed === true,
+    timeEntries,
+    ...(completedAt ? { completedAt } : {}),
+    ...(updatedAt ? { updatedAt } : {}),
+  };
+}
+
+function getComplexProjectPhaseTime(phase: ComplexProjectPhase): number {
+  return Math.max(
+    phase.updatedAt ?? phase.completedAt ?? 0,
+    ...phase.timeEntries.map((entry) => entry.endedAt ?? entry.startedAt),
+  );
+}
+
+function getComplexProjectTime(project: ComplexProject): number {
+  return Math.max(
+    project.updatedAt ?? project.createdAt ?? 0,
+    project.archivedAt ?? 0,
+    ...project.phases.map(getComplexProjectPhaseTime),
+  );
+}
+
+function normalizeComplexProject(value: unknown, fallbackDate: string): ComplexProject | null {
+  if (!isPlainObject(value)) {
+    return null;
+  }
+
+  const createdAt = normalizeTimestamp(value.createdAt) ?? Date.now();
+  const updatedAt = normalizeTimestamp(value.updatedAt) ?? createdAt;
+  const archivedAt = normalizeTimestamp(value.archivedAt);
+  const { endDate, startDate } = normalizeDateRange(value.startDate, value.endDate, fallbackDate);
+  const projectFallbackDate = startDate || fallbackDate;
+  const phases = Array.isArray(value.phases)
+    ? value.phases
+        .map((phase) => normalizeComplexProjectPhase(phase, projectFallbackDate))
+        .filter((phase): phase is ComplexProjectPhase => Boolean(phase))
+    : [];
+  const title = normalizeText(value.title, "未命名项目");
+  const sourceTaskId = normalizeText(value.sourceTaskId);
+
+  return {
+    id: normalizeText(value.id) || createId(),
+    title: title || "未命名项目",
+    category: normalizeText(value.category, "其他") || "其他",
+    priority: normalizePriority(value.priority),
+    note: normalizeComplexProjectNote(value.note),
+    startDate,
+    endDate,
+    status: normalizeComplexProjectStatus(value.status),
+    phases,
+    ...(sourceTaskId ? { sourceTaskId } : {}),
+    createdAt,
+    updatedAt,
+    ...(archivedAt ? { archivedAt } : {}),
+  };
+}
+
+function normalizeComplexProjectBook(value: unknown): ComplexProjectBook {
+  const fallbackDate = formatDateInput(new Date());
+  const rawProjects = Array.isArray(value)
+    ? value
+    : isPlainObject(value)
+      ? Object.values(value)
+      : [];
+  const projectsById = new Map<string, ComplexProject>();
+
+  rawProjects.forEach((rawProject) => {
+    const project = normalizeComplexProject(rawProject, fallbackDate);
+
+    if (!project) {
+      return;
+    }
+
+    const existingProject = projectsById.get(project.id);
+
+    if (!existingProject || getComplexProjectTime(project) >= getComplexProjectTime(existingProject)) {
+      projectsById.set(project.id, project);
+    }
+  });
+
+  return Array.from(projectsById.values())
+    .sort((left, right) => {
+      const timeDifference = getComplexProjectTime(right) - getComplexProjectTime(left);
+
+      if (timeDifference !== 0) {
+        return timeDifference;
+      }
+
+      return left.id.localeCompare(right.id);
+    })
+    .reduce<ComplexProjectBook>((book, project) => {
+      book[project.id] = project;
+      return book;
+    }, {});
+}
+
+function getComplexProjectsForPayload(complexProjectBook: ComplexProjectBook): ComplexProject[] {
+  return Object.values(normalizeComplexProjectBook(complexProjectBook));
+}
+
+function loadComplexProjectBook(): ComplexProjectBook {
+  try {
+    const rawData = window.localStorage.getItem(COMPLEX_PROJECTS_KEY);
+    return normalizeComplexProjectBook(rawData ? JSON.parse(rawData) : {});
+  } catch {
+    return {};
+  }
+}
+
+function saveComplexProjectBook(complexProjectBook: ComplexProjectBook) {
+  try {
+    window.localStorage.setItem(
+      COMPLEX_PROJECTS_KEY,
+      JSON.stringify(normalizeComplexProjectBook(complexProjectBook)),
+    );
+  } catch {
+    // localStorage may be unavailable in private or restricted browser modes.
+  }
+}
+
 function hasPlans(planBook: PlanBook): boolean {
   return Object.values(planBook).some((items) => items.length > 0);
 }
@@ -1487,7 +3378,15 @@ function normalizePlanBook(planBook: PlanBook): PlanBook {
 }
 
 function normalizePayload(payload: unknown): CloudPayload {
-  if (payload && typeof payload === "object" && "plansByDate" in payload) {
+  if (
+    payload &&
+    typeof payload === "object" &&
+    ("plansByDate" in payload ||
+      "deletedItemIds" in payload ||
+      "customCategories" in payload ||
+      "complexProjects" in payload ||
+      "moodBook" in payload)
+  ) {
     const cloudPayload = payload as Partial<CloudPayload>;
 
     return {
@@ -1496,6 +3395,10 @@ function normalizePayload(payload: unknown): CloudPayload {
         ? cloudPayload.deletedItemIds
         : [],
       customCategories: normalizeCustomCategories(cloudPayload.customCategories),
+      complexProjects: getComplexProjectsForPayload(
+        normalizeComplexProjectBook(cloudPayload.complexProjects),
+      ),
+      moodBook: normalizeMoodBook(cloudPayload.moodBook),
     };
   }
 
@@ -1503,6 +3406,8 @@ function normalizePayload(payload: unknown): CloudPayload {
     plansByDate: normalizePlanBook((payload ?? {}) as PlanBook),
     deletedItemIds: [],
     customCategories: [],
+    complexProjects: [],
+    moodBook: {},
   };
 }
 
@@ -1573,15 +3478,65 @@ function mergeCustomCategories(
   return Array.from(categoriesByName.values());
 }
 
+function mergeMoodBooks(localMoodBook: MoodBook, cloudMoodBook: MoodBook): MoodBook {
+  const dates = new Set([...Object.keys(localMoodBook), ...Object.keys(cloudMoodBook)]);
+  const merged: MoodBook = {};
+
+  dates.forEach((date) => {
+    const entryMap = new Map<string, MoodEntry>();
+    [...(cloudMoodBook[date] ?? []), ...(localMoodBook[date] ?? [])].forEach((entry) => {
+      const existingEntry = entryMap.get(entry.id);
+
+      if (!existingEntry || (entry.updatedAt ?? entry.createdAt) >= (existingEntry.updatedAt ?? existingEntry.createdAt)) {
+        entryMap.set(entry.id, entry);
+      }
+    });
+
+    const entries = Array.from(entryMap.values()).sort(
+      (left, right) => left.timestamp - right.timestamp,
+    );
+
+    if (entries.length > 0) {
+      merged[date] = entries;
+    }
+  });
+
+  return normalizeMoodBook(merged);
+}
+
+function mergeComplexProjectBooks(
+  localComplexProjectBook: ComplexProjectBook,
+  cloudComplexProjectBook: ComplexProjectBook,
+): ComplexProjectBook {
+  return normalizeComplexProjectBook({
+    ...cloudComplexProjectBook,
+    ...localComplexProjectBook,
+    ...Object.values(cloudComplexProjectBook).reduce<ComplexProjectBook>((merged, cloudProject) => {
+      const localProject = localComplexProjectBook[cloudProject.id];
+
+      merged[cloudProject.id] =
+        !localProject || getComplexProjectTime(cloudProject) > getComplexProjectTime(localProject)
+          ? cloudProject
+          : localProject;
+
+      return merged;
+    }, {}),
+  });
+}
+
 function createCloudPayload(
   planBook: PlanBook,
   deletedItemIds: string[],
   customCategories: CustomCategory[],
+  complexProjectBook: ComplexProjectBook = {},
+  moodBook: MoodBook = {},
 ): CloudPayload {
   return {
     plansByDate: normalizePlanBook(planBook),
     deletedItemIds,
     customCategories: normalizeCustomCategories(customCategories),
+    complexProjects: getComplexProjectsForPayload(complexProjectBook),
+    moodBook: normalizeMoodBook(moodBook),
   };
 }
 
@@ -1591,6 +3546,13 @@ function uniqueValues(values: string[]): string[] {
 
 function arePlanBooksEqual(firstPlanBook: PlanBook, secondPlanBook: PlanBook): boolean {
   return JSON.stringify(firstPlanBook) === JSON.stringify(secondPlanBook);
+}
+
+function areComplexProjectBooksEqual(
+  firstComplexProjectBook: ComplexProjectBook,
+  secondComplexProjectBook: ComplexProjectBook,
+): boolean {
+  return JSON.stringify(firstComplexProjectBook) === JSON.stringify(secondComplexProjectBook);
 }
 
 function areStringArraysEqual(firstValues: string[], secondValues: string[]): boolean {
@@ -1645,6 +3607,188 @@ function formatTimerSeconds(seconds: number): string {
 
 function timerSecondsToActualMinutes(seconds: number): number {
   return Math.max(1, Math.ceil(Math.max(0, seconds) / 60));
+}
+
+function getComplexProjectPhaseEntrySeconds(
+  entry: ComplexProjectPhaseTimeEntry,
+  now = Date.now(),
+): number {
+  if (entry.endedAt) {
+    return Math.max(
+      entry.durationSeconds,
+      Math.floor(Math.max(0, entry.endedAt - entry.startedAt) / 1000),
+    );
+  }
+
+  return entry.durationSeconds + Math.floor(Math.max(0, now - entry.startedAt) / 1000);
+}
+
+function getComplexProjectPhaseTotalSeconds(
+  phase: ComplexProjectPhase,
+  now = Date.now(),
+): number {
+  return phase.timeEntries.reduce(
+    (totalSeconds, entry) => totalSeconds + getComplexProjectPhaseEntrySeconds(entry, now),
+    0,
+  );
+}
+
+function getComplexProjectPhaseSecondsForDate(
+  phase: ComplexProjectPhase,
+  dateValue: string,
+  now = Date.now(),
+): number {
+  return phase.timeEntries
+    .filter((entry) => entry.date === dateValue)
+    .reduce((totalSeconds, entry) => totalSeconds + getComplexProjectPhaseEntrySeconds(entry, now), 0);
+}
+
+function getComplexProjectTotalSeconds(project: ComplexProject, now = Date.now()): number {
+  return project.phases.reduce(
+    (totalSeconds, phase) => totalSeconds + getComplexProjectPhaseTotalSeconds(phase, now),
+    0,
+  );
+}
+
+function getComplexProjectSecondsForDate(
+  project: ComplexProject,
+  dateValue: string,
+  now = Date.now(),
+): number {
+  return project.phases.reduce(
+    (totalSeconds, phase) =>
+      totalSeconds + getComplexProjectPhaseSecondsForDate(phase, dateValue, now),
+    0,
+  );
+}
+
+function getComplexProjectSessionCountForDate(project: ComplexProject, dateValue: string): number {
+  return project.phases.reduce(
+    (count, phase) => count + phase.timeEntries.filter((entry) => entry.date === dateValue).length,
+    0,
+  );
+}
+
+function getRunningComplexProjectPhaseEntry(
+  phase: ComplexProjectPhase,
+): ComplexProjectPhaseTimeEntry | null {
+  return phase.timeEntries.find((entry) => !entry.endedAt) ?? null;
+}
+
+function getComplexProjectPhaseEntriesForDate(
+  phase: ComplexProjectPhase,
+  dateValue: string,
+): ComplexProjectPhaseTimeEntry[] {
+  return phase.timeEntries
+    .filter((entry) => entry.date === dateValue)
+    .sort((left, right) => left.startedAt - right.startedAt);
+}
+
+function formatClockTime(timestamp: number): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(timestamp));
+}
+
+function createTimestampForDateAtCurrentTime(dateValue: string): number {
+  const selectedDate = parseDateInputValue(dateValue);
+  const now = new Date();
+
+  return new Date(
+    selectedDate.getFullYear(),
+    selectedDate.getMonth(),
+    selectedDate.getDate(),
+    now.getHours(),
+    now.getMinutes(),
+    now.getSeconds(),
+  ).getTime();
+}
+
+function formatDateTime(timestamp: number): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(timestamp));
+}
+
+function escapeSpreadsheetCell(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function createPhaseTimeEntriesExcelBlob({
+  date,
+  entries,
+  now,
+  phaseTitle,
+  projectTitle,
+}: {
+  date: string;
+  entries: ComplexProjectPhaseTimeEntry[];
+  now: number;
+  phaseTitle: string;
+  projectTitle: string;
+}): Blob {
+  const rows = entries.map((entry, index) => {
+    const durationSeconds = getComplexProjectPhaseEntrySeconds(entry, now);
+    const endedAtLabel = entry.endedAt ? formatDateTime(entry.endedAt) : "进行中";
+
+    return `
+      <tr>
+        <td>${index + 1}</td>
+        <td>${escapeSpreadsheetCell(projectTitle)}</td>
+        <td>${escapeSpreadsheetCell(phaseTitle)}</td>
+        <td>${escapeSpreadsheetCell(date)}</td>
+        <td>${escapeSpreadsheetCell(formatDateTime(entry.startedAt))}</td>
+        <td>${escapeSpreadsheetCell(endedAtLabel)}</td>
+        <td>${escapeSpreadsheetCell(formatDashboardDuration(durationSeconds))}</td>
+        <td>${durationSeconds}</td>
+      </tr>`;
+  });
+  const html = `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      table { border-collapse: collapse; font-family: Arial, "Microsoft YaHei", sans-serif; }
+      th, td { border: 1px solid #d9e2ec; padding: 8px 10px; white-space: nowrap; }
+      th { background: #fff7ed; font-weight: 700; }
+      caption { padding: 10px; font-size: 16px; font-weight: 700; text-align: left; }
+    </style>
+  </head>
+  <body>
+    <table>
+      <caption>${escapeSpreadsheetCell(projectTitle)} - ${escapeSpreadsheetCell(phaseTitle)} ${escapeSpreadsheetCell(date)} 计时明细</caption>
+      <thead>
+        <tr>
+          <th>序号</th>
+          <th>复杂项目</th>
+          <th>阶段</th>
+          <th>日期</th>
+          <th>开始时间</th>
+          <th>结束时间</th>
+          <th>持续时间</th>
+          <th>持续秒数</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.join("")}
+      </tbody>
+    </table>
+  </body>
+</html>`;
+
+  return new Blob([`\ufeff${html}`], {
+    type: "application/vnd.ms-excel;charset=utf-8",
+  });
 }
 
 function createTaskTimerState(itemId: string): TaskTimerState {
@@ -4761,13 +6905,12 @@ function ExportPrimaryPinkTemplate({
                       ) : null}
                     </article>
                   );
-                })}
-              </div>
-            )}
-          </div>
-        </section>
-
-        <footer
+	                })}
+	              </div>
+	            )}
+	          </div>
+	        </section>
+	        <footer
           style={{
             alignItems: "center",
             background: "linear-gradient(90deg, rgba(255,255,255,0.92), rgba(255,232,242,0.9))",
@@ -5594,8 +7737,8 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
               })}
             </div>
             )}
-          </div>
-        </section>
+		                  </div>
+		                </section>
 
         <footer
           style={{
@@ -5675,7 +7818,6 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
 type ChinaHolidayDatePickerProps = {
   calendarMonthDate: string;
   holidayMap: Map<string, ChinaHolidayInfo>;
-  holidaySourceByYear: Record<number, ChinaHolidayDataSource>;
   onCalendarMonthDateChange: (dateValue: string) => void;
   onSelectDate: (dateValue: string) => void;
   selectedDate: string;
@@ -5686,6 +7828,17 @@ type ChinaHolidayDatePickerProps = {
 type WeatherWidgetProps = {
   onRefresh: () => void;
   weatherState: WeatherState;
+};
+
+type MoodWidgetProps = {
+  entryCount: number;
+  latestEntry: MoodEntry | null;
+  onOpen: () => void;
+};
+
+type MoodTimelineCardProps = {
+  entries: MoodEntry[];
+  selectedDate: string;
 };
 
 function WeatherWidget({ onRefresh, weatherState }: WeatherWidgetProps) {
@@ -5718,10 +7871,176 @@ function WeatherWidget({ onRefresh, weatherState }: WeatherWidgetProps) {
   );
 }
 
+function MoodWidget({ entryCount, latestEntry, onOpen }: MoodWidgetProps) {
+  const moodOption = latestEntry ? getMoodOption(latestEntry.moodId) : null;
+
+  return (
+    <button
+      id="mood-open-button"
+      className="flex min-h-[3.8rem] w-full items-center gap-2 rounded-2xl border border-pink-100 bg-pink-50/75 px-3 py-2 text-left shadow-sm outline-none transition hover:bg-pink-100/75 focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+      type="button"
+      onClick={onOpen}
+    >
+      <span aria-hidden="true" className="shrink-0 text-xl leading-none">
+        {moodOption?.icon ?? "💗"}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-black text-pink-700">
+          {moodOption ? moodOption.label : "当日心情"}
+        </span>
+        <span className="mt-0.5 block truncate text-[11px] font-bold text-pink-700/80">
+          {entryCount > 0 ? `${entryCount} 次记录` : "记录此刻"}
+        </span>
+      </span>
+    </button>
+  );
+}
+
+function MoodTimelineCard({ entries, selectedDate }: MoodTimelineCardProps) {
+  const sortedEntries = [...entries].sort((left, right) => left.timestamp - right.timestamp);
+  const width = 680;
+  const height = 250;
+  const chart = { bottom: 38, left: 52, right: 24, top: 24 };
+  const chartWidth = width - chart.left - chart.right;
+  const chartHeight = height - chart.top - chart.bottom;
+  const getX = (timestamp: number) => {
+    const date = new Date(timestamp);
+    const minutes = date.getHours() * 60 + date.getMinutes();
+
+    return chart.left + (minutes / (24 * 60 - 1)) * chartWidth;
+  };
+  const getY = (score: number) =>
+    chart.top + ((MOOD_OPTIONS.length - score) / (MOOD_OPTIONS.length - 1)) * chartHeight;
+  const points = sortedEntries.map((entry) => {
+    const option = getMoodOption(entry.moodId);
+
+    return {
+      entry,
+      option,
+      x: getX(entry.timestamp),
+      y: getY(option.score),
+    };
+  });
+  const linePath = points
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`)
+    .join(" ");
+  const latestPoint = points[points.length - 1] ?? null;
+
+  return (
+    <section className="rounded-[1.35rem] border border-pink-100 bg-white p-4 shadow-sm shadow-pink-100/60">
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <p className="text-sm font-black text-pink-600">心情轨迹</p>
+          <h3 className="mt-1 text-lg font-black text-[#3f3349]">
+            {formatDisplayDateWithYear(selectedDate)}
+          </h3>
+        </div>
+        <span className="rounded-full bg-pink-50 px-3 py-1 text-xs font-black text-pink-700">
+          {entries.length} 次记录
+        </span>
+      </div>
+
+      <div className="overflow-hidden rounded-[1rem] border border-pink-50 bg-[#fff8fb] px-2 py-3">
+        <svg
+          aria-label="当天心情轨迹图"
+          className="h-64 w-full"
+          preserveAspectRatio="none"
+          viewBox={`0 0 ${width} ${height}`}
+        >
+          {[1, 2, 3, 4, 5, 6].map((score) => {
+            const y = getY(score);
+
+            return (
+              <g key={score}>
+                <line
+                  stroke="#fce7f3"
+                  strokeWidth="1"
+                  x1={chart.left}
+                  x2={width - chart.right}
+                  y1={y}
+                  y2={y}
+                />
+                <text
+                  fill="#9b8ca4"
+                  fontSize="10"
+                  fontWeight="700"
+                  textAnchor="end"
+                  x={chart.left - 8}
+                  y={y + 4}
+                >
+                  {score}
+                </text>
+              </g>
+            );
+          })}
+          {[0, 6, 12, 18, 24].map((hour) => {
+            const x = chart.left + (hour / 24) * chartWidth;
+
+            return (
+              <g key={hour}>
+                <line
+                  stroke="#fbcfe8"
+                  strokeDasharray="4 6"
+                  strokeWidth="1"
+                  x1={x}
+                  x2={x}
+                  y1={chart.top}
+                  y2={height - chart.bottom}
+                />
+                <text
+                  fill="#8b7b91"
+                  fontSize="11"
+                  fontWeight="800"
+                  textAnchor={hour === 0 ? "start" : hour === 24 ? "end" : "middle"}
+                  x={x}
+                  y={height - 12}
+                >
+                  {String(hour).padStart(2, "0")}:00
+                </text>
+              </g>
+            );
+          })}
+          {points.length > 1 ? (
+            <path d={linePath} fill="none" stroke="#ec4899" strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" />
+          ) : null}
+          {points.map((point) => (
+            <g key={point.entry.id}>
+              <circle cx={point.x} cy={point.y} fill="#ffffff" r="10" stroke={point.option.swatch} strokeWidth="3" />
+              <text dominantBaseline="central" fontSize="14" textAnchor="middle" x={point.x} y={point.y + 0.5}>
+                {point.option.icon}
+              </text>
+            </g>
+          ))}
+          {points.length === 0 ? (
+            <text fill="#9b8ca4" fontSize="16" fontWeight="800" textAnchor="middle" x={width / 2} y={height / 2}>
+              暂无心情记录
+            </text>
+          ) : null}
+        </svg>
+      </div>
+
+      {latestPoint ? (
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-xs font-black text-[#6f5d78]">
+          <span className={`rounded-full border px-3 py-1 ${latestPoint.option.toneClass}`}>
+            最近：{latestPoint.option.icon} {latestPoint.option.label}
+          </span>
+          <span className="rounded-full bg-slate-50 px-3 py-1">
+            {formatClockTime(latestPoint.entry.timestamp)}
+          </span>
+          {latestPoint.entry.note ? (
+            <span className="min-w-0 max-w-full truncate rounded-full bg-white px-3 py-1">
+              {latestPoint.entry.note}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function ChinaHolidayDatePicker({
   calendarMonthDate,
   holidayMap,
-  holidaySourceByYear,
   onCalendarMonthDateChange,
   onSelectDate,
   selectedDate,
@@ -5737,10 +8056,6 @@ function ChinaHolidayDatePicker({
     () => getCalendarMonthCells(calendarMonthDate),
     [calendarMonthDate],
   );
-  const visibleYear = getDateInputYear(calendarMonthDate);
-  const dataSource = holidaySourceByYear[visibleYear] ?? "fallback";
-  const sourceText =
-    dataSource === "remote" ? "远程数据" : dataSource === "cache" ? "缓存数据" : "本地兜底";
   const selectedSpecialText = getChinaSpecialDateText(selectedHolidayInfo);
   const selectedLunarText = formatChinaLunarDisplayDate(selectedDate);
 
@@ -5796,15 +8111,18 @@ function ChinaHolidayDatePicker({
 
   return (
     <div className="relative" ref={rootRef}>
-      <form className="mb-2 flex gap-2" onSubmit={handleDateSearchSubmit}>
-        <label className="sr-only" htmlFor="planner-date-search">
-          日期直达
+      <form className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center" onSubmit={handleDateSearchSubmit}>
+        <label
+          className="shrink-0 text-sm font-bold text-[#6f5d78]"
+          htmlFor="planner-date-search"
+        >
+          选择日期
         </label>
         <input
           className="min-w-0 flex-1 rounded-2xl border border-pink-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] shadow-sm outline-none transition placeholder:text-[#b8aabd] focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
           id="planner-date-search"
           inputMode="text"
-          placeholder="2026年05月20日 / 除夕"
+          placeholder="输入日期、节日或农历关键词"
           value={dateSearchInput}
           onChange={(event) => {
             setDateSearchInput(event.target.value);
@@ -5825,21 +8143,16 @@ function ChinaHolidayDatePicker({
       <div className="flex flex-col gap-2 sm:flex-row">
         <button
           aria-expanded={isOpen}
-          className="flex min-h-[3.8rem] min-w-0 flex-1 items-center justify-between gap-3 rounded-2xl border border-pink-100 bg-white px-4 py-3 text-left text-[#46394f] shadow-sm outline-none transition hover:bg-pink-50/50 focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+          className="flex min-h-[3.8rem] min-w-0 flex-1 items-center justify-center rounded-2xl border border-pink-100 bg-white px-4 py-3 text-center text-[#46394f] shadow-sm outline-none transition hover:bg-pink-50/50 focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
           id="planner-date"
           type="button"
           onClick={openCalendar}
         >
-          <span className="min-w-0">
-            <span className="block truncate text-sm font-black">
-              {formatDisplayDateWithYear(selectedDate)}
-            </span>
-          </span>
-          <span aria-hidden="true" className="shrink-0 text-xl leading-none">
-            📅
+          <span className="flex min-h-full items-center justify-center truncate text-base font-black leading-none">
+            {formatDisplayDateWithYear(selectedDate)}
           </span>
         </button>
-        {summaryAside ? <div className="min-w-0 sm:w-36 sm:shrink-0">{summaryAside}</div> : null}
+        {summaryAside ? <div className="min-w-0 sm:w-auto sm:shrink-0">{summaryAside}</div> : null}
       </div>
 
       <AnimatePresence>
@@ -5864,9 +8177,6 @@ function ChinaHolidayDatePicker({
               <div className="text-center">
                 <p className="text-base font-black text-[#46394f]">
                   {formatCalendarMonthLabel(calendarMonthDate)}
-                </p>
-                <p className="mt-0.5 text-[11px] font-bold text-[#8b7b91]">
-                  节假日：{sourceText}
                 </p>
               </div>
               <button
@@ -6020,6 +8330,29 @@ function App() {
         };
   });
   const [plansByDate, setPlansByDate] = useState<PlanBook>(() => loadPlanBook());
+  const [complexProjectBook, setComplexProjectBook] = useState<ComplexProjectBook>(() =>
+    loadComplexProjectBook(),
+  );
+  const [moodBook, setMoodBook] = useState<MoodBook>(() => loadMoodBook());
+  const [complexProjectForm, setComplexProjectForm] = useState<ComplexProjectForm>(() =>
+    createEmptyComplexProjectForm(selectedDate),
+  );
+  const [editingComplexProjectId, setEditingComplexProjectId] = useState<string | null>(null);
+  const [isComplexProjectFormOpen, setIsComplexProjectFormOpen] = useState<boolean>(false);
+  const [complexProjectFormError, setComplexProjectFormError] = useState<string>("");
+  const [complexProjectPhaseForm, setComplexProjectPhaseForm] =
+    useState<ComplexProjectPhaseForm>(() =>
+      createEmptyComplexProjectPhaseForm(null, selectedDate),
+    );
+  const [complexProjectPhaseEdit, setComplexProjectPhaseEdit] =
+    useState<ComplexProjectPhaseEdit | null>(null);
+  const [complexProjectPhaseFormError, setComplexProjectPhaseFormError] = useState<string>("");
+  const [complexProjectPhaseMessage, setComplexProjectPhaseMessage] = useState<string>("");
+  const [phaseTimeDetailTarget, setPhaseTimeDetailTarget] =
+    useState<ComplexProjectPhaseTimeDetailTarget | null>(null);
+  const [ganttPreviewProjectId, setGanttPreviewProjectId] = useState<string | null>(null);
+  const [ganttExportProjectId, setGanttExportProjectId] = useState<string | null>(null);
+  const [ganttExportWidth, setGanttExportWidth] = useState<number>(1020);
   const [form, setForm] = useState<PlanForm>(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [taskInlineEdit, setTaskInlineEdit] = useState<TaskInlineFieldEdit | null>(null);
@@ -6028,12 +8361,17 @@ function App() {
   const [targetMinutesEditDraft, setTargetMinutesEditDraft] = useState<string>("");
   const [targetMinutesEditError, setTargetMinutesEditError] = useState<string>("");
   const [completionFeedback, setCompletionFeedback] = useState<CompletionFeedback | null>(null);
+  const [complexProjectFeedback, setComplexProjectFeedback] =
+    useState<ComplexProjectCompletionFeedback | null>(null);
   const [actualEditId, setActualEditId] = useState<string | null>(null);
   const [actualMinutesDraft, setActualMinutesDraft] = useState<string>("");
   const [actualMinutesError, setActualMinutesError] = useState<string>("");
   const [planSearchQuery, setPlanSearchQuery] = useState<string>("");
   const [isPlanSearchOpen, setIsPlanSearchOpen] = useState<boolean>(false);
-  const [isTimeDashboardOpen, setIsTimeDashboardOpen] = useState<boolean>(false);
+  const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<WorkspaceTab>("tasks");
+  const [todayWorkspaceCollapsed, setTodayWorkspaceCollapsed] =
+    useState<TodayWorkspaceCollapsedState>(() => DEFAULT_TODAY_WORKSPACE_COLLAPSED_STATE);
+  const [isTaskFormOpen, setIsTaskFormOpen] = useState<boolean>(false);
   const [highlightedTaskId, setHighlightedTaskId] = useState<string | null>(null);
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [dragOverPriority, setDragOverPriority] = useState<TaskPriority | null>(null);
@@ -6048,6 +8386,7 @@ function App() {
   const [customCategoryStatus, setCustomCategoryStatus] = useState<string>("");
   const [isCustomCategoryOpen, setIsCustomCategoryOpen] = useState<boolean>(false);
   const [isExporting, setIsExporting] = useState<boolean>(false);
+  const [isGanttExporting, setIsGanttExporting] = useState<boolean>(false);
   const [exportEncouragement, setExportEncouragement] = useState<string>(() => getRandomPrimaryEncouragement());
   const [selectedExportTemplateId, setSelectedExportTemplateId] = useState<string>(
     EXPORT_TEMPLATES[0].id,
@@ -6068,11 +8407,22 @@ function App() {
   const [cloudStatus, setCloudStatus] = useState<string>(() =>
     isSupabaseConfigured ? "本地模式" : "Supabase 环境变量未配置，本地模式",
   );
+  const [isAuthPanelOpen, setIsAuthPanelOpen] = useState<boolean>(() =>
+    hasPasswordRecoveryMarker(),
+  );
   const [isAuthBusy, setIsAuthBusy] = useState<boolean>(false);
   const [isCloudSaving, setIsCloudSaving] = useState<boolean>(false);
+  const [isMoodPanelOpen, setIsMoodPanelOpen] = useState<boolean>(false);
+  const [moodDraftId, setMoodDraftId] = useState<MoodId>(DEFAULT_MOOD_ID);
+  const [moodNoteDraft, setMoodNoteDraft] = useState<string>("");
+  const [moodStatus, setMoodStatus] = useState<string>("");
+  const [isMoodExporting, setIsMoodExporting] = useState<boolean>(false);
   const journalRef = useRef<HTMLDivElement | null>(null);
   const exportRef = useRef<HTMLDivElement | null>(null);
+  const ganttExportRef = useRef<HTMLDivElement | null>(null);
+  const moodTimelineRef = useRef<HTMLDivElement | null>(null);
   const feedbackTimer = useRef<number | null>(null);
+  const complexProjectFeedbackTimer = useRef<number | null>(null);
   const timerNoticeTimer = useRef<number | null>(null);
   const highlightedTaskTimer = useRef<number | null>(null);
   const cloudTimer = useRef<number | null>(null);
@@ -6080,9 +8430,14 @@ function App() {
   const skipInlineBlurSave = useRef<boolean>(false);
   const cloudReady = useRef<boolean>(false);
   const latestPlanBook = useRef<PlanBook>(plansByDate);
+  const latestComplexProjectBook = useRef<ComplexProjectBook>(complexProjectBook);
+  const latestMoodBook = useRef<MoodBook>(moodBook);
   const latestDeletedItemIds = useRef<string[]>(deletedItemIds);
   const latestCustomCategories = useRef<CustomCategory[]>(customCategories);
   const currentUserId = currentUser?.id ?? null;
+  const ganttExportProject = ganttExportProjectId
+    ? complexProjectBook[ganttExportProjectId] ?? null
+    : null;
 
   const refreshWeather = useCallback(async (options: WeatherRefreshOptions = {}) => {
     if (weatherPermissionDenied.current && !options.force) {
@@ -6151,6 +8506,75 @@ function App() {
     ],
     [customCategories],
   );
+  const complexProjectCategoryOptions = useMemo(() => {
+    const hasSelectedCategory = categoryOptions.some(
+      (category) => category.name === complexProjectForm.category,
+    );
+
+    return hasSelectedCategory
+      ? categoryOptions
+      : [
+          ...categoryOptions,
+          {
+            id: complexProjectForm.category,
+            name: complexProjectForm.category,
+            icon: "🏷️",
+          },
+        ];
+  }, [categoryOptions, complexProjectForm.category]);
+  const complexProjects = useMemo(
+    () =>
+      Object.values(complexProjectBook).sort((left, right) => {
+        const timeDifference = getComplexProjectTime(right) - getComplexProjectTime(left);
+
+        if (timeDifference !== 0) {
+          return timeDifference;
+        }
+
+        return left.title.localeCompare(right.title);
+      }),
+    [complexProjectBook],
+  );
+  const dailyComplexProjects = useMemo(
+    () =>
+      complexProjects
+        .filter(
+          (project) =>
+            project.status !== "archived" &&
+            isDateInRange(selectedDate, project.startDate, project.endDate),
+        )
+        .sort((left, right) => {
+          const statusDifference =
+            (left.status === "completed" ? 1 : 0) - (right.status === "completed" ? 1 : 0);
+
+          if (statusDifference !== 0) {
+            return statusDifference;
+          }
+
+          const priorityDifference = getPriorityIndex(left.priority) - getPriorityIndex(right.priority);
+
+          if (priorityDifference !== 0) {
+            return priorityDifference;
+          }
+
+          const phaseDifference =
+            (getCurrentComplexProjectPhase(right, selectedDate) ? 1 : 0) -
+            (getCurrentComplexProjectPhase(left, selectedDate) ? 1 : 0);
+
+          if (phaseDifference !== 0) {
+            return phaseDifference;
+          }
+
+          const endDateDifference = left.endDate.localeCompare(right.endDate);
+
+          if (endDateDifference !== 0) {
+            return endDateDifference;
+          }
+
+          return left.title.localeCompare(right.title);
+        }),
+    [complexProjects, selectedDate],
+  );
   const chinaHolidayMap = useMemo(() => {
     const holidayMap = new Map<string, ChinaHolidayInfo>();
 
@@ -6174,6 +8598,27 @@ function App() {
     EXPORT_TEMPLATES.find((template) => template.id === selectedExportTemplateId) ??
     EXPORT_TEMPLATES[0];
   const plans = plansByDate[selectedDate] ?? [];
+  const selectedMoodEntries = useMemo(
+    () => [...(moodBook[selectedDate] ?? [])].sort((left, right) => left.timestamp - right.timestamp),
+    [moodBook, selectedDate],
+  );
+  const latestMoodEntry = selectedMoodEntries[selectedMoodEntries.length - 1] ?? null;
+  const phaseTimeDetailProject = phaseTimeDetailTarget
+    ? complexProjectBook[phaseTimeDetailTarget.projectId] ?? null
+    : null;
+  const phaseTimeDetailPhase =
+    phaseTimeDetailProject && phaseTimeDetailTarget
+      ? phaseTimeDetailProject.phases.find((phase) => phase.id === phaseTimeDetailTarget.phaseId) ??
+        null
+      : null;
+  const phaseTimeDetailEntries =
+    phaseTimeDetailPhase && phaseTimeDetailTarget
+      ? getComplexProjectPhaseEntriesForDate(phaseTimeDetailPhase, phaseTimeDetailTarget.date)
+      : [];
+  const phaseTimeDetailTotalSeconds = phaseTimeDetailEntries.reduce(
+    (totalSeconds, entry) => totalSeconds + getComplexProjectPhaseEntrySeconds(entry, timerTick),
+    0,
+  );
   const planSearchResults = useMemo(
     () => searchPlans(planSearchQuery, plansByDate),
     [planSearchQuery, plansByDate],
@@ -6188,12 +8633,28 @@ function App() {
   );
   const completedCount = plans.filter((item) => item.completed).length;
   const progress = plans.length > 0 ? Math.round((completedCount / plans.length) * 100) : 0;
+  const isDailyComplexProjectsCollapsed = todayWorkspaceCollapsed.longProjects;
   const dailyTimeStats = useMemo<DailyTimeStats>(() => {
     const targetTotalMinutes = getTotalMinutes(plans, "targetMinutes");
     const savedActualMinutes = getTotalMinutes(plans, "actualMinutes");
     const completedPlans = plans.filter((item) => item.completed);
     const unfinishedPlans = plans.filter((item) => !item.completed);
     const plannedTimePlans = plans.filter((item) => item.targetMinutes);
+    const projectActualSeconds = complexProjects.reduce(
+      (totalSeconds, project) =>
+        totalSeconds + getComplexProjectSecondsForDate(project, selectedDate, timerTick),
+      0,
+    );
+    const projectSessionCount = complexProjects.reduce(
+      (count, project) => count + getComplexProjectSessionCountForDate(project, selectedDate),
+      0,
+    );
+    const projectActiveTimerCount = complexProjects.reduce(
+      (count, project) =>
+        count +
+        project.phases.filter((phase) => phase.timeEntries.some((entry) => !entry.endedAt)).length,
+      0,
+    );
     const temporaryTimerSeconds = plans.reduce((totalSeconds, item) => {
       const timer = taskTimersByTaskId[item.id];
 
@@ -6208,7 +8669,7 @@ function App() {
 
       return totalSeconds + getTaskTimerElapsedSeconds(timer, timerTick);
     }, 0);
-    const liveActualSeconds = savedActualMinutes * 60 + temporaryTimerSeconds;
+    const liveActualSeconds = savedActualMinutes * 60 + temporaryTimerSeconds + projectActualSeconds;
     const targetTotalSeconds = targetTotalMinutes * 60;
     const comparableSavedActualMinutes = getTotalMinutes(plannedTimePlans, "actualMinutes");
     const comparableTemporaryTimerSeconds = plannedTimePlans.reduce((totalSeconds, item) => {
@@ -6236,6 +8697,9 @@ function App() {
     return {
       targetTotalMinutes,
       savedActualMinutes,
+      projectActualSeconds,
+      projectSessionCount,
+      projectActiveTimerCount,
       temporaryTimerSeconds,
       liveActualSeconds,
       comparableActualSeconds,
@@ -6247,7 +8711,9 @@ function App() {
       unfinishedTargetMinutes: getTotalMinutes(unfinishedPlans, "targetMinutes"),
       missingTargetCount: plans.filter((item) => !item.targetMinutes).length,
       missingActualCount: plans.filter((item) => !item.actualMinutes).length,
-      activeTimerCount: plans.filter((item) => taskTimersByTaskId[item.id]?.isRunning).length,
+      activeTimerCount:
+        plans.filter((item) => taskTimersByTaskId[item.id]?.isRunning).length +
+        projectActiveTimerCount,
       trackedTimerCount: plans.filter((item) => {
         const timer = taskTimersByTaskId[item.id];
         return Boolean(
@@ -6261,12 +8727,22 @@ function App() {
       actualPercent,
       actualProgress: Math.min(100, actualPercent),
     };
-  }, [plans, taskTimersByTaskId, timerTick]);
+  }, [complexProjects, plans, selectedDate, taskTimersByTaskId, timerTick]);
 
   useEffect(() => {
     savePlanBook(plansByDate);
     latestPlanBook.current = plansByDate;
   }, [plansByDate]);
+
+  useEffect(() => {
+    saveComplexProjectBook(complexProjectBook);
+    latestComplexProjectBook.current = complexProjectBook;
+  }, [complexProjectBook]);
+
+  useEffect(() => {
+    saveMoodBook(moodBook);
+    latestMoodBook.current = moodBook;
+  }, [moodBook]);
 
   useEffect(() => {
     latestDeletedItemIds.current = deletedItemIds;
@@ -6298,6 +8774,9 @@ function App() {
       if (feedbackTimer.current) {
         window.clearTimeout(feedbackTimer.current);
       }
+      if (complexProjectFeedbackTimer.current) {
+        window.clearTimeout(complexProjectFeedbackTimer.current);
+      }
       if (cloudTimer.current) {
         window.clearTimeout(cloudTimer.current);
       }
@@ -6311,9 +8790,13 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const hasRunningTimer = Object.values(taskTimersByTaskId).some(
+    const hasRunningTaskTimer = Object.values(taskTimersByTaskId).some(
       (timer) => timer.isRunning || timer.countdownIsRunning,
     );
+    const hasRunningComplexProjectTimer = complexProjects.some((project) =>
+      project.phases.some((phase) => phase.timeEntries.some((entry) => !entry.endedAt)),
+    );
+    const hasRunningTimer = hasRunningTaskTimer || hasRunningComplexProjectTimer;
 
     if (!hasRunningTimer) {
       return;
@@ -6327,7 +8810,7 @@ function App() {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [taskTimersByTaskId]);
+  }, [complexProjects, taskTimersByTaskId]);
 
   useEffect(() => {
     const finishedCountdownIds = Object.entries(taskTimersByTaskId)
@@ -6471,6 +8954,10 @@ function App() {
         const cloudRecord = await getDailyPlannerUserData(currentUserId);
         const cloudPayload = normalizePayload(cloudRecord?.payload);
         const localPlanBook = normalizePlanBook(latestPlanBook.current);
+        const localComplexProjectBook = normalizeComplexProjectBook(
+          latestComplexProjectBook.current,
+        );
+        const localMoodBook = normalizeMoodBook(latestMoodBook.current);
         const nextDeletedItemIds = uniqueValues([
           ...latestDeletedItemIds.current,
           ...cloudPayload.deletedItemIds,
@@ -6479,11 +8966,16 @@ function App() {
           latestCustomCategories.current,
           cloudPayload.customCategories,
         );
+        const mergedComplexProjectBook = mergeComplexProjectBooks(
+          localComplexProjectBook,
+          normalizeComplexProjectBook(cloudPayload.complexProjects),
+        );
         const mergedPlanBook = mergePlanBooks(
           localPlanBook,
           cloudPayload.plansByDate,
           nextDeletedItemIds,
         );
+        const mergedMoodBook = mergeMoodBooks(localMoodBook, cloudPayload.moodBook);
 
         if (isCancelled) {
           return;
@@ -6491,10 +8983,18 @@ function App() {
 
         setDeletedItemIds(nextDeletedItemIds);
         setCustomCategories(nextCustomCategories);
+        setComplexProjectBook(mergedComplexProjectBook);
+        setMoodBook(mergedMoodBook);
         setPlansByDate(mergedPlanBook);
         await upsertDailyPlannerUserData({
           userId: currentUserId,
-          payload: createCloudPayload(mergedPlanBook, nextDeletedItemIds, nextCustomCategories),
+          payload: createCloudPayload(
+            mergedPlanBook,
+            nextDeletedItemIds,
+            nextCustomCategories,
+            mergedComplexProjectBook,
+            mergedMoodBook,
+          ),
         });
 
         if (!isCancelled) {
@@ -6537,7 +9037,7 @@ function App() {
         window.clearTimeout(cloudTimer.current);
       }
     };
-  }, [currentUserId, customCategories, deletedItemIds, plansByDate]);
+  }, [currentUserId, complexProjectBook, customCategories, deletedItemIds, moodBook, plansByDate]);
 
   const updatePlansForSelectedDate = (updater: (current: PlanItem[]) => PlanItem[]) => {
     setPlansByDate((currentBook) => ({
@@ -6546,9 +9046,591 @@ function App() {
     }));
   };
 
+  const addMoodEntry = () => {
+    const timestamp = createTimestampForDateAtCurrentTime(selectedDate);
+    const moodOption = getMoodOption(moodDraftId);
+    const now = Date.now();
+    const entry: MoodEntry = {
+      id: createId(),
+      createdAt: now,
+      date: selectedDate,
+      moodId: moodOption.id,
+      note: moodNoteDraft.trim(),
+      timestamp,
+      updatedAt: now,
+    };
+
+    setMoodBook((currentBook) => {
+      const entries = [...(currentBook[selectedDate] ?? []), entry].sort(
+        (left, right) => left.timestamp - right.timestamp,
+      );
+
+      return {
+        ...currentBook,
+        [selectedDate]: entries,
+      };
+    });
+    setMoodNoteDraft("");
+    setMoodStatus(`已记录 ${formatClockTime(timestamp)} 的${moodOption.label}`);
+  };
+
+  const exportMoodTimelinePng = async () => {
+    if (!moodTimelineRef.current) {
+      setMoodStatus("心情轨迹还没有准备好");
+      return;
+    }
+
+    setIsMoodExporting(true);
+
+    try {
+      if ("fonts" in document) {
+        await document.fonts.ready;
+      }
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+
+      const canvas = await html2canvas(moodTimelineRef.current, {
+        backgroundColor: "#ffffff",
+        logging: false,
+        scale: 2,
+        useCORS: true,
+      });
+      const link = document.createElement("a");
+
+      link.download = `心情轨迹-${selectedDate}.png`;
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+      setMoodStatus("心情轨迹 PNG 已生成");
+    } catch (error) {
+      setMoodStatus(error instanceof Error ? error.message : "心情轨迹导出失败");
+    } finally {
+      setIsMoodExporting(false);
+    }
+  };
+
   const resetForm = () => {
     setForm(emptyForm);
     setEditingId(null);
+  };
+
+  const resetComplexProjectForm = (dateValue = selectedDate) => {
+    setComplexProjectForm(createEmptyComplexProjectForm(dateValue));
+    setEditingComplexProjectId(null);
+    setComplexProjectFormError("");
+    setIsComplexProjectFormOpen(false);
+  };
+
+  const resetComplexProjectPhaseForm = (
+    project: Pick<ComplexProject, "startDate" | "endDate"> | null = null,
+  ) => {
+    setComplexProjectPhaseForm(createEmptyComplexProjectPhaseForm(project, selectedDate));
+    setComplexProjectPhaseEdit(null);
+    setComplexProjectPhaseFormError("");
+  };
+
+  const showComplexProjectFeedback = (
+    feedback: Omit<ComplexProjectCompletionFeedback, "id">,
+  ) => {
+    setComplexProjectFeedback({
+      ...feedback,
+      id: Date.now(),
+    });
+
+    if (complexProjectFeedbackTimer.current) {
+      window.clearTimeout(complexProjectFeedbackTimer.current);
+    }
+
+    complexProjectFeedbackTimer.current = window.setTimeout(() => {
+      setComplexProjectFeedback(null);
+      complexProjectFeedbackTimer.current = null;
+    }, feedback.projectCompleted ? 2400 : 1700);
+  };
+
+  const openNewComplexProjectForm = () => {
+    setActiveWorkspaceTab("projects");
+    resetForm();
+    resetComplexProjectPhaseForm();
+    setComplexProjectPhaseMessage("");
+    setComplexProjectForm(createEmptyComplexProjectForm(selectedDate));
+    setEditingComplexProjectId(null);
+    setComplexProjectFormError("");
+    setIsComplexProjectFormOpen(true);
+  };
+
+  const startComplexProjectEdit = (project: ComplexProject) => {
+    setActiveWorkspaceTab("projects");
+    resetForm();
+    resetComplexProjectPhaseForm();
+    setComplexProjectPhaseMessage("");
+    setComplexProjectForm(createComplexProjectFormFromProject(project));
+    setEditingComplexProjectId(project.id);
+    setComplexProjectFormError("");
+    setIsComplexProjectFormOpen(true);
+  };
+
+  const openNewComplexProjectPhaseForm = (project: ComplexProject) => {
+    setActiveWorkspaceTab("projects");
+    resetForm();
+    resetComplexProjectForm();
+    setComplexProjectPhaseMessage("");
+    setComplexProjectPhaseForm(createEmptyComplexProjectPhaseForm(project, selectedDate));
+    setComplexProjectPhaseEdit({ projectId: project.id, phaseId: null });
+    setComplexProjectPhaseFormError("");
+  };
+
+  const startComplexProjectPhaseEdit = (
+    project: ComplexProject,
+    phase: ComplexProjectPhase,
+  ) => {
+    setActiveWorkspaceTab("projects");
+    resetForm();
+    resetComplexProjectForm();
+    setComplexProjectPhaseMessage("");
+    setComplexProjectPhaseForm(createComplexProjectPhaseFormFromPhase(phase));
+    setComplexProjectPhaseEdit({ projectId: project.id, phaseId: phase.id });
+    setComplexProjectPhaseFormError("");
+  };
+
+  const handleComplexProjectSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    const title = complexProjectForm.title.trim();
+    const note = complexProjectForm.note.trim();
+    const category = complexProjectForm.category || "其他";
+    const priority = normalizePriority(complexProjectForm.priority);
+    const startDate = complexProjectForm.startDate;
+    const endDate = complexProjectForm.endDate;
+    const updatedAt = Date.now();
+
+    if (!title) {
+      setComplexProjectFormError("项目标题不能为空");
+      return;
+    }
+
+    if (!startDate || !endDate) {
+      setComplexProjectFormError("请选择项目开始日期和结束日期");
+      return;
+    }
+
+    if (startDate > endDate) {
+      setComplexProjectFormError("开始日期不能晚于结束日期");
+      return;
+    }
+
+    setComplexProjectBook((currentBook) => {
+      if (editingComplexProjectId) {
+        const currentProject = currentBook[editingComplexProjectId];
+
+        if (!currentProject) {
+          return currentBook;
+        }
+
+        return normalizeComplexProjectBook({
+          ...currentBook,
+          [editingComplexProjectId]: {
+            ...currentProject,
+            title,
+            category,
+            priority,
+            note,
+            startDate,
+            endDate,
+            updatedAt,
+          },
+        });
+      }
+
+      const nextProject: ComplexProject = {
+        id: createId(),
+        title,
+        category,
+        priority,
+        note,
+        startDate,
+        endDate,
+        status: "active",
+        phases: [],
+        createdAt: updatedAt,
+        updatedAt,
+      };
+
+      return normalizeComplexProjectBook({
+        ...currentBook,
+        [nextProject.id]: nextProject,
+      });
+    });
+    resetComplexProjectForm();
+  };
+
+  const handleComplexProjectPhaseSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!complexProjectPhaseEdit) {
+      return;
+    }
+
+    const currentProject = complexProjectBook[complexProjectPhaseEdit.projectId];
+    const title = complexProjectPhaseForm.title.trim();
+    const note = complexProjectPhaseForm.note.trim();
+    const startDate = complexProjectPhaseForm.startDate;
+    const endDate = complexProjectPhaseForm.endDate;
+    const updatedAt = Date.now();
+
+    if (!currentProject) {
+      setComplexProjectPhaseFormError("项目不存在，无法保存阶段");
+      return;
+    }
+
+    if (!title) {
+      setComplexProjectPhaseFormError("阶段标题不能为空");
+      return;
+    }
+
+    if (!startDate || !endDate) {
+      setComplexProjectPhaseFormError("请选择阶段开始日期和结束日期");
+      return;
+    }
+
+    if (startDate > endDate) {
+      setComplexProjectPhaseFormError("阶段开始日期不能晚于结束日期");
+      return;
+    }
+
+    const existingPhase = complexProjectPhaseEdit.phaseId
+      ? currentProject.phases.find((phase) => phase.id === complexProjectPhaseEdit.phaseId)
+      : null;
+
+    if (complexProjectPhaseEdit.phaseId && !existingPhase) {
+      setComplexProjectPhaseFormError("阶段不存在，无法保存");
+      return;
+    }
+
+    const completedAt = complexProjectPhaseForm.completed
+      ? existingPhase?.completedAt ?? updatedAt
+      : undefined;
+    const nextPhase: ComplexProjectPhase = {
+      id: existingPhase?.id ?? createId(),
+      title,
+      note,
+      startDate,
+      endDate,
+      completed: complexProjectPhaseForm.completed,
+      timeEntries: existingPhase?.timeEntries ?? [],
+      ...(completedAt ? { completedAt } : {}),
+      updatedAt,
+    };
+    const didExtendProject = startDate < currentProject.startDate || endDate > currentProject.endDate;
+
+    setComplexProjectBook((currentBook) => {
+      const project = currentBook[complexProjectPhaseEdit.projectId];
+
+      if (!project) {
+        return currentBook;
+      }
+
+      const phases = existingPhase
+        ? project.phases.map((phase) => (phase.id === existingPhase.id ? nextPhase : phase))
+        : [...project.phases, nextPhase];
+
+      return normalizeComplexProjectBook({
+        ...currentBook,
+        [project.id]: {
+          ...project,
+          startDate: startDate < project.startDate ? startDate : project.startDate,
+          endDate: endDate > project.endDate ? endDate : project.endDate,
+          phases,
+          updatedAt,
+        },
+      });
+    });
+    setComplexProjectPhaseMessage(
+      didExtendProject
+        ? "阶段日期超出原项目周期，已自动扩展项目日期"
+        : existingPhase
+          ? "阶段已更新，项目进度已同步"
+          : "阶段已添加，项目进度已同步",
+    );
+    resetComplexProjectPhaseForm();
+  };
+
+  const toggleComplexProjectPhaseCompleted = (projectId: string, phaseId: string) => {
+    const project = complexProjectBook[projectId];
+    const currentPhase = project?.phases.find((phase) => phase.id === phaseId);
+
+    if (!project || !currentPhase) {
+      return;
+    }
+
+    const updatedAt = Date.now();
+    const nextCompleted = !currentPhase.completed;
+    const completedPhaseCount = project.phases.filter((phase) =>
+      phase.id === phaseId ? nextCompleted : phase.completed,
+    ).length;
+    const progressPercent =
+      project.phases.length > 0
+        ? Math.round((completedPhaseCount / project.phases.length) * 100)
+        : 0;
+    const projectCompleted = nextCompleted && completedPhaseCount === project.phases.length;
+
+    setComplexProjectBook((currentBook) => {
+      const project = currentBook[projectId];
+
+      if (!project) {
+        return currentBook;
+      }
+
+      return normalizeComplexProjectBook({
+        ...currentBook,
+        [projectId]: {
+          ...project,
+          phases: project.phases.map((phase) =>
+            phase.id === phaseId
+              ? {
+                  ...phase,
+                  completed: nextCompleted,
+                  ...(nextCompleted ? { completedAt: updatedAt } : { completedAt: undefined }),
+                  updatedAt,
+                }
+              : phase,
+          ),
+          updatedAt,
+        },
+      });
+    });
+    setComplexProjectPhaseMessage(
+      nextCompleted ? "阶段已完成，项目进度已更新" : "阶段已恢复为未完成，项目进度已更新",
+    );
+
+    if (nextCompleted) {
+      showComplexProjectFeedback({
+        projectId,
+        phaseId,
+        phaseTitle: currentPhase.title,
+        progressPercent,
+        projectCompleted,
+      });
+    } else if (complexProjectFeedback?.phaseId === phaseId) {
+      setComplexProjectFeedback(null);
+    }
+  };
+
+  const openComplexProjectPhaseTimeDetails = (
+    projectId: string,
+    phaseId: string,
+    date = selectedDate,
+  ) => {
+    setPhaseTimeDetailTarget({ projectId, phaseId, date });
+  };
+
+  const exportPhaseTimeDetailsExcel = () => {
+    if (!phaseTimeDetailProject || !phaseTimeDetailPhase || !phaseTimeDetailTarget) {
+      return;
+    }
+
+    const blob = createPhaseTimeEntriesExcelBlob({
+      date: phaseTimeDetailTarget.date,
+      entries: phaseTimeDetailEntries,
+      now: timerTick,
+      phaseTitle: phaseTimeDetailPhase.title,
+      projectTitle: phaseTimeDetailProject.title,
+    });
+
+    downloadBlob(
+      blob,
+      `阶段计时明细-${sanitizeExportFileNamePart(phaseTimeDetailProject.title)}-${sanitizeExportFileNamePart(phaseTimeDetailPhase.title)}-${phaseTimeDetailTarget.date}.xls`,
+    );
+  };
+
+  const toggleComplexProjectPhaseTimer = (projectId: string, phaseId: string) => {
+    const project = complexProjectBook[projectId];
+    const phase = project?.phases.find((item) => item.id === phaseId);
+
+    if (!project || !phase) {
+      return;
+    }
+
+    const now = Date.now();
+    const activeEntry = getRunningComplexProjectPhaseEntry(phase);
+
+    setTimerTick(now);
+    setComplexProjectBook((currentBook) => {
+      const currentProject = currentBook[projectId];
+
+      if (!currentProject) {
+        return currentBook;
+      }
+
+      const shouldStopCurrentPhase = Boolean(
+        currentProject.phases
+          .find((currentPhase) => currentPhase.id === phaseId)
+          ?.timeEntries.some((entry) => !entry.endedAt),
+      );
+
+      const phases = currentProject.phases.map((currentPhase) => {
+        const stoppedEntries = currentPhase.timeEntries.map((entry) => {
+          if (entry.endedAt) {
+            return entry;
+          }
+
+          const durationSeconds = Math.max(
+            entry.durationSeconds,
+            Math.floor(Math.max(0, now - entry.startedAt) / 1000),
+          );
+
+          return {
+            ...entry,
+            endedAt: now,
+            durationSeconds,
+          };
+        });
+
+        if (currentPhase.id !== phaseId || shouldStopCurrentPhase) {
+          return {
+            ...currentPhase,
+            timeEntries: stoppedEntries,
+            updatedAt: now,
+          };
+        }
+
+        return {
+          ...currentPhase,
+          timeEntries: [
+            ...stoppedEntries,
+            {
+              id: createId(),
+              date: selectedDate,
+              startedAt: now,
+              durationSeconds: 0,
+            },
+          ],
+          updatedAt: now,
+        };
+      });
+
+      return normalizeComplexProjectBook({
+        ...currentBook,
+        [projectId]: {
+          ...currentProject,
+          phases,
+          updatedAt: now,
+        },
+      });
+    });
+
+    setComplexProjectPhaseMessage(
+      activeEntry
+        ? `已结束“${phase.title}”本次计时，已计入 ${formatDisplayDate(selectedDate)}`
+        : `已开始“${phase.title}”计时`,
+    );
+  };
+
+  const deleteComplexProjectPhase = (projectId: string, phaseId: string) => {
+    const project = complexProjectBook[projectId];
+    const phase = project?.phases.find((item) => item.id === phaseId);
+
+    if (!project || !phase) {
+      return;
+    }
+
+    if (!window.confirm(`删除阶段“${phase.title}”？`)) {
+      return;
+    }
+
+    const updatedAt = Date.now();
+
+    setComplexProjectBook((currentBook) => {
+      const currentProject = currentBook[projectId];
+
+      if (!currentProject) {
+        return currentBook;
+      }
+
+      return normalizeComplexProjectBook({
+        ...currentBook,
+        [projectId]: {
+          ...currentProject,
+          phases: currentProject.phases.filter((item) => item.id !== phaseId),
+          updatedAt,
+        },
+      });
+    });
+
+    if (
+      complexProjectPhaseEdit?.projectId === projectId &&
+      complexProjectPhaseEdit.phaseId === phaseId
+    ) {
+      resetComplexProjectPhaseForm();
+    }
+
+    setComplexProjectPhaseMessage("阶段已删除，项目进度已同步");
+  };
+
+  const toggleComplexProjectCompleted = (projectId: string) => {
+    const project = complexProjectBook[projectId];
+
+    if (!project || project.status === "archived") {
+      return;
+    }
+
+    const updatedAt = Date.now();
+    const nextStatus: ComplexProjectStatus =
+      project.status === "completed" ? "active" : "completed";
+
+    setComplexProjectBook((currentBook) => {
+      const currentProject = currentBook[projectId];
+
+      if (!currentProject || currentProject.status === "archived") {
+        return currentBook;
+      }
+
+      return normalizeComplexProjectBook({
+        ...currentBook,
+        [projectId]: {
+          ...currentProject,
+          status: nextStatus,
+          updatedAt,
+        },
+      });
+    });
+    setComplexProjectPhaseMessage(
+      nextStatus === "completed" ? "项目已标记完成" : "项目已恢复为进行中",
+    );
+  };
+
+  const archiveComplexProject = (projectId: string) => {
+    const project = complexProjectBook[projectId];
+
+    if (!project || project.status === "archived") {
+      return;
+    }
+
+    if (!window.confirm(`归档项目“${project.title}”？归档后不会显示在每日任务看板上方。`)) {
+      return;
+    }
+
+    const updatedAt = Date.now();
+
+    setComplexProjectBook((currentBook) => {
+      const currentProject = currentBook[projectId];
+
+      if (!currentProject || currentProject.status === "archived") {
+        return currentBook;
+      }
+
+      return normalizeComplexProjectBook({
+        ...currentBook,
+        [projectId]: {
+          ...currentProject,
+          status: "archived",
+          archivedAt: updatedAt,
+          updatedAt,
+        },
+      });
+    });
+    resetComplexProjectPhaseForm();
+    if (editingComplexProjectId === projectId) {
+      resetComplexProjectForm();
+    }
+    setComplexProjectPhaseMessage("项目已归档，不再显示在每日任务看板上方");
   };
 
   const clearTimerNotice = () => {
@@ -6735,11 +9817,16 @@ function App() {
         latestCustomCategories.current,
         cloudPayload.customCategories,
       );
+      const mergedComplexProjectBook = mergeComplexProjectBooks(
+        latestComplexProjectBook.current,
+        normalizeComplexProjectBook(cloudPayload.complexProjects),
+      );
       const mergedPlanBook = mergePlanBooks(
         latestPlanBook.current,
         cloudPayload.plansByDate,
         nextDeletedItemIds,
       );
+      const mergedMoodBook = mergeMoodBooks(latestMoodBook.current, cloudPayload.moodBook);
 
       if (!arePlanBooksEqual(latestPlanBook.current, mergedPlanBook)) {
         setPlansByDate(mergedPlanBook);
@@ -6750,10 +9837,27 @@ function App() {
       if (JSON.stringify(nextCustomCategories) !== JSON.stringify(latestCustomCategories.current)) {
         setCustomCategories(nextCustomCategories);
       }
+      if (
+        !areComplexProjectBooksEqual(
+          latestComplexProjectBook.current,
+          mergedComplexProjectBook,
+        )
+      ) {
+        setComplexProjectBook(mergedComplexProjectBook);
+      }
+      if (JSON.stringify(mergedMoodBook) !== JSON.stringify(latestMoodBook.current)) {
+        setMoodBook(mergedMoodBook);
+      }
 
       await upsertDailyPlannerUserData({
         userId,
-        payload: createCloudPayload(mergedPlanBook, nextDeletedItemIds, nextCustomCategories),
+        payload: createCloudPayload(
+          mergedPlanBook,
+          nextDeletedItemIds,
+          nextCustomCategories,
+          mergedComplexProjectBook,
+          mergedMoodBook,
+        ),
       });
       setCloudStatus("已保存到云端");
     } catch (error) {
@@ -6792,6 +9896,7 @@ function App() {
         setAuthMode("sign-in");
         setAuthForm((current) => ({ ...current, password: "", confirmPassword: "" }));
         setAuthStatus("新密码已设置，当前账户已登录");
+        setIsAuthPanelOpen(false);
         return;
       }
 
@@ -6822,6 +9927,7 @@ function App() {
       await signIn(email, password);
       setAuthForm({ email, password: "", confirmPassword: "" });
       setAuthStatus("登录成功，正在合并云端数据");
+      setIsAuthPanelOpen(false);
     } catch (error) {
       setAuthStatus(error instanceof Error ? error.message : "登录操作失败");
     } finally {
@@ -6934,6 +10040,11 @@ function App() {
         );
       });
       resetForm();
+      setTodayWorkspaceCollapsed((current) => ({
+        ...current,
+        [normalizePriority(form.priority)]: false,
+      }));
+      setIsTaskFormOpen(false);
       return;
     }
 
@@ -6960,6 +10071,11 @@ function App() {
       ]),
     );
     resetForm();
+    setTodayWorkspaceCollapsed((current) => ({
+      ...current,
+      [normalizePriority(form.priority)]: false,
+    }));
+    setIsTaskFormOpen(false);
   };
 
   const shouldSaveTaskInlineBlur = () => {
@@ -7109,10 +10225,17 @@ function App() {
     setActualMinutesError("");
   };
 
-  const cancelActualMinutesEdit = () => {
+  const cancelActualMinutesEdit = (skipNextBlurSave = false) => {
+    skipInlineBlurSave.current = skipNextBlurSave;
     setActualEditId(null);
     setActualMinutesDraft("");
     setActualMinutesError("");
+
+    if (skipNextBlurSave) {
+      window.setTimeout(() => {
+        skipInlineBlurSave.current = false;
+      }, 0);
+    }
   };
 
   const selectPlannerDate = (dateValue: string) => {
@@ -7216,6 +10339,76 @@ function App() {
         countdownStartedAt: nextBaseTimer.countdownIsRunning ? null : now,
       },
     }));
+  };
+
+  const toggleCountdownTimer = (item: PlanItem) => {
+    if (item.completed) {
+      return;
+    }
+
+    clearTimerNotice();
+
+    const now = Date.now();
+    setTimerTick(now);
+    setTaskTimersByTaskId((currentTimers) => {
+      const currentTimer = currentTimers[item.id];
+
+      if (!currentTimer?.countdownHasStarted) {
+        return currentTimers;
+      }
+
+      const remainingSeconds = getCountdownRemainingSeconds(currentTimer, now);
+
+      return {
+        ...currentTimers,
+        [item.id]: {
+          ...currentTimer,
+          countdownIsRunning: !currentTimer.countdownIsRunning,
+          countdownRemainingSeconds: currentTimer.countdownIsRunning
+            ? remainingSeconds
+            : remainingSeconds > 0
+              ? remainingSeconds
+              : currentTimer.countdownInitialSeconds,
+          countdownStartedAt: currentTimer.countdownIsRunning ? null : now,
+        },
+      };
+    });
+  };
+
+  const endCountdownTimer = (item: PlanItem) => {
+    if (item.completed) {
+      return;
+    }
+
+    clearTimerNotice();
+
+    const now = Date.now();
+    setTimerTick(now);
+    setTaskTimersByTaskId((currentTimers) => {
+      const currentTimer = currentTimers[item.id];
+
+      if (!currentTimer) {
+        return currentTimers;
+      }
+
+      const nextTimers = { ...currentTimers };
+
+      if (!currentTimer.forwardHasStarted && !currentTimer.isRunning) {
+        delete nextTimers[item.id];
+        return nextTimers;
+      }
+
+      nextTimers[item.id] = {
+        ...currentTimer,
+        countdownHasStarted: false,
+        countdownInitialSeconds: 0,
+        countdownIsRunning: false,
+        countdownRemainingSeconds: 0,
+        countdownStartedAt: null,
+      };
+
+      return nextTimers;
+    });
   };
 
   const handleToggle = (id: string) => {
@@ -7364,6 +10557,176 @@ function App() {
     pdf.save(`今日计划手帐-${selectedDate}.pdf`);
   };
 
+  const captureComplexProjectGantt = async (project: ComplexProject) => {
+    setIsGanttExporting(true);
+
+    try {
+      flushSync(() => {
+        setActiveWorkspaceTab("projects");
+        setGanttPreviewProjectId(project.id);
+      });
+      await new Promise<void>((resolve) =>
+        window.requestAnimationFrame(() =>
+          window.requestAnimationFrame(() => resolve()),
+        ),
+      );
+
+      const previewElement = Array.from(
+        document.querySelectorAll<HTMLElement>("[data-gantt-preview-project-id]"),
+      ).find((element) => {
+        if (element.dataset.ganttPreviewProjectId !== project.id) {
+          return false;
+        }
+
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          !element.closest('[aria-hidden="true"]')
+        );
+      });
+      const measuredWidth = previewElement
+        ? Math.max(720, Math.ceil(previewElement.getBoundingClientRect().width || previewElement.scrollWidth))
+        : Math.max(720, Math.min(1120, document.documentElement.clientWidth - 320));
+      const exportWidth = Math.max(measuredWidth, getComplexProjectGanttExportMinWidth(project));
+
+      flushSync(() => {
+        setGanttExportWidth(exportWidth);
+        setGanttExportProjectId(project.id);
+      });
+
+      let exportElement: HTMLDivElement | null = null;
+
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+        exportElement = ganttExportRef.current;
+
+        if (exportElement && exportElement.scrollWidth > 0 && exportElement.scrollHeight > 0) {
+          break;
+        }
+      }
+
+      if (!exportElement || exportElement.scrollWidth <= 0 || exportElement.scrollHeight <= 0) {
+        throw new Error("甘特图导出容器尚未准备好");
+      }
+
+      return await captureGanttElement(exportElement);
+    } finally {
+      flushSync(() => {
+        setGanttExportProjectId(null);
+      });
+      setIsGanttExporting(false);
+    }
+  };
+
+  const handleExportComplexProjectGanttPng = async (projectId: string) => {
+    const project = complexProjectBook[projectId];
+
+    if (!project) {
+      setComplexProjectPhaseMessage("项目不存在，无法导出甘特图");
+      return;
+    }
+
+    try {
+      const canvas = await captureComplexProjectGantt(project);
+      const link = document.createElement("a");
+
+      link.download = `复杂项目甘特图-${sanitizeExportFileNamePart(project.title)}.png`;
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+      setComplexProjectPhaseMessage("甘特图 PNG 已生成");
+    } catch (error) {
+      setComplexProjectPhaseMessage(
+        error instanceof Error ? error.message : "甘特图 PNG 导出失败",
+      );
+    }
+  };
+
+  const handleExportComplexProjectGanttPdf = async (projectId: string) => {
+    const project = complexProjectBook[projectId];
+
+    if (!project) {
+      setComplexProjectPhaseMessage("项目不存在，无法导出甘特图");
+      return;
+    }
+
+    try {
+      const canvas = await captureComplexProjectGantt(project);
+      const imageData = canvas.toDataURL("image/png");
+      const pdf = new jsPDF({ format: "a4", orientation: "landscape", unit: "pt" });
+      const margin = 24;
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const imageWidth = pageWidth - margin * 2;
+      const imageHeight = (canvas.height * imageWidth) / canvas.width;
+      const printableHeight = pageHeight - margin * 2;
+      let remainingHeight = imageHeight;
+      let imageTop = margin;
+
+      pdf.addImage(imageData, "PNG", margin, imageTop, imageWidth, imageHeight);
+      remainingHeight -= printableHeight;
+
+      while (remainingHeight > 0) {
+        imageTop -= printableHeight;
+        pdf.addPage();
+        pdf.addImage(imageData, "PNG", margin, imageTop, imageWidth, imageHeight);
+        remainingHeight -= printableHeight;
+      }
+
+      pdf.save(`复杂项目甘特图-${sanitizeExportFileNamePart(project.title)}.pdf`);
+      setComplexProjectPhaseMessage("甘特图 PDF 已生成");
+    } catch (error) {
+      setComplexProjectPhaseMessage(
+        error instanceof Error ? error.message : "甘特图 PDF 导出失败",
+      );
+    }
+  };
+
+  const handleExportComplexProjectGanttPptx = async (projectId: string) => {
+    const project = complexProjectBook[projectId];
+
+    if (!project) {
+      setComplexProjectPhaseMessage("项目不存在，无法导出 PPT");
+      return;
+    }
+
+    try {
+      await createComplexProjectGanttEditablePptx(project);
+      setComplexProjectPhaseMessage("甘特图 PPTX 已生成");
+    } catch (error) {
+      setComplexProjectPhaseMessage(
+        error instanceof Error ? error.message : "甘特图 PPTX 导出失败",
+      );
+    }
+  };
+
+  const handleExportComplexProjectXmind = (projectId: string) => {
+    const project = complexProjectBook[projectId];
+
+    if (!project) {
+      setComplexProjectPhaseMessage("项目不存在，无法导出 Xmind");
+      return;
+    }
+
+    try {
+      const xmindBlob = createComplexProjectXmindBlob(project);
+
+      downloadBlob(
+        xmindBlob,
+        `复杂项目思维导图-${sanitizeExportFileNamePart(project.title)}.xmind`,
+      );
+      setComplexProjectPhaseMessage("Xmind 文件已生成");
+    } catch (error) {
+      setComplexProjectPhaseMessage(
+        error instanceof Error ? error.message : "Xmind 文件导出失败",
+      );
+    }
+  };
+
   const timeDifferenceToneClass =
     dailyTimeStats.differenceSeconds === null
       ? "border-slate-100 bg-slate-50 text-slate-700"
@@ -7395,10 +10758,21 @@ function App() {
       label: "实际总用时",
       value: formatDashboardDuration(dailyTimeStats.liveActualSeconds),
       detail:
-        dailyTimeStats.temporaryTimerSeconds > 0
-          ? `含计时 ${formatTimerSeconds(dailyTimeStats.temporaryTimerSeconds)}`
-          : `已记录 ${formatDashboardMinutes(dailyTimeStats.savedActualMinutes)}`,
+        dailyTimeStats.projectActualSeconds > 0
+          ? `含项目 ${formatDashboardDuration(dailyTimeStats.projectActualSeconds)}`
+          : dailyTimeStats.temporaryTimerSeconds > 0
+            ? `含计时 ${formatTimerSeconds(dailyTimeStats.temporaryTimerSeconds)}`
+            : `已记录 ${formatDashboardMinutes(dailyTimeStats.savedActualMinutes)}`,
       className: "border-violet-100 bg-violet-50 text-violet-700",
+    },
+    {
+      label: "项目执行用时",
+      value: formatDashboardDuration(dailyTimeStats.projectActualSeconds),
+      detail:
+        dailyTimeStats.projectSessionCount > 0
+          ? `${dailyTimeStats.projectSessionCount} 段项目计时`
+          : "暂无项目计时",
+      className: "border-amber-100 bg-amber-50 text-amber-800",
     },
     {
       label: "用时差值",
@@ -7522,17 +10896,1583 @@ function App() {
       targetHeight: item.targetSeconds > 0 ? Math.max(8, (item.targetSeconds / localMaxSeconds) * 100) : 0,
     };
   });
+  const complexProjectTimeItems = complexProjects
+    .map((project) => {
+      const phases = sortComplexProjectPhases(project.phases).map((phase) => {
+        const totalSeconds = getComplexProjectPhaseTotalSeconds(phase, timerTick);
+        const todaySeconds = getComplexProjectPhaseSecondsForDate(phase, selectedDate, timerTick);
+        const todaySessionCount = phase.timeEntries.filter((entry) => entry.date === selectedDate).length;
+        const runningEntry = getRunningComplexProjectPhaseEntry(phase);
+
+        return {
+          id: phase.id,
+          isRunning: Boolean(runningEntry),
+          title: phase.title,
+          todaySeconds,
+          todaySessionCount,
+          totalSeconds,
+        };
+      });
+      const totalSeconds = phases.reduce((total, phase) => total + phase.totalSeconds, 0);
+      const todaySeconds = phases.reduce((total, phase) => total + phase.todaySeconds, 0);
+      const todaySessionCount = phases.reduce((total, phase) => total + phase.todaySessionCount, 0);
+      const maxPhaseSeconds = Math.max(...phases.map((phase) => phase.totalSeconds), 60);
+
+      return {
+        id: project.id,
+        phases: phases.map((phase) => ({
+          ...phase,
+          widthPercent:
+            phase.totalSeconds > 0
+              ? Math.max(6, Math.min(100, (phase.totalSeconds / maxPhaseSeconds) * 100))
+              : 0,
+        })),
+        title: project.title,
+        todaySeconds,
+        todaySessionCount,
+        totalSeconds,
+      };
+    })
+    .filter((item) => item.totalSeconds > 0 || item.todaySessionCount > 0);
+  const isSignedIn = Boolean(currentUser && authMode !== "update-password");
+  const accountStatusLabel = isSignedIn ? "已登录" : "本地模式";
+  const accountStatusDetail = isSignedIn
+    ? isCloudSaving
+      ? "云端保存中..."
+      : cloudStatus
+    : authStatus;
+  const toggleTodayWorkspaceSection = (sectionId: TodayWorkspaceSectionId) => {
+    setTodayWorkspaceCollapsed((current) => ({
+      ...current,
+      [sectionId]: !current[sectionId],
+    }));
+  };
+  const openTaskForm = () => {
+    setActiveWorkspaceTab("tasks");
+    resetForm();
+    cancelTaskInlineEdit();
+    cancelActualMinutesEdit();
+    setIsTaskFormOpen(true);
+  };
+  const closeTaskForm = () => {
+    resetForm();
+    setIsTaskFormOpen(false);
+  };
+  const authPanel = (
+    <section className="rounded-[1.5rem] border border-dashed border-violet-200 bg-violet-50/80 p-3">
+      <div className="mb-2 flex items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-black text-[#6f5d78]">个人中心</p>
+          <p className="mt-1 text-xs font-bold text-[#8a7a94]">
+            {isSignedIn ? "云端自动保存已开启" : "未登录也可继续本地使用"}
+          </p>
+        </div>
+        <span className="rounded-full bg-white/85 px-3 py-1 text-xs font-black text-violet-700">
+          {accountStatusLabel}
+        </span>
+      </div>
+
+      {isSignedIn ? (
+        <div className="space-y-2">
+          <div className="rounded-2xl bg-white/85 px-3 py-2">
+            <p className="break-all text-sm font-black text-[#46394f]">
+              {currentUser?.email ?? "已登录账号"}
+            </p>
+            <p className="mt-1 text-xs font-bold text-[#76687f]">{accountStatusDetail}</p>
+          </div>
+          <button
+            className="w-full rounded-2xl border border-violet-200 bg-white px-4 py-2 text-sm font-black text-violet-700 transition hover:bg-violet-100 disabled:opacity-50"
+            disabled={isAuthBusy}
+            type="button"
+            onClick={handleSignOut}
+          >
+            退出登录
+          </button>
+        </div>
+      ) : (
+        <form className="space-y-2.5" onSubmit={handleAuthSubmit}>
+          {authMode === "sign-in" || authMode === "sign-up" ? (
+            <div className="grid grid-cols-2 gap-2 rounded-2xl bg-white/70 p-1">
+              <button
+                className={`rounded-[0.9rem] px-3 py-1.5 text-sm font-black transition ${
+                  authMode === "sign-in"
+                    ? "bg-[#9f8cff] text-white shadow-sm shadow-violet-200"
+                    : "text-[#7a6b84] hover:bg-white"
+                }`}
+                type="button"
+                onClick={() => switchAuthMode("sign-in")}
+              >
+                登录
+              </button>
+              <button
+                className={`rounded-[0.9rem] px-3 py-1.5 text-sm font-black transition ${
+                  authMode === "sign-up"
+                    ? "bg-[#9f8cff] text-white shadow-sm shadow-violet-200"
+                    : "text-[#7a6b84] hover:bg-white"
+                }`}
+                type="button"
+                onClick={() => switchAuthMode("sign-up")}
+              >
+                注册
+              </button>
+            </div>
+          ) : null}
+
+          {authMode === "update-password" ? (
+            <>
+              <label className="block text-xs font-black text-[#6f5d78]" htmlFor="account-new-password">
+                新密码
+              </label>
+              <input
+                className="w-full rounded-2xl border border-violet-100 bg-white px-3 py-2 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                id="account-new-password"
+                minLength={6}
+                placeholder="至少 6 位"
+                type="password"
+                value={authForm.password}
+                onChange={(event) =>
+                  setAuthForm((current) => ({ ...current, password: event.target.value }))
+                }
+              />
+              <label
+                className="block text-xs font-black text-[#6f5d78]"
+                htmlFor="account-confirm-password"
+              >
+                确认新密码
+              </label>
+              <input
+                className="w-full rounded-2xl border border-violet-100 bg-white px-3 py-2 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                id="account-confirm-password"
+                minLength={6}
+                placeholder="再次输入新密码"
+                type="password"
+                value={authForm.confirmPassword}
+                onChange={(event) =>
+                  setAuthForm((current) => ({ ...current, confirmPassword: event.target.value }))
+                }
+              />
+            </>
+          ) : (
+            <>
+              <label className="block text-xs font-black text-[#6f5d78]" htmlFor="account-auth-email">
+                邮箱
+              </label>
+              <input
+                autoComplete="email"
+                className="w-full rounded-2xl border border-violet-100 bg-white px-3 py-2 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                id="account-auth-email"
+                placeholder="QQ、163、Gmail 等邮箱"
+                type="email"
+                value={authForm.email}
+                onChange={(event) =>
+                  setAuthForm((current) => ({ ...current, email: event.target.value }))
+                }
+              />
+
+              {authMode === "forgot" ? null : (
+                <>
+                  <label
+                    className="block text-xs font-black text-[#6f5d78]"
+                    htmlFor="account-auth-password"
+                  >
+                    密码
+                  </label>
+                  <input
+                    autoComplete={authMode === "sign-up" ? "new-password" : "current-password"}
+                    className="w-full rounded-2xl border border-violet-100 bg-white px-3 py-2 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                    id="account-auth-password"
+                    minLength={6}
+                    placeholder="本站登录密码"
+                    type="password"
+                    value={authForm.password}
+                    onChange={(event) =>
+                      setAuthForm((current) => ({ ...current, password: event.target.value }))
+                    }
+                  />
+                </>
+              )}
+            </>
+          )}
+
+          <button
+            className="w-full rounded-2xl bg-[#9f8cff] px-4 py-2 text-sm font-black text-white shadow-sm shadow-violet-200 transition hover:bg-[#8f7af2] disabled:opacity-50"
+            disabled={isAuthBusy || !isSupabaseConfigured}
+            type="submit"
+          >
+            {isAuthBusy
+              ? "处理中..."
+              : authMode === "sign-up"
+                ? "注册"
+                : authMode === "forgot"
+                  ? "发送重置邮件"
+                  : authMode === "update-password"
+                    ? "设置新密码"
+                    : "登录"}
+          </button>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-bold text-[#76687f]">
+            <span>{authStatus}</span>
+            {authMode === "sign-in" ? (
+              <button
+                className="text-violet-700 underline decoration-violet-300 underline-offset-4"
+                type="button"
+                onClick={() => switchAuthMode("forgot")}
+              >
+                忘记密码
+              </button>
+            ) : null}
+            {authMode === "forgot" ? (
+              <button
+                className="text-violet-700 underline decoration-violet-300 underline-offset-4"
+                type="button"
+                onClick={() => switchAuthMode("sign-in")}
+              >
+                返回登录
+              </button>
+            ) : null}
+          </div>
+        </form>
+      )}
+    </section>
+  );
+  const moodPanel = (
+    <section className="max-h-[calc(100vh-2.5rem)] overflow-y-auto rounded-[1.5rem] border border-white/80 bg-white p-4 shadow-2xl shadow-pink-200/40 sm:p-5">
+      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <p className="text-sm font-black text-pink-600">当日心情</p>
+          <h2 className="mt-1 text-xl font-black text-[#3f3349]">
+            {formatDisplayDateWithYear(selectedDate)}
+          </h2>
+        </div>
+        <div className="flex shrink-0 flex-wrap gap-2">
+          <button
+            id="mood-export-timeline"
+            className="rounded-full bg-pink-50 px-3 py-1.5 text-xs font-black text-pink-700 transition hover:bg-pink-100 disabled:opacity-50"
+            disabled={isMoodExporting}
+            type="button"
+            onClick={exportMoodTimelinePng}
+          >
+            {isMoodExporting ? "导出中..." : "导出轨迹图"}
+          </button>
+          <button
+            className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-black text-[#6d5d75] transition hover:bg-slate-200 focus:outline-none focus:ring-4 focus:ring-slate-100"
+            type="button"
+            onClick={() => setIsMoodPanelOpen(false)}
+          >
+            关闭
+          </button>
+        </div>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.3fr)]">
+        <section className="rounded-[1.35rem] border border-pink-100 bg-pink-50/70 p-3">
+          <p className="mb-2 text-sm font-black text-pink-700">记录此刻</p>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {MOOD_OPTIONS.map((option) => {
+              const isSelected = moodDraftId === option.id;
+
+              return (
+                <button
+                  className={`flex min-h-16 flex-col items-center justify-center gap-1 rounded-2xl border px-2 py-2 text-center text-xs font-black transition ${
+                    isSelected
+                      ? `${option.toneClass} ring-2 ring-pink-200`
+                      : "border-white bg-white/80 text-[#6f5d78] hover:bg-white"
+                  }`}
+                  key={option.id}
+                  type="button"
+                  onClick={() => setMoodDraftId(option.id)}
+                >
+                  <span className="text-xl leading-none">{option.icon}</span>
+                  <span>{option.label}</span>
+                </button>
+              );
+            })}
+          </div>
+          <label className="mt-3 block text-xs font-black text-[#6f5d78]" htmlFor="mood-note">
+            备注
+            <textarea
+              className="mt-1.5 min-h-20 w-full resize-none rounded-2xl border border-pink-100 bg-white px-3 py-2 text-sm font-bold leading-5 text-[#46394f] outline-none transition placeholder:text-[#b8aabd] focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+              id="mood-note"
+              maxLength={180}
+              placeholder="可选"
+              value={moodNoteDraft}
+              onChange={(event) => setMoodNoteDraft(event.target.value)}
+            />
+          </label>
+          <button
+            id="mood-save-entry"
+            className="mt-3 w-full rounded-2xl bg-[#ff8fbc] px-4 py-2.5 text-sm font-black text-white shadow-sm shadow-pink-100 transition hover:bg-[#ff79ad]"
+            type="button"
+            onClick={addMoodEntry}
+          >
+            记录此刻
+          </button>
+          {moodStatus ? (
+            <p className="mt-2 rounded-2xl bg-white/80 px-3 py-2 text-xs font-black text-pink-700">
+              {moodStatus}
+            </p>
+          ) : null}
+        </section>
+
+        <div className="min-w-0" ref={moodTimelineRef}>
+          <MoodTimelineCard entries={selectedMoodEntries} selectedDate={selectedDate} />
+        </div>
+      </div>
+
+      <section className="mt-4 rounded-[1.35rem] border border-slate-100 bg-[#fbf7fc] p-3">
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <p className="text-sm font-black text-[#6f5d78]">记录明细</p>
+          <span className="rounded-full bg-white px-3 py-1 text-xs font-black text-[#7b6c84]">
+            {selectedMoodEntries.length} 条
+          </span>
+        </div>
+        {selectedMoodEntries.length > 0 ? (
+          <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
+            {[...selectedMoodEntries].reverse().map((entry) => {
+              const option = getMoodOption(entry.moodId);
+
+              return (
+                <div
+                  className="flex flex-wrap items-center gap-2 rounded-2xl bg-white/85 px-3 py-2 text-xs font-black text-[#6f5d78]"
+                  key={entry.id}
+                >
+                  <span className={`rounded-full border px-2.5 py-1 ${option.toneClass}`}>
+                    {option.icon} {option.label}
+                  </span>
+                  <span>{formatClockTime(entry.timestamp)}</span>
+                  {entry.note ? <span className="min-w-0 flex-1 break-words">{entry.note}</span> : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="rounded-2xl bg-white/75 px-4 py-4 text-center text-sm font-black text-[#8b7b91]">
+            今天还没有心情记录
+          </div>
+        )}
+      </section>
+    </section>
+  );
+  const taskFormPanel = (
+    <form className="space-y-3" onSubmit={handleSubmit}>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="min-w-0 text-xs font-black text-[#6f5d78]" htmlFor="task-modal-title">
+          标题
+          <input
+            className="mt-1.5 w-full rounded-2xl border border-pink-100 bg-white px-3 py-2.5 outline-none transition placeholder:text-[#b8aabd] focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+            id="task-modal-title"
+            maxLength={48}
+            placeholder="写下今天要做的事"
+            value={form.title}
+            onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))}
+          />
+        </label>
+
+        <label className="min-w-0 text-xs font-black text-[#6f5d78]" htmlFor="task-modal-category">
+          分类
+          <select
+            className="mt-1.5 w-full rounded-2xl border border-pink-100 bg-white px-3 py-2.5 outline-none transition focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+            id="task-modal-category"
+            value={form.category}
+            onChange={(event) =>
+              setForm((current) => ({ ...current, category: event.target.value }))
+            }
+          >
+            {categoryOptions.map((category) => (
+              <option key={category.id} value={category.name}>
+                {category.icon} {category.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div className="rounded-[1.1rem] border border-dashed border-pink-100 bg-pink-50/50 p-2">
+        {isCustomCategoryOpen ? (
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <label className="sr-only" htmlFor="task-modal-custom-category">
+              自定义分类
+            </label>
+            <input
+              className="min-w-0 flex-1 rounded-2xl border border-pink-100 bg-white px-3 py-2 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+              id="task-modal-custom-category"
+              maxLength={20}
+              placeholder="例如：阅读、旅行"
+              value={customCategoryInput}
+              onChange={(event) => {
+                setCustomCategoryInput(event.target.value);
+                setCustomCategoryStatus("");
+              }}
+            />
+            <button
+              className="rounded-2xl bg-white px-3 py-2 text-sm font-black text-pink-600 shadow-sm transition hover:bg-pink-100 disabled:opacity-50"
+              disabled={!customCategoryInput.trim()}
+              type="button"
+              onClick={handleAddCustomCategory}
+            >
+              添加
+            </button>
+            <button
+              className="rounded-2xl bg-white/70 px-3 py-2 text-sm font-bold text-[#7a6b84] transition hover:bg-white"
+              type="button"
+              onClick={() => {
+                setIsCustomCategoryOpen(false);
+                setCustomCategoryInput("");
+                setCustomCategoryStatus("");
+              }}
+            >
+              取消
+            </button>
+          </div>
+        ) : (
+          <button
+            className="w-full rounded-2xl bg-white/70 px-3 py-2 text-left text-xs font-black text-pink-600 transition hover:bg-white"
+            type="button"
+            onClick={() => {
+              setIsCustomCategoryOpen(true);
+              setCustomCategoryStatus("");
+            }}
+          >
+            + 添加自定义分类
+          </button>
+        )}
+        {customCategoryStatus ? (
+          <p className="mt-2 text-xs font-bold text-[#8b7b91]">{customCategoryStatus}</p>
+        ) : null}
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="min-w-0 text-xs font-black text-[#6f5d78]" htmlFor="task-modal-priority">
+          优先级
+          <select
+            className="mt-1.5 w-full rounded-2xl border border-pink-100 bg-white px-3 py-2.5 outline-none transition focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+            id="task-modal-priority"
+            value={form.priority}
+            onChange={(event) =>
+              setForm((current) => ({
+                ...current,
+                priority: normalizePriority(event.target.value),
+              }))
+            }
+          >
+            {PRIORITY_OPTIONS.map((priorityOption) => (
+              <option key={priorityOption.id} value={priorityOption.id}>
+                {priorityOption.icon} {priorityOption.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label
+          className="min-w-0 text-xs font-black text-[#6f5d78]"
+          htmlFor="task-modal-target-minutes"
+        >
+          目标时长（分钟）
+          <input
+            className="mt-1.5 w-full rounded-2xl border border-pink-100 bg-white px-3 py-2.5 outline-none transition placeholder:text-[#b8aabd] focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+            id="task-modal-target-minutes"
+            inputMode="numeric"
+            min={1}
+            placeholder="可选，填写正整数"
+            step={1}
+            type="number"
+            value={form.targetMinutes}
+            onChange={(event) =>
+              setForm((current) => ({ ...current, targetMinutes: event.target.value }))
+            }
+          />
+        </label>
+      </div>
+
+      <label className="block text-xs font-black text-[#6f5d78]" htmlFor="task-modal-note">
+        备注
+        <textarea
+          className="mt-1.5 min-h-24 w-full resize-none rounded-2xl border border-pink-100 bg-white px-3 py-2.5 outline-none transition placeholder:text-[#b8aabd] focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+          id="task-modal-note"
+          maxLength={160}
+          placeholder="可选"
+          value={form.note}
+          onChange={(event) => setForm((current) => ({ ...current, note: event.target.value }))}
+        />
+      </label>
+
+      <div className="flex flex-wrap justify-end gap-3">
+        <button
+          className="rounded-2xl border border-[#ded2e8] bg-white px-5 py-2.5 text-sm font-bold text-[#6f5d78] transition hover:bg-[#f8f2ff]"
+          type="button"
+          onClick={closeTaskForm}
+        >
+          取消
+        </button>
+        <button
+          className="rounded-2xl bg-[#ff8fbc] px-5 py-2.5 text-sm font-black text-white shadow-lg shadow-pink-200 transition hover:-translate-y-0.5 hover:bg-[#ff79ad] disabled:opacity-50"
+          disabled={!form.title.trim()}
+          type="submit"
+        >
+          {editingId ? "保存修改" : "添加计划"}
+        </button>
+      </div>
+    </form>
+  );
+  const complexProjectWorkspace = (
+    <section className="p-4 sm:p-6">
+      <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <p className="text-sm font-black text-amber-700">复杂项目工作区</p>
+          <h2 className="mt-1 text-2xl font-black text-[#3f3349]">阶段计划与甘特图</h2>
+          <p className="mt-1 text-sm font-bold text-[#8b7b91]">
+            {complexProjects.length > 0
+              ? `当前 ${complexProjects.length} 个项目，相关甘特图在宽屏区域预览`
+              : "创建复杂项目后，可以在这里管理阶段和导出甘特图"}
+          </p>
+        </div>
+        <button
+          className="rounded-2xl bg-amber-500 px-4 py-2.5 text-sm font-black text-white shadow-sm shadow-amber-100 transition hover:bg-amber-600 focus:outline-none focus:ring-4 focus:ring-amber-100"
+          type="button"
+          onClick={openNewComplexProjectForm}
+        >
+          + 新建复杂项目
+        </button>
+      </div>
+
+      {isComplexProjectFormOpen ? (
+        <form
+          className="mb-5 space-y-2.5 rounded-[1.5rem] border border-amber-100 bg-amber-50/70 p-4"
+          onSubmit={handleComplexProjectSubmit}
+        >
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,0.8fr)_minmax(0,0.8fr)]">
+            <label
+              className="min-w-0 text-xs font-black text-[#6f5d78]"
+              htmlFor="workspace-complex-project-title"
+            >
+              项目标题
+              <input
+                className="mt-1.5 w-full rounded-2xl border border-amber-100 bg-white px-3 py-2.5 text-sm font-bold text-[#46394f] outline-none transition placeholder:text-[#b8aabd] focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                id="workspace-complex-project-title"
+                maxLength={64}
+                placeholder="例如：论文开题准备"
+                value={complexProjectForm.title}
+                onChange={(event) => {
+                  setComplexProjectForm((current) => ({
+                    ...current,
+                    title: event.target.value,
+                  }));
+                  setComplexProjectFormError("");
+                }}
+              />
+            </label>
+
+            <label
+              className="min-w-0 text-xs font-black text-[#6f5d78]"
+              htmlFor="workspace-complex-project-category"
+            >
+              分类
+              <select
+                className="mt-1.5 w-full rounded-2xl border border-amber-100 bg-white px-3 py-2.5 text-sm font-bold text-[#46394f] outline-none transition focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                id="workspace-complex-project-category"
+                value={complexProjectForm.category}
+                onChange={(event) =>
+                  setComplexProjectForm((current) => ({
+                    ...current,
+                    category: event.target.value,
+                  }))
+                }
+              >
+                {complexProjectCategoryOptions.map((category) => (
+                  <option key={category.id} value={category.name}>
+                    {category.icon} {category.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label
+              className="min-w-0 text-xs font-black text-[#6f5d78]"
+              htmlFor="workspace-complex-project-priority"
+            >
+              优先级
+              <select
+                className="mt-1.5 w-full rounded-2xl border border-amber-100 bg-white px-3 py-2.5 text-sm font-bold text-[#46394f] outline-none transition focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                id="workspace-complex-project-priority"
+                value={complexProjectForm.priority}
+                onChange={(event) =>
+                  setComplexProjectForm((current) => ({
+                    ...current,
+                    priority: normalizePriority(event.target.value),
+                  }))
+                }
+              >
+                {PRIORITY_OPTIONS.map((priorityOption) => (
+                  <option key={priorityOption.id} value={priorityOption.id}>
+                    {priorityOption.icon} {priorityOption.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label
+              className="min-w-0 text-xs font-black text-[#6f5d78]"
+              htmlFor="workspace-complex-project-start-date"
+            >
+              开始日期
+              <input
+                className="mt-1.5 w-full rounded-2xl border border-amber-100 bg-white px-3 py-2.5 text-sm font-bold text-[#46394f] outline-none transition focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                id="workspace-complex-project-start-date"
+                required
+                type="date"
+                value={complexProjectForm.startDate}
+                onChange={(event) => {
+                  setComplexProjectForm((current) => ({
+                    ...current,
+                    startDate: event.target.value,
+                  }));
+                  setComplexProjectFormError("");
+                }}
+              />
+            </label>
+
+            <label
+              className="min-w-0 text-xs font-black text-[#6f5d78]"
+              htmlFor="workspace-complex-project-end-date"
+            >
+              结束日期
+              <input
+                className="mt-1.5 w-full rounded-2xl border border-amber-100 bg-white px-3 py-2.5 text-sm font-bold text-[#46394f] outline-none transition focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                id="workspace-complex-project-end-date"
+                required
+                type="date"
+                value={complexProjectForm.endDate}
+                onChange={(event) => {
+                  setComplexProjectForm((current) => ({
+                    ...current,
+                    endDate: event.target.value,
+                  }));
+                  setComplexProjectFormError("");
+                }}
+              />
+            </label>
+          </div>
+
+          <label
+            className="block text-xs font-black text-[#6f5d78]"
+            htmlFor="workspace-complex-project-note"
+          >
+            备注
+            <textarea
+              className="mt-1.5 h-11 w-full resize-none rounded-2xl border border-amber-100 bg-white px-3 py-2 text-sm font-bold leading-5 text-[#46394f] outline-none transition placeholder:text-[#b8aabd] focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+              id="workspace-complex-project-note"
+              maxLength={240}
+              placeholder="可选"
+              value={complexProjectForm.note}
+              onChange={(event) =>
+                setComplexProjectForm((current) => ({
+                  ...current,
+                  note: event.target.value,
+                }))
+              }
+            />
+          </label>
+
+          {complexProjectFormError ? (
+            <p className="rounded-2xl bg-rose-50 px-3 py-2 text-xs font-black text-rose-600">
+              {complexProjectFormError}
+            </p>
+          ) : null}
+
+          <div className="flex flex-wrap justify-end gap-2">
+            <button
+              className="rounded-2xl bg-white px-4 py-2 text-sm font-bold text-[#6f5d78] transition hover:bg-amber-50"
+              type="button"
+              onClick={() => resetComplexProjectForm()}
+            >
+              取消
+            </button>
+            <button
+              className="rounded-2xl bg-amber-500 px-4 py-2 text-sm font-black text-white shadow-sm shadow-amber-100 transition hover:bg-amber-600 disabled:opacity-50"
+              disabled={!complexProjectForm.title.trim()}
+              type="submit"
+            >
+              {editingComplexProjectId ? "保存项目" : "创建项目"}
+            </button>
+          </div>
+        </form>
+      ) : null}
+
+      {complexProjectPhaseMessage ? (
+        <p className="mb-4 rounded-2xl bg-emerald-50 px-4 py-2 text-sm font-black text-emerald-700">
+          {complexProjectPhaseMessage}
+        </p>
+      ) : null}
+
+      {complexProjects.length > 0 ? (
+        <div className="space-y-4">
+          {complexProjects.map((project) => {
+            const style = getCategoryStyle(project.category, customCategories);
+            const priorityOption = getPriorityOption(project.priority);
+            const projectProgress = getComplexProjectProgress(project);
+            const sortedPhases = sortComplexProjectPhases(project.phases);
+            const projectTotalSeconds = getComplexProjectTotalSeconds(project, timerTick);
+            const projectTodaySeconds = getComplexProjectSecondsForDate(project, selectedDate, timerTick);
+            const projectTodaySessionCount = getComplexProjectSessionCountForDate(project, selectedDate);
+            const isPhaseFormVisible = complexProjectPhaseEdit?.projectId === project.id;
+            const projectFeedback =
+              complexProjectFeedback?.projectId === project.id ? complexProjectFeedback : null;
+            const isGanttPreviewVisible = ganttPreviewProjectId === project.id;
+
+            return (
+              <article
+                className={`rounded-[1.5rem] border bg-white/86 p-4 shadow-sm transition ${
+                  projectFeedback?.projectCompleted
+                    ? "border-emerald-200 ring-2 ring-emerald-100"
+                    : "border-amber-100"
+                }`}
+                key={project.id}
+              >
+                <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
+                  <div className="min-w-0">
+                    <div className="mb-2 flex flex-wrap gap-1.5 text-xs font-black">
+                      <span className={`rounded-full px-2.5 py-1 ${style.bg} ${style.accent}`}>
+                        {style.emoji} {project.category}
+                      </span>
+                      <span className="rounded-full bg-violet-50 px-2.5 py-1 text-violet-700">
+                        {priorityOption.icon} {priorityOption.name}
+                      </span>
+                      <span
+                        className={`rounded-full px-2.5 py-1 ${
+                          project.status === "active"
+                            ? "bg-emerald-50 text-emerald-700"
+                            : project.status === "completed"
+                              ? "bg-sky-50 text-sky-700"
+                              : "bg-slate-100 text-slate-600"
+                        }`}
+                      >
+                        {getComplexProjectStatusLabel(project.status)}
+                      </span>
+                    </div>
+                    <h3 className="break-words text-xl font-black text-[#3f3349]">
+                      {project.title}
+                    </h3>
+                    <p className="mt-1 text-sm font-bold text-[#8b7b91]">
+                      {formatDisplayDate(project.startDate)} - {formatDisplayDate(project.endDate)}
+                    </p>
+                  </div>
+
+                  <div className="rounded-[1.15rem] bg-amber-50/70 p-3">
+                    <div className="flex items-center justify-between gap-2 text-xs font-black text-[#7b6c84]">
+                      <span>
+                        阶段进度 {projectProgress.completed} / {projectProgress.total}
+                      </span>
+                      <span>{projectProgress.percent}%</span>
+                    </div>
+	                    <div className="relative mt-2 h-2.5 overflow-hidden rounded-full bg-white">
+	                      <motion.div
+                        animate={{ width: `${projectProgress.percent}%` }}
+                        className="h-full rounded-full bg-[linear-gradient(90deg,#f59e0b,#34d399)]"
+                        initial={false}
+                        transition={{ duration: 0.42, ease: "easeOut" }}
+                      />
+                      <AnimatePresence>
+                        {projectFeedback ? (
+                          <motion.div
+                            aria-hidden="true"
+                            animate={{ opacity: 0, x: "100%" }}
+                            className="absolute inset-0 rounded-full bg-white/75"
+                            exit={{ opacity: 0 }}
+                            initial={{ opacity: 0.8, x: "-100%" }}
+                            key={projectFeedback.id}
+                            transition={{ duration: 0.72, ease: "easeOut" }}
+                          />
+	                        ) : null}
+	                      </AnimatePresence>
+	                    </div>
+                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                      <div className="rounded-[0.9rem] bg-white/75 px-3 py-2">
+                        <p className="text-[10px] font-black text-[#8b7b91]">项目总用时</p>
+                        <p className="mt-0.5 text-sm font-black text-[#46394f]">
+                          {formatDashboardDuration(projectTotalSeconds)}
+                        </p>
+                      </div>
+                      <div className="rounded-[0.9rem] bg-white/75 px-3 py-2">
+                        <p className="text-[10px] font-black text-[#8b7b91]">今日项目用时</p>
+                        <p className="mt-0.5 text-sm font-black text-[#46394f]">
+                          {formatDashboardDuration(projectTodaySeconds)}
+                          <span className="ml-1.5 text-xs text-[#8b7b91]">
+                            {projectTodaySessionCount} 段
+                          </span>
+                        </p>
+                      </div>
+                    </div>
+	                    <AnimatePresence>
+                      {projectFeedback ? (
+                        <motion.p
+                          animate={{ opacity: 1, y: 0 }}
+                          className="mt-2 rounded-full bg-white/80 px-2 py-1 text-xs font-black text-emerald-700"
+                          exit={{ opacity: 0, y: -4 }}
+                          initial={{ opacity: 0, y: 4 }}
+                          key={projectFeedback.id}
+                          transition={{ duration: 0.22, ease: "easeOut" }}
+                        >
+                          {projectFeedback.projectCompleted
+                            ? "项目阶段全部完成"
+                            : `阶段完成：${projectFeedback.phaseTitle}`}
+                        </motion.p>
+                      ) : null}
+                    </AnimatePresence>
+                    {projectProgress.total === 0 ? (
+                      <p className="mt-2 text-xs font-bold text-[#8b7b91]">先添加阶段</p>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    className="rounded-full bg-amber-50 px-3 py-1.5 text-xs font-black text-amber-700 transition hover:bg-amber-100 focus:outline-none focus:ring-4 focus:ring-amber-100"
+                    type="button"
+                    onClick={() => openNewComplexProjectPhaseForm(project)}
+                  >
+                    + 阶段
+                  </button>
+                  <button
+                    className="rounded-full bg-white px-3 py-1.5 text-xs font-black text-[#6f5d78] transition hover:bg-amber-50 focus:outline-none focus:ring-4 focus:ring-amber-100"
+                    type="button"
+                    onClick={() => startComplexProjectEdit(project)}
+                  >
+                    编辑项目
+                  </button>
+                  {project.status !== "archived" ? (
+                    <>
+                      <button
+                        className="rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-black text-emerald-700 transition hover:bg-emerald-100"
+                        type="button"
+                        onClick={() => toggleComplexProjectCompleted(project.id)}
+                      >
+                        {project.status === "completed" ? "恢复进行中" : "标记完成"}
+                      </button>
+                      <button
+                        className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-bold text-slate-600 transition hover:bg-slate-200"
+                        type="button"
+                        onClick={() => archiveComplexProject(project.id)}
+                      >
+                        归档
+                      </button>
+                    </>
+                  ) : null}
+                  <button
+                    className="rounded-full bg-amber-100 px-3 py-1.5 text-xs font-black text-amber-800 transition hover:bg-amber-200"
+                    type="button"
+                    onClick={() =>
+                      setGanttPreviewProjectId((current) =>
+                        current === project.id ? null : project.id,
+                      )
+                    }
+                  >
+                    {isGanttPreviewVisible ? "收起甘特图" : "宽屏甘特图"}
+                  </button>
+                  <button
+                    className="rounded-full bg-white px-3 py-1.5 text-xs font-black text-sky-700 transition hover:bg-sky-50 disabled:opacity-50"
+                    disabled={isGanttExporting}
+                    type="button"
+                    onClick={() => handleExportComplexProjectGanttPng(project.id)}
+                  >
+                    导出 PNG
+                  </button>
+                  <button
+                    className="rounded-full bg-white px-3 py-1.5 text-xs font-black text-violet-700 transition hover:bg-violet-50 disabled:opacity-50"
+                    disabled={isGanttExporting}
+                    type="button"
+                    onClick={() => handleExportComplexProjectGanttPdf(project.id)}
+                  >
+                    导出 PDF
+                  </button>
+                  <button
+                    className="rounded-full bg-white px-3 py-1.5 text-xs font-black text-orange-700 transition hover:bg-orange-50 disabled:opacity-50"
+                    disabled={isGanttExporting}
+                    type="button"
+                    onClick={() => handleExportComplexProjectGanttPptx(project.id)}
+                  >
+                    导出 PPT/PPTX
+                  </button>
+                  <button
+                    className="rounded-full bg-white px-3 py-1.5 text-xs font-black text-emerald-700 transition hover:bg-emerald-50"
+                    type="button"
+                    onClick={() => handleExportComplexProjectXmind(project.id)}
+                  >
+                    导出 Xmind
+                  </button>
+                </div>
+
+                <AnimatePresence>
+                  {isGanttPreviewVisible ? (
+                    <motion.div
+                      animate={{ opacity: 1, y: 0 }}
+                      className="mt-4 rounded-[1.35rem] border border-amber-100 bg-[#fffaf4] p-3"
+                      data-gantt-preview-project-id={project.id}
+                      exit={{ opacity: 0, y: -6 }}
+                      initial={{ opacity: 0, y: 6 }}
+                      transition={{ duration: 0.2, ease: "easeOut" }}
+                    >
+                      <ComplexProjectGanttChart project={project} />
+                    </motion.div>
+                  ) : null}
+                </AnimatePresence>
+
+                {isPhaseFormVisible ? (
+                  <form
+                    className="mt-4 space-y-3 rounded-[1.25rem] border border-amber-100 bg-amber-50/70 p-3"
+                    onSubmit={handleComplexProjectPhaseSubmit}
+                  >
+                    <div className="grid gap-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)_minmax(0,0.8fr)]">
+                      <label
+                        className="min-w-0 text-xs font-black text-[#6f5d78]"
+                        htmlFor={`workspace-complex-project-phase-title-${project.id}`}
+                      >
+                        阶段标题
+                        <input
+                          className="mt-1.5 w-full rounded-2xl border border-amber-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition placeholder:text-[#b8aabd] focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                          id={`workspace-complex-project-phase-title-${project.id}`}
+                          maxLength={64}
+                          placeholder="例如：资料收集"
+                          value={complexProjectPhaseForm.title}
+                          onChange={(event) => {
+                            setComplexProjectPhaseForm((current) => ({
+                              ...current,
+                              title: event.target.value,
+                            }));
+                            setComplexProjectPhaseFormError("");
+                          }}
+                        />
+                      </label>
+
+                      <label
+                        className="min-w-0 text-xs font-black text-[#6f5d78]"
+                        htmlFor={`workspace-complex-project-phase-start-${project.id}`}
+                      >
+                        开始日期
+                        <input
+                          className="mt-1.5 w-full rounded-2xl border border-amber-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                          id={`workspace-complex-project-phase-start-${project.id}`}
+                          required
+                          type="date"
+                          value={complexProjectPhaseForm.startDate}
+                          onChange={(event) => {
+                            setComplexProjectPhaseForm((current) => ({
+                              ...current,
+                              startDate: event.target.value,
+                            }));
+                            setComplexProjectPhaseFormError("");
+                          }}
+                        />
+                      </label>
+
+                      <label
+                        className="min-w-0 text-xs font-black text-[#6f5d78]"
+                        htmlFor={`workspace-complex-project-phase-end-${project.id}`}
+                      >
+                        结束日期
+                        <input
+                          className="mt-1.5 w-full rounded-2xl border border-amber-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                          id={`workspace-complex-project-phase-end-${project.id}`}
+                          required
+                          type="date"
+                          value={complexProjectPhaseForm.endDate}
+                          onChange={(event) => {
+                            setComplexProjectPhaseForm((current) => ({
+                              ...current,
+                              endDate: event.target.value,
+                            }));
+                            setComplexProjectPhaseFormError("");
+                          }}
+                        />
+                      </label>
+                    </div>
+
+                    <p className="text-xs font-bold text-[#8b7b91]">
+                      阶段日期超出项目周期时，保存后会自动扩展项目日期。
+                    </p>
+
+                    <label
+                      className="block text-xs font-black text-[#6f5d78]"
+                      htmlFor={`workspace-complex-project-phase-note-${project.id}`}
+                    >
+                      阶段备注
+                      <textarea
+                        className="mt-1.5 min-h-16 w-full resize-none rounded-2xl border border-amber-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition placeholder:text-[#b8aabd] focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                        id={`workspace-complex-project-phase-note-${project.id}`}
+                        maxLength={240}
+                        placeholder="可选"
+                        value={complexProjectPhaseForm.note}
+                        onChange={(event) =>
+                          setComplexProjectPhaseForm((current) => ({
+                            ...current,
+                            note: event.target.value,
+                          }))
+                        }
+                      />
+                    </label>
+
+                    <label
+                      className="inline-flex items-center gap-2 rounded-2xl bg-white/75 px-3 py-2 text-xs font-black text-[#6f5d78]"
+                      htmlFor={`workspace-complex-project-phase-completed-${project.id}`}
+                    >
+                      <input
+                        checked={complexProjectPhaseForm.completed}
+                        className="h-4 w-4 accent-amber-500"
+                        id={`workspace-complex-project-phase-completed-${project.id}`}
+                        type="checkbox"
+                        onChange={(event) =>
+                          setComplexProjectPhaseForm((current) => ({
+                            ...current,
+                            completed: event.target.checked,
+                          }))
+                        }
+                      />
+                      已完成
+                    </label>
+
+                    {complexProjectPhaseFormError ? (
+                      <p className="rounded-2xl bg-rose-50 px-3 py-2 text-xs font-black text-rose-600">
+                        {complexProjectPhaseFormError}
+                      </p>
+                    ) : null}
+
+                    <div className="flex flex-wrap justify-end gap-2">
+                      <button
+                        className="rounded-2xl bg-white px-4 py-2 text-xs font-bold text-[#6f5d78] transition hover:bg-amber-50"
+                        type="button"
+                        onClick={() => resetComplexProjectPhaseForm(project)}
+                      >
+                        取消
+                      </button>
+                      <button
+                        className="rounded-2xl bg-amber-500 px-4 py-2 text-xs font-black text-white transition hover:bg-amber-600 disabled:opacity-50"
+                        disabled={!complexProjectPhaseForm.title.trim()}
+                        type="submit"
+                      >
+                        {complexProjectPhaseEdit?.phaseId ? "保存阶段" : "添加阶段"}
+                      </button>
+                    </div>
+                  </form>
+                ) : null}
+
+                <div className="mt-4 grid gap-3 xl:grid-cols-2">
+	                  {sortedPhases.length > 0 ? (
+	                    sortedPhases.map((phase) => {
+	                      const isPhaseFeedbackActive = projectFeedback?.phaseId === phase.id;
+                      const phaseActiveEntry = getRunningComplexProjectPhaseEntry(phase);
+                      const phaseTotalSeconds = getComplexProjectPhaseTotalSeconds(phase, timerTick);
+                      const phaseTodaySeconds = getComplexProjectPhaseSecondsForDate(
+                        phase,
+                        selectedDate,
+                        timerTick,
+                      );
+                      const phaseTodaySessionCount = phase.timeEntries.filter(
+                        (entry) => entry.date === selectedDate,
+                      ).length;
+
+	                      return (
+                        <motion.div
+                          animate={
+                            isPhaseFeedbackActive ? { scale: [1, 1.012, 1] } : { scale: 1 }
+                          }
+                          className={`rounded-[1.15rem] border px-3 py-2.5 transition ${
+                            phase.completed
+                              ? "border-emerald-100 bg-emerald-50/70"
+                              : "border-amber-100 bg-white/85"
+                          } ${
+                            isPhaseFeedbackActive
+                              ? "shadow-sm shadow-emerald-100 ring-2 ring-emerald-200"
+                              : ""
+                          }`}
+                          initial={false}
+                          key={phase.id}
+                          transition={{ duration: 0.45, ease: "easeOut" }}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <p
+                                className={`break-words text-sm font-black ${
+                                  phase.completed
+                                    ? "text-emerald-800 line-through decoration-2"
+                                    : "text-[#46394f]"
+                                }`}
+                              >
+                                {phase.title}
+                              </p>
+                              <p className="mt-1 text-xs font-bold text-[#8b7b91]">
+                                {formatDisplayDate(phase.startDate)} -{" "}
+                                {formatDisplayDate(phase.endDate)}
+                              </p>
+                            </div>
+                            <span
+                              className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-black ${
+                                phase.completed
+                                  ? "bg-emerald-100 text-emerald-700"
+                                  : "bg-amber-100 text-amber-800"
+                              }`}
+                            >
+                              {phase.completed ? "已完成" : "未完成"}
+                            </span>
+                          </div>
+                          <AnimatePresence>
+                            {isPhaseFeedbackActive ? (
+                              <motion.p
+                                animate={{ opacity: 1, y: 0 }}
+                                className="mt-1 inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-black text-emerald-700"
+                                exit={{ opacity: 0, y: -4 }}
+                                initial={{ opacity: 0, y: 4 }}
+                                key={projectFeedback?.id ?? phase.id}
+                                transition={{ duration: 0.2, ease: "easeOut" }}
+                              >
+                                已推进到 {projectFeedback?.progressPercent ?? projectProgress.percent}%
+                              </motion.p>
+                            ) : null}
+                          </AnimatePresence>
+	                          {phase.note ? (
+	                            <p className="mt-1 whitespace-pre-wrap break-words text-xs font-bold leading-5 text-[#74667d]">
+	                              {phase.note}
+	                            </p>
+	                          ) : null}
+                          <div className="mt-2 grid gap-2 rounded-[0.9rem] bg-white/70 p-2 sm:grid-cols-2">
+                            <div>
+                              <p className="text-[10px] font-black text-[#8b7b91]">阶段总用时</p>
+                              <p className="mt-0.5 text-sm font-black text-[#46394f]">
+                                {formatDashboardDuration(phaseTotalSeconds)}
+                              </p>
+                            </div>
+	                            <div>
+	                              <p className="text-[10px] font-black text-[#8b7b91]">今日用时</p>
+                              <button
+                                className="mt-0.5 rounded-full px-0 text-left text-sm font-black text-[#46394f] transition hover:text-amber-700 disabled:cursor-default disabled:hover:text-[#46394f]"
+                                disabled={phaseTodaySessionCount === 0}
+                                type="button"
+                                onClick={() =>
+                                  openComplexProjectPhaseTimeDetails(project.id, phase.id, selectedDate)
+                                }
+                              >
+	                                {formatDashboardDuration(phaseTodaySeconds)}
+	                                <span className="ml-1.5 text-xs text-[#8b7b91]">
+	                                  {phaseTodaySessionCount} 段
+	                                </span>
+                              </button>
+	                              {phaseActiveEntry ? (
+                                <p className="mt-0.5 text-[10px] font-bold text-emerald-700">
+                                  {formatClockTime(phaseActiveEntry.startedAt)} 开始计时
+                                </p>
+                              ) : null}
+                            </div>
+                          </div>
+	                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            <button
+                              className={`rounded-full px-2.5 py-1 text-xs font-black text-white transition ${
+                                phaseActiveEntry
+                                  ? "bg-rose-500 hover:bg-rose-600"
+                                  : "bg-emerald-500 hover:bg-emerald-600"
+                              }`}
+                              type="button"
+                              onClick={() => toggleComplexProjectPhaseTimer(project.id, phase.id)}
+                            >
+                              {phaseActiveEntry ? "结束计时" : "开始计时"}
+                            </button>
+	                            <button
+                              className={`rounded-full px-2.5 py-1 text-xs font-black transition ${
+                                phase.completed
+                                  ? "bg-white text-emerald-700 hover:bg-emerald-100"
+                                  : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                              }`}
+                              type="button"
+                              onClick={() => toggleComplexProjectPhaseCompleted(project.id, phase.id)}
+                            >
+                              {phase.completed ? "取消完成" : "完成"}
+                            </button>
+                            <button
+                              className="rounded-full bg-white px-2.5 py-1 text-xs font-bold text-[#6f5d78] transition hover:bg-amber-50"
+                              type="button"
+                              onClick={() => startComplexProjectPhaseEdit(project, phase)}
+                            >
+                              编辑
+                            </button>
+                            <button
+                              className="rounded-full bg-white px-2.5 py-1 text-xs font-bold text-rose-600 transition hover:bg-rose-50"
+                              type="button"
+                              onClick={() => deleteComplexProjectPhase(project.id, phase.id)}
+                            >
+                              删除
+                            </button>
+                          </div>
+                        </motion.div>
+                      );
+                    })
+                  ) : (
+                    <div className="rounded-[1.15rem] border border-dashed border-amber-200 bg-amber-50/45 px-4 py-4 text-center text-sm font-black text-[#8b7b91]">
+                      暂无阶段，点击“+ 阶段”开始拆解项目
+                    </div>
+                  )}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="rounded-[1.35rem] border border-dashed border-amber-200 bg-amber-50/45 px-4 py-8 text-center">
+          <p className="text-base font-black text-[#6f5d78]">暂无复杂项目</p>
+          <p className="mt-1 text-sm font-bold text-[#8b7b91]">复杂项目会在这里获得完整工作区。</p>
+        </div>
+      )}
+    </section>
+  );
+  const timeStatsWorkspace = (
+    <section className="p-4 sm:p-6">
+      <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p className="text-sm font-black text-violet-700">用时统计</p>
+          <h2 className="mt-1 text-2xl font-black text-[#3f3349]">每日用时看板</h2>
+          <p className="mt-1 text-sm font-bold text-[#8b7b91]">
+            {plans.length > 0 ? `当前 ${plans.length} 项任务` : "暂无用时数据"}
+          </p>
+        </div>
+        <span className="w-fit rounded-full bg-violet-50 px-3 py-1 text-xs font-black text-violet-700">
+          {dailyTimeStats.activeTimerCount > 0
+            ? `${dailyTimeStats.activeTimerCount} 项计时中`
+            : "实时更新"}
+        </span>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {dailyTimeStatCards.map((card) => (
+          <div className={`rounded-[1.15rem] border px-4 py-3 ${card.className}`} key={card.label}>
+            <p className="text-xs font-black opacity-75">{card.label}</p>
+            <p className="mt-1 break-words text-2xl font-black leading-tight">{card.value}</p>
+            <p className="mt-1 text-xs font-bold opacity-75">{card.detail}</p>
+          </div>
+        ))}
+        <div className="flex items-center justify-between gap-3 rounded-[1.15rem] border border-violet-100 bg-violet-50 px-4 py-3 text-violet-700">
+          <div>
+            <p className="text-xs font-black opacity-75">实际 / 计划</p>
+            <p className="mt-2 text-sm font-bold leading-tight opacity-75">按目标完成比例</p>
+          </div>
+          <div
+            className="relative flex h-24 w-24 shrink-0 items-center justify-center rounded-full"
+            style={{
+              background: `conic-gradient(#8b5cf6 ${dailyTimeStats.actualProgress * 3.6}deg, #eaf2ff 0deg)`,
+            }}
+          >
+            <div className="absolute inset-3 flex flex-col items-center justify-center rounded-full bg-white text-center shadow-sm">
+              <span className="text-xl font-black text-[#4b3a59]">
+                {dailyTimeStats.targetTotalMinutes > 0 ? `${dailyTimeStats.actualPercent}%` : "暂无"}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-4 xl:grid-cols-2">
+        <div className="rounded-[1.35rem] border border-white/80 bg-white/70 p-4">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <p className="text-base font-black text-[#5a4b63]">按分类统计</p>
+            <span className="text-xs font-black text-[#8b7b91]">
+              {categoryVisualizationItems.length > 0
+                ? `${categoryVisualizationItems.length} 组`
+                : "暂无用时数据"}
+            </span>
+          </div>
+          {categoryVisualizationItems.length > 0 ? (
+            <div className="grid gap-3 sm:grid-cols-2">
+              {categoryVisualizationItems.map((item) => (
+                <div
+                  className="rounded-[1rem] border p-3"
+                  key={item.label}
+                  style={{
+                    background: `linear-gradient(180deg, ${item.color}16 0%, #ffffff 100%)`,
+                    borderColor: `${item.color}55`,
+                  }}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="inline-flex min-w-0 items-center gap-1.5 text-sm font-black text-[#5a4b63]">
+                      <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: item.color }} />
+                      <span className="truncate">{item.label}</span>
+                    </span>
+                    <span className="shrink-0 rounded-full bg-white/80 px-2 py-0.5 text-xs font-black text-[#8b7b91]">
+                      {item.count} 项
+                    </span>
+                  </div>
+                  <div className="mt-3 flex h-28 items-end justify-center gap-5 rounded-[0.9rem] bg-white/70 px-2 py-2">
+                    {[
+                      { label: "计划", value: item.targetSeconds, height: item.targetHeight, color: "#38bdf8" },
+                      { label: "实际", value: item.actualSeconds, height: item.actualHeight, color: item.color },
+                    ].map((bar) => (
+                      <div className="flex min-w-0 flex-col items-center gap-1" key={bar.label}>
+                        <span className="whitespace-nowrap text-center text-xs font-black leading-tight text-[#786981]">
+                          {formatDashboardDuration(bar.value)}
+                        </span>
+                        <div className="flex h-20 w-8 items-end rounded-full bg-white p-0.5 shadow-inner">
+                          <div className="w-full rounded-full" style={{ backgroundColor: bar.color, height: `${bar.height}%` }} />
+                        </div>
+                        <span className="text-xs font-black text-[#8b7b91]">{bar.label}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="rounded-[1rem] border border-dashed border-slate-100 bg-slate-50/70 px-3 py-4 text-center text-xs font-black text-[#8b7b91]">
+              暂无用时数据
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-[1.35rem] border border-white/80 bg-white/70 p-4">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <p className="text-base font-black text-[#5a4b63]">任务计划 / 实际</p>
+            <span className="text-xs font-black text-[#8b7b91]">
+              {taskTimeChartItems.length > 0
+                ? `${taskTimeChartItems.length} 项有用时数据`
+                : "暂无用时数据"}
+            </span>
+          </div>
+          {taskTimeChartItems.length > 0 ? (
+            <div className="overflow-x-auto">
+              <div className="flex min-w-max items-stretch gap-3 rounded-[1rem] bg-[#faf7fb] px-3 pb-3 pt-3">
+                {taskTimeChartItems.map((item) => (
+                  <div
+                    className="flex w-32 shrink-0 flex-col items-center rounded-[1rem] border border-violet-100 bg-white/80 px-2 py-2 shadow-sm shadow-violet-100/60"
+                    key={item.id}
+                  >
+                    <div className="flex h-36 items-end justify-center gap-2">
+                      {[
+                        { colorClass: "bg-sky-300", label: "计划", value: item.targetSeconds },
+                        { colorClass: "bg-violet-400", label: "实际", value: item.actualSeconds },
+                      ].map((bar) => (
+                        <div className="flex h-full w-12 flex-col items-center justify-end gap-1" key={bar.label}>
+                          <span className="whitespace-nowrap text-center text-xs font-black leading-tight text-[#786981]">
+                            {formatDashboardDuration(bar.value)}
+                          </span>
+                          <div className="flex h-24 w-8 items-end rounded-full bg-white p-0.5 shadow-inner">
+                            <div
+                              className={`w-full rounded-full ${bar.colorClass}`}
+                              style={{
+                                height:
+                                  bar.value > 0
+                                    ? `${Math.max(6, Math.min(100, (bar.value / taskTimeChartMaxSeconds) * 100))}%`
+                                    : "0%",
+                              }}
+                            />
+                          </div>
+                          <span className="text-xs font-black text-[#8b7b91]">{bar.label}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="mt-2 w-full truncate text-center text-sm font-black text-[#5a4b63]">
+                      {item.title}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-[1rem] border border-dashed border-slate-100 bg-slate-50/70 px-3 py-4 text-center text-xs font-black text-[#8b7b91]">
+              暂无用时数据
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-4 rounded-[1.35rem] border border-amber-100 bg-amber-50/60 p-4">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <p className="text-base font-black text-[#5a4b63]">复杂项目用时分布</p>
+          <span className="text-xs font-black text-[#8b7b91]">
+            {complexProjectTimeItems.length > 0
+              ? `${complexProjectTimeItems.length} 个项目`
+              : "暂无项目计时"}
+          </span>
+        </div>
+        {complexProjectTimeItems.length > 0 ? (
+          <div className="grid gap-3 xl:grid-cols-2">
+            {complexProjectTimeItems.map((projectItem) => (
+              <div
+                className="rounded-[1.1rem] border border-white/80 bg-white/85 p-3 shadow-sm shadow-amber-100/50"
+                key={projectItem.id}
+              >
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-black text-[#46394f]">
+                      {projectItem.title}
+                    </p>
+                    <p className="mt-1 text-xs font-bold text-[#8b7b91]">
+                      今天 {formatDashboardDuration(projectItem.todaySeconds)} ·{" "}
+                      {projectItem.todaySessionCount} 段
+                    </p>
+                  </div>
+                  <span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-black text-amber-800">
+                    总计 {formatDashboardDuration(projectItem.totalSeconds)}
+                  </span>
+                </div>
+                <div className="mt-3 space-y-2.5">
+                  {projectItem.phases.length > 0 ? (
+                    projectItem.phases.map((phase) => {
+                      const hasTodayTime = phase.todaySessionCount > 0;
+
+                      return (
+                        <div
+                          className={`rounded-[0.9rem] border px-3 py-2 transition ${
+                            phase.isRunning || hasTodayTime
+                              ? "border-sky-200 bg-sky-50/70 shadow-sm shadow-sky-100/60"
+                              : "border-amber-100 bg-white/80"
+                          }`}
+                          key={phase.id}
+                        >
+                          <div className="flex items-center justify-between gap-2 text-xs font-black text-[#6f5d78]">
+                            <span className="flex min-w-0 items-center gap-1.5">
+                              <span
+                                aria-hidden="true"
+                                className={`h-2 w-2 shrink-0 rounded-full ${
+                                  phase.isRunning || hasTodayTime ? "bg-sky-400" : "bg-amber-200"
+                                }`}
+                              />
+                              <span className="truncate">{phase.title}</span>
+                            </span>
+                            <span className="shrink-0 tabular-nums">
+                              {formatDashboardDuration(phase.totalSeconds)}
+                            </span>
+                          </div>
+                          <div className="mt-2 h-2 overflow-hidden rounded-full bg-white shadow-inner">
+                            <div
+                              className="h-full rounded-full bg-[linear-gradient(90deg,#f59e0b,#38bdf8)]"
+                              style={{ width: `${phase.widthPercent}%` }}
+                            />
+                          </div>
+                          {hasTodayTime ? (
+                            <p className="mt-1.5 inline-flex rounded-full bg-white/85 px-2 py-0.5 text-[10px] font-black text-sky-700 shadow-sm">
+                              今日 {formatDashboardDuration(phase.todaySeconds)} ·{" "}
+                              {phase.todaySessionCount} 段
+                            </p>
+                          ) : null}
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <p className="rounded-[0.9rem] bg-amber-50 px-3 py-2 text-xs font-black text-[#8b7b91]">
+                      暂无阶段用时
+                    </p>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-[1rem] border border-dashed border-amber-200 bg-white/70 px-3 py-4 text-center text-xs font-black text-[#8b7b91]">
+            在长期项目阶段中开始计时后，这里会显示项目和阶段用时分布
+          </div>
+        )}
+      </div>
+    </section>
+  );
+  const exportWorkspace = (
+    <section className="p-4 sm:p-6">
+      <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p className="text-sm font-black text-sky-700">导出/复盘</p>
+          <h2 className="mt-1 text-2xl font-black text-[#3f3349]">今日手帐导出</h2>
+          <p className="mt-1 text-sm font-bold text-[#8b7b91]">
+            当前日期 {formatDisplayDateWithYear(selectedDate)}，已完成 {completedCount} / {plans.length} 项
+          </p>
+        </div>
+        <span className="w-fit rounded-full bg-white px-3 py-1 text-xs font-black text-[#7a6b84]">
+          {selectedExportTemplate.audience} · {selectedExportTemplate.name}
+        </span>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-[minmax(260px,360px)_1fr]">
+        <div className="rounded-[1.35rem] border border-sky-100 bg-sky-50/70 p-4">
+          <label
+            className="flex min-w-0 flex-col gap-1 text-xs font-black text-[#6f5d78]"
+            htmlFor="workspace-export-template"
+          >
+            导出模板
+            <select
+              className="max-w-full rounded-2xl border border-pink-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+              id="workspace-export-template"
+              value={selectedExportTemplateId}
+              onChange={(event) => setSelectedExportTemplateId(event.target.value)}
+            >
+              {exportTemplateGroups.map((group) => (
+                <optgroup key={group.audience} label={group.audience}>
+                  {group.templates.map((template) => (
+                    <option key={template.id} value={template.id}>
+                      {template.name}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+          </label>
+
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button
+              className="rounded-2xl border border-sky-200 bg-white px-4 py-2 text-sm font-bold text-sky-700 transition hover:bg-sky-100 disabled:opacity-50"
+              disabled={isExporting}
+              type="button"
+              onClick={handleExportPng}
+            >
+              {isExporting ? "导出中" : "导出 PNG"}
+            </button>
+            <button
+              className="rounded-2xl border border-violet-200 bg-white px-4 py-2 text-sm font-bold text-violet-700 transition hover:bg-violet-100 disabled:opacity-50"
+              disabled={isExporting}
+              type="button"
+              onClick={handleExportPdf}
+            >
+              {isExporting ? "导出中" : "导出 PDF"}
+            </button>
+          </div>
+        </div>
+
+        <div className="rounded-[1.35rem] border border-white/80 bg-[#fffaf4] p-4">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <p className="text-sm font-black text-[#5a4b63]">导出概览</p>
+            <span className="rounded-full bg-white px-3 py-1 text-xs font-black text-[#8b7b91]">
+              {progress}%
+            </span>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="rounded-[1rem] bg-white/80 px-3 py-2">
+              <p className="text-xs font-black text-[#8b7b91]">任务数</p>
+              <p className="mt-1 text-xl font-black text-[#46394f]">{plans.length}</p>
+            </div>
+            <div className="rounded-[1rem] bg-white/80 px-3 py-2">
+              <p className="text-xs font-black text-[#8b7b91]">完成</p>
+              <p className="mt-1 text-xl font-black text-emerald-700">{completedCount}</p>
+            </div>
+            <div className="rounded-[1rem] bg-white/80 px-3 py-2">
+              <p className="text-xs font-black text-[#8b7b91]">计划用时</p>
+              <p className="mt-1 text-xl font-black text-sky-700">
+                {formatDashboardMinutes(dailyTimeStats.targetTotalMinutes)}
+              </p>
+            </div>
+          </div>
+          <p className="mt-3 space-y-2 text-sm font-bold leading-7 text-[#7b6c84]">
+            <span className="block">PNG/PDF 会按当前选择的模板生成一张完整的今日计划手帐。</span>
+            <span className="block">
+              复杂项目甘特图的 PNG/PDF/PPT/Xmind 导出位于“复杂项目”工作区。
+            </span>
+          </p>
+        </div>
+      </div>
+    </section>
+  );
 
   return (
-    <main className="min-h-screen bg-[#fff8ef] bg-[linear-gradient(180deg,#fff8ef_0%,#f6f1ff_48%,#edf8ff_100%)] px-4 py-6 text-[#46394f] sm:px-6 lg:px-8">
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
-        <header className="relative z-[1000] flex flex-col gap-4 overflow-visible rounded-[2rem] border border-white/80 bg-white/70 p-5 shadow-sticker backdrop-blur md:flex-row md:items-center md:justify-between">
+    <main className="min-h-screen bg-[#fff8ef] bg-[linear-gradient(180deg,#fff8ef_0%,#f6f1ff_48%,#edf8ff_100%)] px-4 py-4 text-[#46394f] sm:px-6 lg:px-8">
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-0">
+        <div className="rounded-[2rem] border border-white/80 bg-white/80 shadow-sticker backdrop-blur">
+        <header className="relative z-[1000] flex flex-col gap-3 overflow-visible rounded-t-[2rem] bg-transparent p-4 md:flex-row md:items-center md:justify-between">
           <div>
             <p className="mb-1 text-sm font-semibold text-pink-500">Daily Planner Journal</p>
             <h1 className="text-3xl font-black tracking-normal text-[#382b44] sm:text-4xl">
               今日计划手帐
             </h1>
-            <p className="mt-2 text-sm text-[#76687f]">{formatDisplayDate(selectedDate)}</p>
           </div>
 
           <div className="relative z-[1001] w-full md:max-w-md md:flex-1">
@@ -7540,7 +12480,7 @@ function App() {
               历史检索
             </label>
             <input
-              className="w-full rounded-2xl border border-sky-100 bg-white/90 px-4 py-3 text-sm font-bold text-[#46394f] shadow-sm outline-none transition placeholder:text-[#b8aabd] focus:border-sky-300 focus:ring-4 focus:ring-sky-100"
+              className="w-full rounded-2xl border border-sky-100 bg-white/90 px-4 py-2.5 text-sm font-bold text-[#46394f] shadow-sm outline-none transition placeholder:text-[#b8aabd] focus:border-sky-300 focus:ring-4 focus:ring-sky-100"
               id="plan-search"
               placeholder="搜索任务标题、备注、分类"
               type="search"
@@ -7611,30 +12551,264 @@ function App() {
             ) : null}
           </div>
 
-          <div className="flex flex-col gap-3 sm:min-w-80 md:min-w-[28rem]">
-            <label className="text-sm font-bold text-[#6f5d78]" htmlFor="planner-date">
-              选择日期
-            </label>
+          <div className="flex flex-col gap-3 sm:min-w-72 md:min-w-[30rem] lg:min-w-[32rem]">
             <ChinaHolidayDatePicker
               calendarMonthDate={calendarMonthDate}
               holidayMap={chinaHolidayMap}
-              holidaySourceByYear={chinaHolidaySourceByYear}
               selectedDate={selectedDate}
               summaryAside={
-                <WeatherWidget
-                  weatherState={weatherState}
-                  onRefresh={() => refreshWeather({ force: true })}
-                />
+                <div className="grid min-w-0 gap-2 sm:w-[18.5rem] sm:grid-cols-2">
+                  <WeatherWidget
+                    weatherState={weatherState}
+                    onRefresh={() => refreshWeather({ force: true })}
+                  />
+                  <MoodWidget
+                    entryCount={selectedMoodEntries.length}
+                    latestEntry={latestMoodEntry}
+                    onOpen={() => setIsMoodPanelOpen(true)}
+                  />
+                </div>
               }
               today={today}
               onCalendarMonthDateChange={setCalendarMonthDate}
               onSelectDate={selectPlannerDate}
             />
           </div>
+
+          <div className="relative z-[1002] flex w-full justify-end md:w-auto md:self-start">
+            <button
+              className="inline-flex min-h-10 items-center justify-center rounded-full border border-violet-100 bg-white/90 px-4 py-2 text-sm font-black text-violet-700 shadow-sm transition hover:bg-violet-50 focus:outline-none focus:ring-4 focus:ring-violet-100"
+              type="button"
+              title="个人中心"
+              onClick={() => setIsAuthPanelOpen((current) => !current)}
+            >
+              {isSignedIn ? "账号" : "登录"}
+            </button>
+            <AnimatePresence>
+              {isAuthPanelOpen ? (
+                <motion.div
+                  animate={{ opacity: 1, y: 0 }}
+                  className="absolute right-0 top-[calc(100%+10px)] z-[10000] w-[min(92vw,28rem)]"
+                  exit={{ opacity: 0, y: -6 }}
+                  initial={{ opacity: 0, y: -6 }}
+                  transition={{ duration: 0.16, ease: "easeOut" }}
+                >
+                  {authPanel}
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
+          </div>
         </header>
 
-        <section className="grid gap-6 lg:grid-cols-[minmax(280px,360px)_1fr]">
-          <aside className="h-fit rounded-[2rem] border border-white/80 bg-white/80 p-4 shadow-sticker backdrop-blur">
+        {createPortal(
+          <AnimatePresence>
+            {isTaskFormOpen ? (
+              <motion.div
+                animate={{ opacity: 1 }}
+                className="fixed inset-0 z-[9999] flex items-center justify-center overflow-y-auto bg-[#2d2433]/45 px-4 py-5 backdrop-blur-sm"
+                exit={{ opacity: 0 }}
+                initial={{ opacity: 0 }}
+                onClick={closeTaskForm}
+              >
+                <motion.div
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  className="w-full max-w-2xl"
+                  exit={{ opacity: 0, scale: 0.98, y: 8 }}
+                  initial={{ opacity: 0, scale: 0.98, y: 8 }}
+                  transition={{ duration: 0.18 }}
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <section className="max-h-[calc(100vh-2.5rem)] overflow-y-auto rounded-[1.5rem] border border-white/80 bg-white p-4 shadow-2xl shadow-pink-200/40 sm:p-5">
+                    <div className="mb-4 flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-black text-pink-600">添加任务</p>
+                        <h2 className="mt-1 text-xl font-black text-[#3f3349]">
+                          {formatDisplayDateWithYear(selectedDate)}
+                        </h2>
+                      </div>
+                      <button
+                        className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-[#6d5d75] transition hover:bg-slate-200 focus:outline-none focus:ring-4 focus:ring-slate-100"
+                        type="button"
+                        onClick={closeTaskForm}
+                      >
+                        关闭
+                      </button>
+                    </div>
+                    {taskFormPanel}
+                  </section>
+                </motion.div>
+              </motion.div>
+            ) : null}
+          </AnimatePresence>,
+          document.body,
+        )}
+
+        {createPortal(
+          <AnimatePresence>
+            {isMoodPanelOpen ? (
+              <motion.div
+                animate={{ opacity: 1 }}
+                className="fixed inset-0 z-[9999] flex items-center justify-center overflow-y-auto bg-[#2d2433]/45 px-4 py-5 backdrop-blur-sm"
+                exit={{ opacity: 0 }}
+                initial={{ opacity: 0 }}
+                onClick={() => setIsMoodPanelOpen(false)}
+              >
+                <motion.div
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  className="w-full max-w-5xl"
+                  exit={{ opacity: 0, scale: 0.98, y: 8 }}
+                  initial={{ opacity: 0, scale: 0.98, y: 8 }}
+                  transition={{ duration: 0.18 }}
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  {moodPanel}
+                </motion.div>
+              </motion.div>
+            ) : null}
+          </AnimatePresence>,
+          document.body,
+        )}
+
+        {createPortal(
+          <AnimatePresence>
+            {phaseTimeDetailTarget && phaseTimeDetailProject && phaseTimeDetailPhase ? (
+              <motion.div
+                animate={{ opacity: 1 }}
+                className="fixed inset-0 z-[9999] flex items-center justify-center overflow-y-auto bg-[#2d2433]/45 px-4 py-5 backdrop-blur-sm"
+                exit={{ opacity: 0 }}
+                initial={{ opacity: 0 }}
+                onClick={() => setPhaseTimeDetailTarget(null)}
+              >
+                <motion.div
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  className="w-full max-w-4xl"
+                  exit={{ opacity: 0, scale: 0.98, y: 8 }}
+                  initial={{ opacity: 0, scale: 0.98, y: 8 }}
+                  transition={{ duration: 0.18 }}
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <section className="max-h-[calc(100vh-2.5rem)] overflow-y-auto rounded-[1.5rem] border border-white/80 bg-white p-4 shadow-2xl shadow-amber-200/40 sm:p-5">
+                    <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
+                        <p className="text-sm font-black text-amber-700">阶段计时明细</p>
+                        <h2 className="mt-1 break-words text-xl font-black text-[#3f3349]">
+                          {phaseTimeDetailProject.title} · {phaseTimeDetailPhase.title}
+                        </h2>
+                        <p className="mt-1 text-sm font-bold text-[#8b7b91]">
+                          {phaseTimeDetailTarget.date} · {phaseTimeDetailEntries.length} 段 · 总计{" "}
+                          {formatDashboardDuration(phaseTimeDetailTotalSeconds)}
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 flex-wrap gap-2">
+                        <button
+                          className="rounded-full bg-emerald-50 px-3 py-2 text-xs font-black text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
+                          disabled={phaseTimeDetailEntries.length === 0}
+                          type="button"
+                          onClick={exportPhaseTimeDetailsExcel}
+                        >
+                          导出 Excel
+                        </button>
+                        <button
+                          className="rounded-full bg-slate-100 px-3 py-2 text-xs font-black text-[#6d5d75] transition hover:bg-slate-200"
+                          type="button"
+                          onClick={() => setPhaseTimeDetailTarget(null)}
+                        >
+                          关闭
+                        </button>
+                      </div>
+                    </div>
+
+                    {phaseTimeDetailEntries.length > 0 ? (
+                      <div className="overflow-x-auto rounded-[1.15rem] border border-amber-100">
+                        <table className="min-w-full border-collapse text-left text-sm">
+                          <thead className="bg-amber-50 text-xs font-black text-amber-800">
+                            <tr>
+                              <th className="whitespace-nowrap px-3 py-2">序号</th>
+                              <th className="whitespace-nowrap px-3 py-2">开始时间</th>
+                              <th className="whitespace-nowrap px-3 py-2">结束时间</th>
+                              <th className="whitespace-nowrap px-3 py-2">持续时间</th>
+                              <th className="whitespace-nowrap px-3 py-2">状态</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-amber-50 bg-white">
+                            {phaseTimeDetailEntries.map((entry, index) => {
+                              const isRunning = !entry.endedAt;
+                              const durationSeconds = getComplexProjectPhaseEntrySeconds(
+                                entry,
+                                timerTick,
+                              );
+
+                              return (
+                                <tr key={entry.id}>
+                                  <td className="whitespace-nowrap px-3 py-2 font-black text-[#6f5d78]">
+                                    {index + 1}
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2 font-bold text-[#46394f]">
+                                    {formatDateTime(entry.startedAt)}
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2 font-bold text-[#46394f]">
+                                    {entry.endedAt ? formatDateTime(entry.endedAt) : "进行中"}
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2 font-black text-amber-800">
+                                    {formatDashboardDuration(durationSeconds)}
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2">
+                                    <span
+                                      className={`rounded-full px-2 py-0.5 text-xs font-black ${
+                                        isRunning
+                                          ? "bg-emerald-50 text-emerald-700"
+                                          : "bg-slate-100 text-slate-600"
+                                      }`}
+                                    >
+                                      {isRunning ? "计时中" : "已结束"}
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <div className="rounded-[1.15rem] border border-dashed border-amber-200 bg-amber-50/60 px-4 py-8 text-center text-sm font-black text-[#8b7b91]">
+                        当天还没有分段计时记录
+                      </div>
+                    )}
+                  </section>
+                </motion.div>
+              </motion.div>
+            ) : null}
+          </AnimatePresence>,
+          document.body,
+        )}
+
+        <section className="space-y-0">
+          <nav className="px-4 py-2">
+            <div className="overflow-x-auto">
+              <div className="grid min-w-max grid-flow-col gap-2 lg:min-w-0 lg:grid-flow-row lg:grid-cols-4">
+                {WORKSPACE_TABS.map((tab) => {
+                  const isActiveTab = activeWorkspaceTab === tab.id;
+
+                  return (
+                    <button
+                      className={`min-w-28 rounded-2xl border px-4 py-2 text-center text-sm font-black transition focus:outline-none focus:ring-4 focus:ring-white/70 lg:min-w-0 ${
+                        isActiveTab
+                          ? tab.toneClass
+                          : "border-transparent bg-transparent text-[#6f5d78] hover:text-[#3f3349]"
+                      }`}
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setActiveWorkspaceTab(tab.id)}
+                    >
+                      {tab.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </nav>
+
+          <aside aria-hidden="true" className="hidden">
             <section className="mb-3 rounded-[1.5rem] border border-dashed border-violet-200 bg-violet-50/70 p-3">
               <div className="mb-2 flex items-start justify-between gap-3">
                 <div>
@@ -8014,426 +13188,974 @@ function App() {
                 ) : null}
               </div>
             </form>
-          </aside>
 
-          <section className="rounded-[2rem] border border-white/80 bg-white/80 p-4 shadow-sticker backdrop-blur sm:p-6">
-            <div className="mb-5 flex flex-wrap items-center justify-end gap-2">
-                <label
-                  className="flex min-w-56 flex-col gap-1 text-xs font-black text-[#6f5d78]"
-                  htmlFor="export-template"
+            <section className="mt-4 rounded-[1.5rem] border border-amber-100 bg-amber-50/65 p-3">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <p className="text-sm font-black text-[#5f5268]">复杂项目</p>
+                  <p className="mt-0.5 text-xs font-bold text-[#8a7a94]">
+                    {complexProjects.length > 0
+                      ? `${complexProjects.length} 个项目`
+                      : "暂无项目"}
+                  </p>
+                </div>
+                <button
+                  className="rounded-2xl bg-white px-3 py-2 text-xs font-black text-amber-700 shadow-sm transition hover:bg-amber-100 focus:outline-none focus:ring-4 focus:ring-amber-100"
+                  type="button"
+                  onClick={openNewComplexProjectForm}
                 >
-                  导出模板
-                  <select
-                    className="max-w-full rounded-2xl border border-pink-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
-                    id="export-template"
-                    value={selectedExportTemplateId}
-                    onChange={(event) => setSelectedExportTemplateId(event.target.value)}
-                  >
-                    {exportTemplateGroups.map((group) => (
-                      <optgroup key={group.audience} label={group.audience}>
-                        {group.templates.map((template) => (
-                          <option key={template.id} value={template.id}>
-                            {template.name}
+                  + 新建复杂项目
+                </button>
+              </div>
+
+              {isComplexProjectFormOpen ? (
+                <form className="mt-3 space-y-2.5 rounded-[1.2rem] bg-white/75 p-3" onSubmit={handleComplexProjectSubmit}>
+                  <div className="flex flex-col gap-1.5">
+                    <label
+                      className="text-xs font-black text-[#6f5d78]"
+                      htmlFor="complex-project-title"
+                    >
+                      项目标题
+                    </label>
+                    <input
+                      className="min-w-0 rounded-2xl border border-amber-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition placeholder:text-[#b8aabd] focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                      id="complex-project-title"
+                      maxLength={64}
+                      placeholder="例如：论文开题准备"
+                      value={complexProjectForm.title}
+                      onChange={(event) => {
+                        setComplexProjectForm((current) => ({
+                          ...current,
+                          title: event.target.value,
+                        }));
+                        setComplexProjectFormError("");
+                      }}
+                    />
+                  </div>
+
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <label
+                      className="flex min-w-0 flex-col gap-1.5 text-xs font-black text-[#6f5d78]"
+                      htmlFor="complex-project-category"
+                    >
+                      分类
+                      <select
+                        className="min-w-0 rounded-2xl border border-amber-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                        id="complex-project-category"
+                        value={complexProjectForm.category}
+                        onChange={(event) =>
+                          setComplexProjectForm((current) => ({
+                            ...current,
+                            category: event.target.value,
+                          }))
+                        }
+                      >
+                        {complexProjectCategoryOptions.map((category) => (
+                          <option key={category.id} value={category.name}>
+                            {category.icon} {category.name}
                           </option>
                         ))}
-                      </optgroup>
-                    ))}
-                  </select>
-                </label>
-                <button
-                  className="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-bold text-sky-700 transition hover:bg-sky-100 disabled:opacity-50"
-                  type="button"
-                  disabled={isExporting}
-                  onClick={handleExportPng}
-                >
-                  {isExporting ? "导出中" : "导出 PNG"}
-                </button>
-                <button
-                  className="rounded-2xl border border-violet-200 bg-violet-50 px-4 py-2 text-sm font-bold text-violet-700 transition hover:bg-violet-100 disabled:opacity-50"
-                  type="button"
-                  disabled={isExporting}
-                  onClick={handleExportPdf}
-                >
-                  {isExporting ? "导出中" : "导出 PDF"}
-                </button>
-                <button
-                  className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-bold text-rose-600 transition hover:bg-rose-100 disabled:opacity-50"
-                  type="button"
-                  disabled={plans.length === 0}
-                  onClick={handleClearDay}
-                >
-                  清空当天
-                </button>
-            </div>
+                      </select>
+                    </label>
 
+                    <label
+                      className="flex min-w-0 flex-col gap-1.5 text-xs font-black text-[#6f5d78]"
+                      htmlFor="complex-project-priority"
+                    >
+                      优先级
+                      <select
+                        className="min-w-0 rounded-2xl border border-amber-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                        id="complex-project-priority"
+                        value={complexProjectForm.priority}
+                        onChange={(event) =>
+                          setComplexProjectForm((current) => ({
+                            ...current,
+                            priority: normalizePriority(event.target.value),
+                          }))
+                        }
+                      >
+                        {PRIORITY_OPTIONS.map((priorityOption) => (
+                          <option key={priorityOption.id} value={priorityOption.id}>
+                            {priorityOption.icon} {priorityOption.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <label
+                      className="flex min-w-0 flex-col gap-1.5 text-xs font-black text-[#6f5d78]"
+                      htmlFor="complex-project-start-date"
+                    >
+                      开始日期
+                      <input
+                        className="min-w-0 rounded-2xl border border-amber-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                        id="complex-project-start-date"
+                        required
+                        type="date"
+                        value={complexProjectForm.startDate}
+                        onChange={(event) => {
+                          setComplexProjectForm((current) => ({
+                            ...current,
+                            startDate: event.target.value,
+                          }));
+                          setComplexProjectFormError("");
+                        }}
+                      />
+                    </label>
+
+                    <label
+                      className="flex min-w-0 flex-col gap-1.5 text-xs font-black text-[#6f5d78]"
+                      htmlFor="complex-project-end-date"
+                    >
+                      结束日期
+                      <input
+                        className="min-w-0 rounded-2xl border border-amber-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                        id="complex-project-end-date"
+                        required
+                        type="date"
+                        value={complexProjectForm.endDate}
+                        onChange={(event) => {
+                          setComplexProjectForm((current) => ({
+                            ...current,
+                            endDate: event.target.value,
+                          }));
+                          setComplexProjectFormError("");
+                        }}
+                      />
+                    </label>
+                  </div>
+
+                  <div>
+                    <label
+                      className="mb-1.5 block text-xs font-black text-[#6f5d78]"
+                      htmlFor="complex-project-note"
+                    >
+                      备注
+                    </label>
+                    <textarea
+                      className="min-h-20 w-full resize-none rounded-2xl border border-amber-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition placeholder:text-[#b8aabd] focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                      id="complex-project-note"
+                      maxLength={240}
+                      placeholder="可选"
+                      value={complexProjectForm.note}
+                      onChange={(event) =>
+                        setComplexProjectForm((current) => ({
+                          ...current,
+                          note: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+
+                  {complexProjectFormError ? (
+                    <p className="rounded-2xl bg-rose-50 px-3 py-2 text-xs font-black text-rose-600">
+                      {complexProjectFormError}
+                    </p>
+                  ) : null}
+
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      className="rounded-2xl bg-amber-500 px-4 py-2 text-sm font-black text-white shadow-sm shadow-amber-100 transition hover:bg-amber-600 disabled:opacity-50"
+                      disabled={!complexProjectForm.title.trim()}
+                      type="submit"
+                    >
+                      {editingComplexProjectId ? "保存项目" : "创建项目"}
+                    </button>
+                    <button
+                      className="rounded-2xl bg-white px-4 py-2 text-sm font-bold text-[#6f5d78] transition hover:bg-amber-50"
+                      type="button"
+                      onClick={() => resetComplexProjectForm()}
+                    >
+                      取消
+                    </button>
+                  </div>
+                </form>
+              ) : null}
+
+              {complexProjectPhaseMessage ? (
+                <p className="mt-3 rounded-2xl bg-white/75 px-3 py-2 text-xs font-black text-emerald-700">
+                  {complexProjectPhaseMessage}
+                </p>
+              ) : null}
+
+              <div className="mt-3 space-y-2">
+                {complexProjects.length > 0 ? (
+                  complexProjects.map((project) => {
+                    const style = getCategoryStyle(project.category, customCategories);
+                    const priorityOption = getPriorityOption(project.priority);
+                    const projectProgress = getComplexProjectProgress(project);
+                    const sortedPhases = sortComplexProjectPhases(project.phases);
+                    const isPhaseFormVisible = complexProjectPhaseEdit?.projectId === project.id;
+                    const projectFeedback =
+                      complexProjectFeedback?.projectId === project.id
+                        ? complexProjectFeedback
+                        : null;
+                    const isGanttPreviewVisible = ganttPreviewProjectId === project.id;
+
+                    return (
+                      <div
+                        className={`rounded-[1.15rem] border bg-white/75 px-3 py-2.5 transition ${
+                          projectFeedback?.projectCompleted
+                            ? "border-emerald-200 ring-2 ring-emerald-100"
+                            : "border-white/80"
+                        }`}
+                        key={project.id}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="break-words text-sm font-black text-[#46394f]">
+                              {project.title}
+                            </p>
+                            <p className="mt-1 text-xs font-bold text-[#8b7b91]">
+                              {formatDisplayDate(project.startDate)} -{" "}
+                              {formatDisplayDate(project.endDate)}
+                            </p>
+                          </div>
+                          <div className="flex shrink-0 flex-col gap-1.5">
+                            <button
+                              className="rounded-full bg-amber-50 px-3 py-1 text-xs font-black text-amber-700 transition hover:bg-amber-100 focus:outline-none focus:ring-4 focus:ring-amber-100"
+                              type="button"
+                              onClick={() => openNewComplexProjectPhaseForm(project)}
+                            >
+                              + 阶段
+                            </button>
+                            <button
+                              className="rounded-full bg-white px-3 py-1 text-xs font-black text-[#6f5d78] transition hover:bg-amber-50 focus:outline-none focus:ring-4 focus:ring-amber-100"
+                              type="button"
+                              onClick={() => startComplexProjectEdit(project)}
+                            >
+                              编辑
+                            </button>
+                          </div>
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-1.5 text-xs font-black">
+                          <span className={`rounded-full px-2 py-0.5 ${style.bg} ${style.accent}`}>
+                            {style.emoji} {project.category}
+                          </span>
+                          <span className="rounded-full bg-violet-50 px-2 py-0.5 text-violet-700">
+                            {priorityOption.icon} {priorityOption.name}
+                          </span>
+                          <span
+                            className={`rounded-full px-2 py-0.5 ${
+                              project.status === "active"
+                                ? "bg-emerald-50 text-emerald-700"
+                                : project.status === "completed"
+                                  ? "bg-sky-50 text-sky-700"
+                                  : "bg-slate-100 text-slate-600"
+                            }`}
+                          >
+                            {getComplexProjectStatusLabel(project.status)}
+                          </span>
+                        </div>
+                        {project.status !== "archived" ? (
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            <button
+                              className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-black text-emerald-700 transition hover:bg-emerald-100"
+                              type="button"
+                              onClick={() => toggleComplexProjectCompleted(project.id)}
+                            >
+                              {project.status === "completed" ? "恢复进行中" : "标记完成"}
+                            </button>
+                            <button
+                              className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-600 transition hover:bg-slate-200"
+                              type="button"
+                              onClick={() => archiveComplexProject(project.id)}
+                            >
+                              归档
+                            </button>
+                          </div>
+                        ) : null}
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          <button
+                            className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-black text-amber-800 transition hover:bg-amber-200"
+                            type="button"
+                            onClick={() =>
+                              setGanttPreviewProjectId((current) =>
+                                current === project.id ? null : project.id,
+                              )
+                            }
+                          >
+                            {isGanttPreviewVisible ? "收起甘特图" : "甘特图预览"}
+                          </button>
+                          <button
+                            className="rounded-full bg-white px-2.5 py-1 text-xs font-black text-sky-700 transition hover:bg-sky-50 disabled:opacity-50"
+                            disabled={isGanttExporting}
+                            type="button"
+                            onClick={() => handleExportComplexProjectGanttPng(project.id)}
+                          >
+                            导出 PNG
+                          </button>
+                          <button
+                            className="rounded-full bg-white px-2.5 py-1 text-xs font-black text-violet-700 transition hover:bg-violet-50 disabled:opacity-50"
+                            disabled={isGanttExporting}
+                            type="button"
+                            onClick={() => handleExportComplexProjectGanttPdf(project.id)}
+                          >
+                            导出 PDF
+                          </button>
+                          <button
+                            className="rounded-full bg-white px-2.5 py-1 text-xs font-black text-orange-700 transition hover:bg-orange-50 disabled:opacity-50"
+                            disabled={isGanttExporting}
+                            type="button"
+                            onClick={() => handleExportComplexProjectGanttPptx(project.id)}
+                          >
+                            导出 PPT/PPTX
+                          </button>
+                          <button
+                            className="rounded-full bg-white px-2.5 py-1 text-xs font-black text-emerald-700 transition hover:bg-emerald-50"
+                            type="button"
+                            onClick={() => handleExportComplexProjectXmind(project.id)}
+                          >
+                            导出 Xmind
+                          </button>
+                        </div>
+                        <div className="mt-3 rounded-[1rem] bg-amber-50/70 px-3 py-2">
+                          <div className="flex items-center justify-between gap-2 text-xs font-black text-[#7b6c84]">
+                            <span>
+                              阶段进度 {projectProgress.completed} / {projectProgress.total}
+                            </span>
+                            <span>{projectProgress.percent}%</span>
+                          </div>
+                          <div className="relative mt-1.5 h-2 overflow-hidden rounded-full bg-white">
+                            <motion.div
+                              animate={{ width: `${projectProgress.percent}%` }}
+                              className="h-full rounded-full bg-[linear-gradient(90deg,#f59e0b,#34d399)]"
+                              initial={false}
+                              transition={{ duration: 0.42, ease: "easeOut" }}
+                            />
+                            <AnimatePresence>
+                              {projectFeedback ? (
+                                <motion.div
+                                  aria-hidden="true"
+                                  animate={{ opacity: 0, x: "100%" }}
+                                  className="absolute inset-0 rounded-full bg-white/75"
+                                  exit={{ opacity: 0 }}
+                                  initial={{ opacity: 0.8, x: "-100%" }}
+                                  key={projectFeedback.id}
+                                  transition={{ duration: 0.72, ease: "easeOut" }}
+                                />
+                              ) : null}
+                            </AnimatePresence>
+                          </div>
+                          <AnimatePresence>
+                            {projectFeedback ? (
+                              <motion.p
+                                animate={{ opacity: 1, y: 0 }}
+                                className="mt-1.5 rounded-full bg-white/80 px-2 py-1 text-xs font-black text-emerald-700"
+                                exit={{ opacity: 0, y: -4 }}
+                                initial={{ opacity: 0, y: 4 }}
+                                key={projectFeedback.id}
+                                transition={{ duration: 0.22, ease: "easeOut" }}
+                              >
+                                {projectFeedback.projectCompleted
+                                  ? "项目阶段全部完成"
+                                  : `阶段完成：${projectFeedback.phaseTitle}`}
+                              </motion.p>
+                            ) : null}
+                          </AnimatePresence>
+                          {projectProgress.total === 0 ? (
+                            <p className="mt-1.5 text-xs font-bold text-[#8b7b91]">先添加阶段</p>
+                          ) : null}
+                        </div>
+
+                        <AnimatePresence>
+                          {isGanttPreviewVisible ? (
+                            <motion.div
+                              animate={{ opacity: 1, y: 0 }}
+                              className="mt-3"
+                              data-gantt-preview-project-id={project.id}
+                              exit={{ opacity: 0, y: -6 }}
+                              initial={{ opacity: 0, y: 6 }}
+                              transition={{ duration: 0.2, ease: "easeOut" }}
+                            >
+                              <ComplexProjectGanttChart project={project} />
+                            </motion.div>
+                          ) : null}
+                        </AnimatePresence>
+
+                        {isPhaseFormVisible ? (
+                          <form
+                            className="mt-3 space-y-2 rounded-[1rem] border border-amber-100 bg-amber-50/70 p-2.5"
+                            onSubmit={handleComplexProjectPhaseSubmit}
+                          >
+                            <div className="flex flex-col gap-1.5">
+                              <label
+                                className="text-xs font-black text-[#6f5d78]"
+                                htmlFor={`complex-project-phase-title-${project.id}`}
+                              >
+                                阶段标题
+                              </label>
+                              <input
+                                className="rounded-2xl border border-amber-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition placeholder:text-[#b8aabd] focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                                id={`complex-project-phase-title-${project.id}`}
+                                maxLength={64}
+                                placeholder="例如：资料收集"
+                                value={complexProjectPhaseForm.title}
+                                onChange={(event) => {
+                                  setComplexProjectPhaseForm((current) => ({
+                                    ...current,
+                                    title: event.target.value,
+                                  }));
+                                  setComplexProjectPhaseFormError("");
+                                }}
+                              />
+                            </div>
+
+                            <div className="grid gap-2 sm:grid-cols-2">
+                              <label
+                                className="flex min-w-0 flex-col gap-1.5 text-xs font-black text-[#6f5d78]"
+                                htmlFor={`complex-project-phase-start-${project.id}`}
+                              >
+                                开始日期
+                                <input
+                                  className="min-w-0 rounded-2xl border border-amber-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                                  id={`complex-project-phase-start-${project.id}`}
+                                  required
+                                  type="date"
+                                  value={complexProjectPhaseForm.startDate}
+                                  onChange={(event) => {
+                                    setComplexProjectPhaseForm((current) => ({
+                                      ...current,
+                                      startDate: event.target.value,
+                                    }));
+                                    setComplexProjectPhaseFormError("");
+                                  }}
+                                />
+                              </label>
+
+                              <label
+                                className="flex min-w-0 flex-col gap-1.5 text-xs font-black text-[#6f5d78]"
+                                htmlFor={`complex-project-phase-end-${project.id}`}
+                              >
+                                结束日期
+                                <input
+                                  className="min-w-0 rounded-2xl border border-amber-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                                  id={`complex-project-phase-end-${project.id}`}
+                                  required
+                                  type="date"
+                                  value={complexProjectPhaseForm.endDate}
+                                  onChange={(event) => {
+                                    setComplexProjectPhaseForm((current) => ({
+                                      ...current,
+                                      endDate: event.target.value,
+                                    }));
+                                    setComplexProjectPhaseFormError("");
+                                  }}
+                                />
+                              </label>
+                            </div>
+
+                            <p className="text-xs font-bold text-[#8b7b91]">
+                              阶段日期超出项目周期时，保存后会自动扩展项目日期。
+                            </p>
+
+                            <div>
+                              <label
+                                className="mb-1.5 block text-xs font-black text-[#6f5d78]"
+                                htmlFor={`complex-project-phase-note-${project.id}`}
+                              >
+                                阶段备注
+                              </label>
+                              <textarea
+                                className="min-h-16 w-full resize-none rounded-2xl border border-amber-100 bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition placeholder:text-[#b8aabd] focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                                id={`complex-project-phase-note-${project.id}`}
+                                maxLength={240}
+                                placeholder="可选"
+                                value={complexProjectPhaseForm.note}
+                                onChange={(event) =>
+                                  setComplexProjectPhaseForm((current) => ({
+                                    ...current,
+                                    note: event.target.value,
+                                  }))
+                                }
+                              />
+                            </div>
+
+                            <label
+                              className="flex items-center gap-2 rounded-2xl bg-white/75 px-3 py-2 text-xs font-black text-[#6f5d78]"
+                              htmlFor={`complex-project-phase-completed-${project.id}`}
+                            >
+                              <input
+                                checked={complexProjectPhaseForm.completed}
+                                className="h-4 w-4 accent-amber-500"
+                                id={`complex-project-phase-completed-${project.id}`}
+                                type="checkbox"
+                                onChange={(event) =>
+                                  setComplexProjectPhaseForm((current) => ({
+                                    ...current,
+                                    completed: event.target.checked,
+                                  }))
+                                }
+                              />
+                              已完成
+                            </label>
+
+                            {complexProjectPhaseFormError ? (
+                              <p className="rounded-2xl bg-rose-50 px-3 py-2 text-xs font-black text-rose-600">
+                                {complexProjectPhaseFormError}
+                              </p>
+                            ) : null}
+
+                            <div className="flex flex-wrap gap-2">
+                              <button
+                                className="rounded-2xl bg-amber-500 px-4 py-2 text-xs font-black text-white transition hover:bg-amber-600 disabled:opacity-50"
+                                disabled={!complexProjectPhaseForm.title.trim()}
+                                type="submit"
+                              >
+                                {complexProjectPhaseEdit?.phaseId ? "保存阶段" : "添加阶段"}
+                              </button>
+                              <button
+                                className="rounded-2xl bg-white px-4 py-2 text-xs font-bold text-[#6f5d78] transition hover:bg-amber-50"
+                                type="button"
+                                onClick={() => resetComplexProjectPhaseForm(project)}
+                              >
+                                取消
+                              </button>
+                            </div>
+                          </form>
+                        ) : null}
+
+                        <div className="mt-3 space-y-2">
+                          {sortedPhases.length > 0 ? (
+                            sortedPhases.map((phase) => {
+                              const isPhaseFeedbackActive =
+                                projectFeedback?.phaseId === phase.id;
+
+                              return (
+                                <motion.div
+                                  animate={
+                                    isPhaseFeedbackActive
+                                      ? { scale: [1, 1.012, 1] }
+                                      : { scale: 1 }
+                                  }
+                                  className={`rounded-[1rem] border px-3 py-2 transition ${
+                                    phase.completed
+                                      ? "border-emerald-100 bg-emerald-50/70"
+                                      : "border-amber-100 bg-white/85"
+                                  } ${
+                                    isPhaseFeedbackActive
+                                      ? "shadow-sm shadow-emerald-100 ring-2 ring-emerald-200"
+                                      : ""
+                                  }`}
+                                  initial={false}
+                                  key={phase.id}
+                                  transition={{ duration: 0.45, ease: "easeOut" }}
+                                >
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="min-w-0">
+                                      <p
+                                        className={`break-words text-xs font-black ${
+                                          phase.completed
+                                            ? "text-emerald-800 line-through decoration-2"
+                                            : "text-[#46394f]"
+                                        }`}
+                                      >
+                                        {phase.title}
+                                      </p>
+                                      <p className="mt-1 text-xs font-bold text-[#8b7b91]">
+                                        {formatDisplayDate(phase.startDate)} -{" "}
+                                        {formatDisplayDate(phase.endDate)}
+                                      </p>
+                                    </div>
+                                    <span
+                                      className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-black ${
+                                        phase.completed
+                                          ? "bg-emerald-100 text-emerald-700"
+                                          : "bg-amber-100 text-amber-800"
+                                      }`}
+                                    >
+                                      {phase.completed ? "已完成" : "未完成"}
+                                    </span>
+                                  </div>
+                                  <AnimatePresence>
+                                    {isPhaseFeedbackActive ? (
+                                      <motion.p
+                                        animate={{ opacity: 1, y: 0 }}
+                                        className="mt-1 inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-black text-emerald-700"
+                                        exit={{ opacity: 0, y: -4 }}
+                                        initial={{ opacity: 0, y: 4 }}
+                                        key={projectFeedback?.id ?? phase.id}
+                                        transition={{ duration: 0.2, ease: "easeOut" }}
+                                      >
+                                        已推进到 {projectFeedback?.progressPercent ?? projectProgress.percent}%
+                                      </motion.p>
+                                    ) : null}
+                                  </AnimatePresence>
+                                  {phase.note ? (
+                                    <p className="mt-1 whitespace-pre-wrap break-words text-xs font-bold leading-5 text-[#74667d]">
+                                      {phase.note}
+                                    </p>
+                                  ) : null}
+                                  <div className="mt-2 flex flex-wrap gap-1.5">
+                                    <button
+                                      className={`rounded-full px-2.5 py-1 text-xs font-black transition ${
+                                        phase.completed
+                                          ? "bg-white text-emerald-700 hover:bg-emerald-100"
+                                          : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                                      }`}
+                                      type="button"
+                                      onClick={() =>
+                                        toggleComplexProjectPhaseCompleted(project.id, phase.id)
+                                      }
+                                    >
+                                      {phase.completed ? "取消完成" : "完成"}
+                                    </button>
+                                    <button
+                                      className="rounded-full bg-white px-2.5 py-1 text-xs font-bold text-[#6f5d78] transition hover:bg-amber-50"
+                                      type="button"
+                                      onClick={() => startComplexProjectPhaseEdit(project, phase)}
+                                    >
+                                      编辑
+                                    </button>
+                                    <button
+                                      className="rounded-full bg-white px-2.5 py-1 text-xs font-bold text-rose-600 transition hover:bg-rose-50"
+                                      type="button"
+                                      onClick={() => deleteComplexProjectPhase(project.id, phase.id)}
+                                    >
+                                      删除
+                                    </button>
+                                  </div>
+                                </motion.div>
+                              );
+                            })
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className="rounded-[1.15rem] border border-dashed border-amber-200 bg-white/60 px-3 py-3 text-center text-xs font-black text-[#8b7b91]">
+                    暂无复杂项目
+                  </div>
+                )}
+              </div>
+            </section>
+          </aside>
+
+          <section
+            className={`p-2 sm:p-3 ${
+              activeWorkspaceTab === "tasks" ? "" : "hidden"
+            }`}
+          >
             <div
-              className="rounded-[1.75rem] border-2 border-dashed border-[#e8d9ed] bg-[#fffaf4] p-4 shadow-inner sm:p-6"
+              className="rounded-[1.5rem] border-2 border-dashed border-[#e8d9ed] bg-[#fffaf4] p-3 shadow-inner sm:p-4"
               ref={journalRef}
               style={{
                 backgroundImage:
                   "repeating-linear-gradient(0deg, rgba(222, 210, 232, 0.18) 0, rgba(222, 210, 232, 0.18) 1px, transparent 1px, transparent 34px)",
               }}
             >
-              <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                  <p className="text-sm font-black text-pink-500">今日计划手帐</p>
-                  <h3 className="mt-1 text-2xl font-black text-[#3f3349]">
-                    {formatDisplayDateWithYear(selectedDate)}
-                  </h3>
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-[1.1rem] border border-pink-100 bg-white/85 px-3 py-2 shadow-sm shadow-pink-100/40">
+                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 lg:flex-nowrap">
+                  <p className="shrink-0 text-base font-black text-pink-600">今日任务工作区</p>
+                  <h2 className="shrink-0 text-sm font-black text-sky-700">任务清单与完成进度</h2>
                 </div>
-                <div className="min-w-48">
-                  <div className="mb-2 flex items-center justify-between text-xs font-black text-[#786981]">
-                    <span>已完成 {completedCount} / {plans.length} 项</span>
-                    <span>{progress}%</span>
-                  </div>
-                  <div className="h-2.5 overflow-hidden rounded-full bg-white">
-                    <div
-                      className="h-full rounded-full bg-[linear-gradient(90deg,#f7a8c7,#a9d6ff,#b9e5c8)]"
-                      style={{ width: `${progress}%` }}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-[1.15rem] border border-white/80 bg-white/55 px-3 py-2">
-                <div className="min-w-0">
-                  <p className="text-xs font-black text-[#5a4b63]">今日任务</p>
-                  <p className="mt-0.5 text-[11px] font-bold text-[#8b7b91]">
-                    {plans.length > 0
-                      ? `计划 ${formatDashboardMinutes(dailyTimeStats.targetTotalMinutes)} · 实际 ${formatDashboardDuration(dailyTimeStats.liveActualSeconds)}`
-                      : "先添加任务，再查看统计"}
-                  </p>
-                </div>
-                <button
-                  className="rounded-full bg-[#8b5cf6] px-3 py-1.5 text-xs font-black text-white shadow-sm shadow-violet-100 transition hover:bg-[#7c4de8] focus:outline-none focus:ring-4 focus:ring-violet-100"
-                  data-export-ignore="true"
-                  type="button"
-                  onClick={() => setIsTimeDashboardOpen(true)}
-                >
-                  查看用时看板
-                </button>
-              </div>
-
-              {createPortal(
-                <AnimatePresence>
-                  {isTimeDashboardOpen ? (
-                    <motion.div
-                    animate={{ opacity: 1 }}
-                    className="fixed inset-0 z-[9999] flex items-center justify-center overflow-y-auto bg-[#2d2433]/45 px-4 py-5 backdrop-blur-sm"
+                <div className="flex w-full shrink-0 flex-wrap items-center justify-end gap-2 sm:w-auto">
+                  <button
+                    className="rounded-full bg-[#ff8fbc] px-3 py-1.5 text-xs font-black text-white shadow-sm shadow-pink-100 transition hover:bg-[#ff79ad] focus:outline-none focus:ring-4 focus:ring-pink-100"
                     data-export-ignore="true"
-                    exit={{ opacity: 0 }}
-                    initial={{ opacity: 0 }}
-                    onClick={() => setIsTimeDashboardOpen(false)}
+                    type="button"
+                    onClick={openTaskForm}
                   >
-                    <motion.div
-                      animate={{ opacity: 1, scale: 1, y: 0 }}
-                      className="w-full max-w-[980px]"
-                      exit={{ opacity: 0, scale: 0.98, y: 8 }}
-                      initial={{ opacity: 0, scale: 0.98, y: 8 }}
-                      transition={{ duration: 0.18 }}
-                      onClick={(event) => event.stopPropagation()}
-                    >
-                      <section
-                        aria-label="每日用时统计看板"
-                        className="max-h-[calc(100vh-2.5rem)] overflow-y-auto rounded-[1.5rem] border border-white/80 bg-white p-4 shadow-2xl shadow-violet-200/40"
-                      >
-                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <h4 className="text-lg font-black text-[#4b3a59]">每日用时统计</h4>
-                    <p className="mt-0.5 text-sm font-bold text-[#8b7b91]">
-                      {plans.length > 0 ? `当前 ${plans.length} 项任务` : "暂无用时数据"}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="rounded-full bg-white px-3 py-1 text-xs font-black text-[#7a6b84]">
-                      {dailyTimeStats.activeTimerCount > 0
-                        ? `${dailyTimeStats.activeTimerCount} 项计时中`
-                        : "实时更新"}
-                    </span>
-                    <button
-                      className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-[#6d5d75] transition hover:bg-slate-200 focus:outline-none focus:ring-4 focus:ring-slate-100"
-                      type="button"
-                      onClick={() => setIsTimeDashboardOpen(false)}
-                    >
-                      关闭
-                    </button>
+                    + 添加今日计划
+                  </button>
+                  <div className="min-w-44 rounded-full border border-pink-100 bg-pink-50/50 px-3 py-1.5">
+                    <div className="mb-1 flex items-center justify-between gap-2 text-[10px] font-black text-[#786981]">
+                      <span className="whitespace-nowrap">
+                        已完成 {completedCount} / {plans.length} 项
+                      </span>
+                      <span>{progress}%</span>
+                    </div>
+                    <div className="h-1.5 overflow-hidden rounded-full bg-white">
+                      <div
+                        className="h-full rounded-full bg-[linear-gradient(90deg,#f7a8c7,#a9d6ff,#b9e5c8)]"
+                        style={{ width: `${progress}%` }}
+                      />
+                    </div>
                   </div>
                 </div>
+              </div>
 
-                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                  {dailyTimeStatCards.map((card) => (
-                    <div
-                      className={`rounded-[1rem] border px-3 py-2.5 ${card.className}`}
-                      key={card.label}
-                    >
-                      <p className="text-xs font-black opacity-75">{card.label}</p>
-                      <p className="mt-1 break-words text-2xl font-black leading-tight">
-                        {card.value}
+              {dailyComplexProjects.length > 0 ? (
+                <section className="mb-3 rounded-[1.2rem] border border-amber-200 bg-[linear-gradient(135deg,#fff7ed_0%,#ecfdf5_100%)] p-2.5 shadow-sm shadow-amber-100/70">
+                  <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <p className="text-xs font-black text-amber-700">长期项目</p>
+                      <p className="text-xs font-bold text-[#7b6c84]">
+                        当前日期相关项目 {dailyComplexProjects.length} 个
                       </p>
-                      <p className="mt-1 text-xs font-bold opacity-75">{card.detail}</p>
                     </div>
-                  ))}
-                  <div className="flex items-center justify-between gap-3 rounded-[1rem] border border-violet-100 bg-violet-50 px-3 py-2.5 text-violet-700">
-                    <div>
-                      <p className="text-xs font-black opacity-75">实际 / 计划</p>
-                      <p className="mt-2 text-sm font-bold leading-tight opacity-75">按目标完成比例</p>
-                    </div>
-                    <div
-                      className="relative flex h-24 w-24 shrink-0 items-center justify-center rounded-full"
-                      style={{
-                        background: `conic-gradient(#8b5cf6 ${dailyTimeStats.actualProgress * 3.6}deg, #eaf2ff 0deg)`,
-                      }}
-                    >
-                      <div className="absolute inset-3 flex flex-col items-center justify-center rounded-full bg-white text-center shadow-sm">
-                        <span className="text-xl font-black text-[#4b3a59]">
-                          {dailyTimeStats.targetTotalMinutes > 0
-                            ? `${dailyTimeStats.actualPercent}%`
-                            : "暂无"}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-3 grid gap-3 lg:grid-cols-2">
-                  <div className="rounded-[1.15rem] border border-white/80 bg-white/70 p-3">
-                    <div className="mb-2 flex items-center justify-between gap-2">
-                      <p className="text-base font-black text-[#5a4b63]">按分类统计</p>
-                      <span className="text-xs font-black text-[#8b7b91]">
-                        {categoryVisualizationItems.length > 0 ? `${categoryVisualizationItems.length} 组` : "暂无用时数据"}
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      <span className="rounded-full bg-white/80 px-3 py-1 text-xs font-black text-emerald-700">
+                        跨日期显示
                       </span>
+                      <button
+                        aria-expanded={!isDailyComplexProjectsCollapsed}
+                        className="rounded-full bg-white px-3 py-1 text-xs font-black text-amber-700 shadow-sm transition hover:bg-amber-50 focus:outline-none focus:ring-4 focus:ring-amber-100"
+                        data-export-ignore="true"
+                        type="button"
+                        onClick={() => toggleTodayWorkspaceSection("longProjects")}
+                      >
+                        {isDailyComplexProjectsCollapsed ? "展开" : "收起"}
+                      </button>
                     </div>
-                    {categoryVisualizationItems.length > 0 ? (
-                      <div className="rounded-[1.2rem] border-2 border-sky-200 bg-sky-100/55 p-2.5 shadow-inner shadow-sky-100">
-                        <div className="grid gap-2 sm:grid-cols-2">
-                          {categoryVisualizationItems.map((item) => (
-                            <div
-                              className="rounded-[1rem] border p-2.5"
-                              key={item.label}
-                              style={{
-                                background: `linear-gradient(180deg, ${item.color}16 0%, #ffffff 100%)`,
-                                borderColor: `${item.color}55`,
-                              }}
-                            >
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="inline-flex min-w-0 items-center gap-1.5 text-sm font-black text-[#5a4b63]">
-                                  <span
-                                    className="h-2.5 w-2.5 shrink-0 rounded-full"
-                                    style={{ backgroundColor: item.color }}
-                                  />
-                                  <span className="truncate">{item.label}</span>
-                                </span>
-                                <span className="shrink-0 rounded-full bg-white/80 px-2 py-0.5 text-sm font-black text-[#8b7b91]">
-                                  {item.count} 项
-                                </span>
-                              </div>
-                              <div className="mt-2 flex h-32 items-end justify-center gap-5 rounded-[0.9rem] bg-white/70 px-2 py-2">
-                                {[
-                                  {
-                                    color: "#7dd3fc",
-                                    height: item.targetHeight,
-                                    label: "计划",
-                                    value: item.targetSeconds,
-                                  },
-                                  {
-                                    color: "#a78bfa",
-                                    height: item.actualHeight,
-                                    label: "实际",
-                                    value: item.actualSeconds,
-                                  },
-                                ].map((bar) => (
-                                  <div className="flex min-w-0 flex-col items-center gap-1" key={bar.label}>
-                                    <span className="whitespace-nowrap text-center text-xs font-black leading-tight text-[#786981]">
-                                      {formatDashboardDuration(bar.value)}
-                                    </span>
-                                    <div className="flex h-20 w-8 items-end rounded-full bg-white p-0.5 shadow-inner">
-                                      <div
-                                        className="w-full rounded-full"
-                                        style={{ backgroundColor: bar.color, height: `${bar.height}%` }}
-                                      />
-                                    </div>
-                                    <span className="text-xs font-black text-[#8b7b91]">{bar.label}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="rounded-[1rem] border border-dashed border-slate-100 bg-slate-50/70 px-3 py-4 text-center text-xs font-black text-[#8b7b91]">
-                        暂无用时数据
-                      </div>
-                    )}
                   </div>
+                  {isDailyComplexProjectsCollapsed ? (
+                    <div className="rounded-[1rem] border border-white/80 bg-white/75 px-3 py-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {dailyComplexProjects.slice(0, 3).map((project) => {
+                          const currentPhase = getCurrentComplexProjectPhase(project, selectedDate);
+                          const projectProgress = getComplexProjectProgress(project);
 
-                  <div className="rounded-[1.15rem] border border-white/80 bg-white/70 p-3">
-                    <div className="mb-2 flex items-center justify-between gap-2">
-                      <p className="text-base font-black text-[#5a4b63]">按优先级统计</p>
-                      <span className="text-xs font-black text-[#8b7b91]">
-                        {priorityVisualizationItems.length > 0 ? `${priorityVisualizationItems.length} 组` : "暂无用时数据"}
-                      </span>
-                    </div>
-                    {priorityVisualizationItems.length > 0 ? (
-                      <div className="rounded-[1.2rem] border-2 border-violet-200 bg-violet-100/55 p-2.5 shadow-inner shadow-violet-100">
-                        <div className="grid gap-2 sm:grid-cols-2">
-                          {priorityVisualizationItems.map((item) => (
-                            <div
-                              className="rounded-[1rem] border p-2.5"
-                              key={item.label}
-                              style={{ backgroundColor: item.backgroundColor, borderColor: item.borderColor }}
+                          return (
+                            <span
+                              className="max-w-full truncate rounded-full bg-amber-50 px-2.5 py-1 text-xs font-black text-[#6f5d78]"
+                              key={project.id}
+                              title={project.title}
                             >
-                              <div className="flex items-start justify-between gap-2">
-                                <div className="min-w-0">
-                                  <p className="truncate text-sm font-black text-[#5a4b63]">
-                                    {item.icon} {item.label}
-                                  </p>
-                                  <p className="mt-0.5 truncate text-xs font-bold text-[#8b7b91]">{item.hint}</p>
-                                </div>
-                                <span className="shrink-0 rounded-full bg-white/80 px-2 py-0.5 text-sm font-black text-[#8b7b91]">
-                                  {item.count} 项
-                                </span>
-                              </div>
-                              <div className="mt-2 flex h-32 items-end justify-center gap-6 rounded-[0.9rem] bg-white/70 px-2 py-2">
-                                <div className="flex w-12 flex-col items-center justify-end gap-1">
-                                  <span className="whitespace-nowrap text-center text-xs font-black leading-tight text-[#786981]">
-                                    {formatDashboardDuration(item.targetSeconds)}
-                                  </span>
-                                  <div className="flex h-20 w-8 items-end rounded-full bg-sky-50 p-0.5">
-                                    <div
-                                      className="w-full rounded-full"
-                                      style={{ backgroundColor: item.targetColor, height: `${item.targetHeight}%` }}
-                                    />
-                                  </div>
-                                  <span className="text-xs font-black text-[#8b7b91]">计划</span>
-                                </div>
-                                <div className="flex w-12 flex-col items-center justify-end gap-1">
-                                  <span className="whitespace-nowrap text-center text-xs font-black leading-tight text-[#786981]">
-                                    {formatDashboardDuration(item.actualSeconds)}
-                                  </span>
-                                  <div className="flex h-20 w-8 items-end rounded-full bg-white p-0.5 shadow-inner">
-                                    <div
-                                      className="w-full rounded-full"
-                                      style={{ backgroundColor: item.accentColor, height: `${item.actualHeight}%` }}
-                                    />
-                                  </div>
-                                  <span className="text-xs font-black text-[#8b7b91]">实际</span>
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="rounded-[1rem] border border-dashed border-slate-100 bg-slate-50/70 px-3 py-4 text-center text-xs font-black text-[#8b7b91]">
-                        暂无用时数据
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="mt-3 rounded-[1.15rem] border border-white/80 bg-white/70 p-3">
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <p className="text-base font-black text-[#5a4b63]">任务计划 / 实际柱状图</p>
-                    <span className="text-xs font-black text-[#8b7b91]">
-                      {taskTimeChartItems.length > 0 ? `${taskTimeChartItems.length} 项有用时数据` : "暂无用时数据"}
-                    </span>
-                  </div>
-                  {taskTimeChartItems.length > 0 ? (
-                    <div className="overflow-x-auto">
-                      <div className="flex min-w-max items-stretch gap-3 rounded-[1rem] bg-[#faf7fb] px-3 pb-3 pt-3">
-                        {taskTimeChartItems.map((item) => (
-                          <div
-                            className="flex w-32 shrink-0 flex-col items-center rounded-[1rem] border border-violet-100 bg-white/80 px-2 py-2 shadow-sm shadow-violet-100/60"
-                            key={item.id}
-                          >
-                            <div className="flex h-36 items-end justify-center gap-2">
-                              {[
-                                {
-                                  colorClass: "bg-sky-300",
-                                  label: "计划",
-                                  value: item.targetSeconds,
-                                },
-                                {
-                                  colorClass: "bg-violet-400",
-                                  label: "实际",
-                                  value: item.actualSeconds,
-                                },
-                              ].map((bar) => (
-                                <div className="flex h-full w-12 flex-col items-center justify-end gap-1" key={bar.label}>
-                                  <span className="whitespace-nowrap text-center text-xs font-black leading-tight text-[#786981]">
-                                    {formatDashboardDuration(bar.value)}
-                                  </span>
-                                  <div className="flex h-24 w-8 items-end rounded-full bg-white p-0.5 shadow-inner">
-                                    <div
-                                      className={`w-full rounded-full ${bar.colorClass}`}
-                                      style={{
-                                        height:
-                                          bar.value > 0
-                                            ? `${Math.max(6, Math.min(100, (bar.value / taskTimeChartMaxSeconds) * 100))}%`
-                                            : "0%",
-                                      }}
-                                    />
-                                  </div>
-                                  <span className="text-xs font-black text-[#8b7b91]">
-                                    {bar.label}
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
-                            <p className="mt-2 w-full truncate text-center text-sm font-black text-[#5a4b63]">
-                              {item.title}
-                            </p>
-                          </div>
-                        ))}
+                              {project.title}
+                              {currentPhase ? ` · ${currentPhase.title}` : ""}
+                              {projectProgress.total > 0 ? ` · ${projectProgress.percent}%` : ""}
+                            </span>
+                          );
+                        })}
+                        {dailyComplexProjects.length > 3 ? (
+                          <span className="rounded-full bg-white px-2.5 py-1 text-xs font-black text-amber-700">
+                            +{dailyComplexProjects.length - 3} 个
+                          </span>
+                        ) : null}
                       </div>
                     </div>
                   ) : (
-                    <div className="rounded-[1rem] border border-dashed border-slate-100 bg-slate-50/70 px-3 py-4 text-center text-xs font-black text-[#8b7b91]">
-                      暂无用时数据
-                    </div>
-                  )}
+                  <div className="grid gap-3 xl:grid-cols-2">
+                    {dailyComplexProjects.map((project) => {
+                      const style = getCategoryStyle(project.category, customCategories);
+                      const priorityOption = getPriorityOption(project.priority);
+                      const projectProgress = getComplexProjectProgress(project);
+                      const currentPhase = getCurrentComplexProjectPhase(project, selectedDate);
+                      const currentPhaseActiveEntry = currentPhase
+                        ? getRunningComplexProjectPhaseEntry(currentPhase)
+                        : null;
+                      const currentPhaseTodaySeconds = currentPhase
+                        ? getComplexProjectPhaseSecondsForDate(currentPhase, selectedDate, timerTick)
+                        : 0;
+                      const currentPhaseTodaySessionCount = currentPhase
+                        ? currentPhase.timeEntries.filter((entry) => entry.date === selectedDate).length
+                        : 0;
+                      const projectTodaySeconds = getComplexProjectSecondsForDate(
+                        project,
+                        selectedDate,
+                        timerTick,
+                      );
+                      const projectTodaySessionCount = getComplexProjectSessionCountForDate(
+                        project,
+                        selectedDate,
+                      );
+                      const projectFeedback =
+                        complexProjectFeedback?.projectId === project.id
+                          ? complexProjectFeedback
+                          : null;
+                      const isCurrentPhaseFeedbackActive =
+                        Boolean(currentPhase) && projectFeedback?.phaseId === currentPhase?.id;
 
-                  <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-bold text-[#7b6c84]">
-                    <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2.5 py-1 text-sky-700">
-                      <span className="h-2 w-2 rounded-full bg-sky-300" />
-                      计划
-                    </span>
-                    <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2.5 py-1 text-violet-700">
-                      <span className="h-2 w-2 rounded-full bg-violet-400" />
-                      实际
-                    </span>
-                    <span className="inline-flex items-center rounded-full bg-white/80 px-2.5 py-1 leading-none">
-                      实际总用时包含未完成任务已记录/计时用时
-                    </span>
-                    <span className="inline-flex items-center rounded-full bg-white/80 px-2.5 py-1 leading-none">
-                      已记录 {formatDashboardMinutes(dailyTimeStats.savedActualMinutes)}
-                    </span>
-                    {dailyTimeStats.unplannedActualSeconds > 0 ? (
-                      <span className="inline-flex items-center rounded-full bg-white/80 px-2.5 py-1 leading-none text-slate-700">
-                        未设目标实际 {formatDashboardDuration(dailyTimeStats.unplannedActualSeconds)} 未纳入差值
-                      </span>
-                    ) : null}
-                    {dailyTimeStats.temporaryTimerSeconds > 0 ? (
-                      <span className="inline-flex items-center rounded-full bg-white/80 px-2.5 py-1 leading-none text-violet-700">
-                        进行中 +{formatTimerSeconds(dailyTimeStats.temporaryTimerSeconds)}
-                      </span>
-                    ) : null}
-                    <span className="inline-flex items-center rounded-full bg-white/80 px-2.5 py-1 leading-none">
-                      未完成计划 {formatDashboardMinutes(dailyTimeStats.unfinishedTargetMinutes)}
-                    </span>
-                    <span className="inline-flex items-center rounded-full bg-white/80 px-2.5 py-1 leading-none">
-                      未填实际 {dailyTimeStats.missingActualCount} 项
-                    </span>
-                  </div>
-                </div>
-              </section>
-                    </motion.div>
-                    </motion.div>
-                  ) : null}
-                </AnimatePresence>,
-                document.body,
-              )}
+                      return (
+                        <article
+                          className={`rounded-[1.2rem] border bg-white/90 p-3 shadow-sm shadow-amber-100 transition ${
+                            projectFeedback?.projectCompleted
+                              ? "border-emerald-200 ring-2 ring-emerald-100"
+                              : "border-amber-100"
+                          }`}
+                          key={project.id}
+                        >
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div className="min-w-0 flex-1">
+                              <div className="mb-2 flex flex-wrap gap-1.5 text-xs font-black">
+                                <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-800">
+                                  长期项目
+                                </span>
+                                <span className={`rounded-full px-2 py-0.5 ${style.bg} ${style.accent}`}>
+                                  {style.emoji} {project.category}
+                                </span>
+                                <span className="rounded-full bg-violet-50 px-2 py-0.5 text-violet-700">
+                                  {priorityOption.icon} {priorityOption.name}
+                                </span>
+                              </div>
+                              <h4 className="break-words text-base font-black text-[#3f3349]">
+                                {project.title}
+                              </h4>
+                              <p className="mt-1 text-xs font-bold text-[#8b7b91]">
+                                {formatDisplayDate(project.startDate)} -{" "}
+                                {formatDisplayDate(project.endDate)}
+                              </p>
+                            </div>
+                            <span
+                              className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-black ${
+                                project.status === "completed"
+                                  ? "bg-sky-50 text-sky-700"
+                                  : "bg-emerald-50 text-emerald-700"
+                              }`}
+                            >
+                              {getComplexProjectStatusLabel(project.status)}
+                            </span>
+                          </div>
+
+                          <div className="mt-3 rounded-[1rem] border border-white/80 bg-amber-50/70 px-3 py-2">
+                            <p className="text-xs font-black text-[#6f5d78]">当前阶段</p>
+                            {currentPhase ? (
+                              <motion.div
+                                animate={
+                                  isCurrentPhaseFeedbackActive
+                                    ? { backgroundColor: "rgba(209, 250, 229, 0.92)" }
+                                    : { backgroundColor: "rgba(255, 255, 255, 0)" }
+                                }
+                                className={`mt-1 rounded-[0.85rem] px-2 py-1 ${
+                                  isCurrentPhaseFeedbackActive
+                                    ? "ring-2 ring-emerald-200"
+                                    : ""
+                                }`}
+                                initial={false}
+                                transition={{ duration: 0.35, ease: "easeOut" }}
+                              >
+                                <p className="break-words text-sm font-black text-[#46394f]">
+                                  {currentPhase.title}
+                                </p>
+	                                <p className="mt-0.5 text-xs font-bold text-[#8b7b91]">
+	                                  {formatDisplayDate(currentPhase.startDate)} -{" "}
+	                                  {formatDisplayDate(currentPhase.endDate)}
+	                                  {currentPhase.completed ? " · 已完成" : ""}
+	                                </p>
+                                  <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                                    <div className="rounded-[0.8rem] bg-white/75 px-2.5 py-2">
+	                                      <p className="text-[10px] font-black text-[#8b7b91]">
+	                                        今日阶段用时
+	                                      </p>
+                                      <button
+                                        className="mt-0.5 rounded-full px-0 text-left text-sm font-black text-[#46394f] transition hover:text-amber-700 disabled:cursor-default disabled:hover:text-[#46394f]"
+                                        disabled={currentPhaseTodaySessionCount === 0}
+                                        type="button"
+                                        onClick={() =>
+                                          openComplexProjectPhaseTimeDetails(
+                                            project.id,
+                                            currentPhase.id,
+                                            selectedDate,
+                                          )
+                                        }
+                                      >
+	                                        {formatDashboardDuration(currentPhaseTodaySeconds)}
+	                                        <span className="ml-2 text-xs text-[#8b7b91]">
+	                                          {currentPhaseTodaySessionCount} 段
+	                                        </span>
+                                      </button>
+                                      {currentPhaseActiveEntry ? (
+                                        <p className="mt-0.5 text-[10px] font-bold text-emerald-700">
+                                          {formatClockTime(currentPhaseActiveEntry.startedAt)} 开始
+                                        </p>
+                                      ) : null}
+                                    </div>
+                                    <button
+                                      className={`rounded-full px-3 py-2 text-xs font-black text-white shadow-sm transition focus:outline-none focus:ring-4 ${
+                                        currentPhaseActiveEntry
+                                          ? "bg-rose-500 hover:bg-rose-600 focus:ring-rose-100"
+                                          : "bg-emerald-500 hover:bg-emerald-600 focus:ring-emerald-100"
+                                      }`}
+                                      type="button"
+                                      onClick={() =>
+                                        toggleComplexProjectPhaseTimer(project.id, currentPhase.id)
+                                      }
+                                    >
+                                      {currentPhaseActiveEntry ? "结束计时" : "开始计时"}
+                                    </button>
+                                  </div>
+	                              </motion.div>
+	                            ) : (
+	                              <p className="mt-1 text-xs font-bold text-[#8b7b91]">
+                                暂无覆盖当天的阶段
+                              </p>
+                            )}
+                          </div>
+
+                          <div className="mt-3">
+                            <div className="flex items-center justify-between gap-2 text-xs font-black text-[#786981]">
+                              <span>
+                                阶段 {projectProgress.completed} / {projectProgress.total}
+                              </span>
+	                              <span>{projectProgress.percent}%</span>
+	                            </div>
+                              <p className="mt-1 text-xs font-bold text-[#8b7b91]">
+                                今日项目用时 {formatDashboardDuration(projectTodaySeconds)} ·{" "}
+                                {projectTodaySessionCount} 段
+                              </p>
+	                            <div className="relative mt-1.5 h-2.5 overflow-hidden rounded-full bg-white">
+                              <motion.div
+                                animate={{ width: `${projectProgress.percent}%` }}
+                                className="h-full rounded-full bg-[linear-gradient(90deg,#f59e0b,#10b981)]"
+                                initial={false}
+                                transition={{ duration: 0.42, ease: "easeOut" }}
+                              />
+                              <AnimatePresence>
+                                {projectFeedback ? (
+                                  <motion.div
+                                    aria-hidden="true"
+                                    animate={{ opacity: 0, x: "100%" }}
+                                    className="absolute inset-0 rounded-full bg-white/75"
+                                    exit={{ opacity: 0 }}
+                                    initial={{ opacity: 0.8, x: "-100%" }}
+                                    key={projectFeedback.id}
+                                    transition={{ duration: 0.72, ease: "easeOut" }}
+                                  />
+                                ) : null}
+                              </AnimatePresence>
+                            </div>
+                            <AnimatePresence>
+                              {projectFeedback ? (
+                                <motion.p
+                                  animate={{ opacity: 1, y: 0 }}
+                                  className="mt-1.5 inline-flex rounded-full bg-emerald-50 px-2 py-1 text-xs font-black text-emerald-700"
+                                  exit={{ opacity: 0, y: -4 }}
+                                  initial={{ opacity: 0, y: 4 }}
+                                  key={projectFeedback.id}
+                                  transition={{ duration: 0.22, ease: "easeOut" }}
+                                >
+                                  {projectFeedback.projectCompleted
+                                    ? "项目阶段全部完成"
+                                    : `阶段完成：${projectFeedback.phaseTitle}`}
+                                </motion.p>
+                              ) : null}
+                            </AnimatePresence>
+                          </div>
+
+                          <div className="mt-3 flex flex-wrap gap-2" data-export-ignore="true">
+                            <button
+                              className="rounded-full bg-white px-3 py-1.5 text-xs font-black text-amber-700 shadow-sm transition hover:bg-amber-50 focus:outline-none focus:ring-4 focus:ring-amber-100"
+                              type="button"
+                              onClick={() => startComplexProjectEdit(project)}
+                            >
+                              详情/编辑
+                            </button>
+                            <button
+                              className="rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-black text-emerald-700 transition hover:bg-emerald-100 focus:outline-none focus:ring-4 focus:ring-emerald-100"
+                              type="button"
+                              onClick={() => toggleComplexProjectCompleted(project.id)}
+                            >
+                              {project.status === "completed" ? "恢复进行中" : "标记完成"}
+                            </button>
+                            <button
+                              className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-black text-slate-600 transition hover:bg-slate-200 focus:outline-none focus:ring-4 focus:ring-slate-100"
+                              type="button"
+                              onClick={() => archiveComplexProject(project.id)}
+                            >
+                              归档
+                            </button>
+                          </div>
+                        </article>
+	                      );
+	                    })}
+	                  </div>
+                  )}
+	                </section>
+              ) : null}
 
               <AnimatePresence>
                 {timerNotice ? (
@@ -8461,11 +14183,16 @@ function App() {
                 <div className="flex flex-col gap-4">
                   {plansByPriority.map((prioritySection) => {
                     const isDragOver = dragOverPriority === prioritySection.id;
-                    const isDropAtSectionEnd =
-                      taskDropTarget?.priority === prioritySection.id &&
-                      taskDropTarget.itemId === null;
+	                    const isDropAtSectionEnd =
+	                      taskDropTarget?.priority === prioritySection.id &&
+	                      taskDropTarget.itemId === null;
+	                    const isPrioritySectionCollapsed =
+	                      todayWorkspaceCollapsed[prioritySection.id];
+	                    const priorityCompletedCount = prioritySection.plans.filter(
+	                      (item) => item.completed,
+	                    ).length;
 
-                    return (
+	                    return (
                       <section
                         className={`rounded-[1.5rem] border-2 border-dashed p-3 transition ${
                           isDragOver ? prioritySection.activeClass : prioritySection.sectionClass
@@ -8493,26 +14220,76 @@ function App() {
                         onDragOver={(event) => handlePriorityDragOver(event, prioritySection.id)}
                         onDrop={(event) => handlePriorityDrop(event, prioritySection.id)}
                       >
-                        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                          <div>
-                            <h4 className="text-sm font-black text-[#4b3a59]">
-                              {prioritySection.icon} {prioritySection.name}
-                            </h4>
-                            <p className="mt-0.5 text-xs font-bold text-[#8b7b91]">
-                              {prioritySection.hint}
-                            </p>
-                          </div>
-                          <span className={`rounded-full px-3 py-1 text-xs font-black ${prioritySection.badgeClass}`}>
-                            {prioritySection.plans.length} 项
-                          </span>
-                        </div>
+                        <div className="mb-2 flex flex-wrap items-center justify-end gap-2">
+	                            <span className={`rounded-full px-3 py-1 text-xs font-black ${prioritySection.badgeClass}`}>
+	                              {priorityCompletedCount} / {prioritySection.plans.length} 项
+	                            </span>
+	                            <button
+	                              aria-expanded={!isPrioritySectionCollapsed}
+	                              className="rounded-full bg-white/85 px-3 py-1 text-xs font-black text-[#6f5d78] shadow-sm transition hover:bg-white focus:outline-none focus:ring-4 focus:ring-white/70"
+	                              data-export-ignore="true"
+	                              type="button"
+	                              onClick={() => toggleTodayWorkspaceSection(prioritySection.id)}
+	                            >
+	                              {isPrioritySectionCollapsed ? "展开" : "收起"}
+	                            </button>
+	                        </div>
 
-                        {prioritySection.plans.length === 0 ? (
-                          <div className="rounded-[1.15rem] border border-dashed border-white/90 bg-white/45 px-4 py-4 text-center text-sm font-black text-[#8b7b91]">
-                            把任务拖到这里
-                          </div>
+	                        {isPrioritySectionCollapsed ? (
+	                          <button
+	                            aria-label={`展开${prioritySection.plans.length}项计划`}
+	                            className={`w-full rounded-[1.15rem] border px-3 py-2 text-left shadow-sm transition hover:-translate-y-0.5 hover:bg-white/90 focus:outline-none focus:ring-4 focus:ring-white/70 ${
+	                              prioritySection.id === "high"
+	                                ? "border-rose-200 bg-rose-50/80 shadow-rose-100/60"
+	                                : prioritySection.id === "medium"
+	                                  ? "border-sky-200 bg-sky-50/80 shadow-sky-100/60"
+	                                  : "border-emerald-200 bg-emerald-50/80 shadow-emerald-100/60"
+	                            }`}
+	                            data-export-ignore="true"
+	                            type="button"
+	                            onClick={() => toggleTodayWorkspaceSection(prioritySection.id)}
+	                          >
+	                            {prioritySection.plans.length === 0 ? (
+	                              <span className="inline-flex rounded-full border border-white/80 bg-white/75 px-2.5 py-1 text-xs font-black text-[#8b7b91] shadow-sm">
+	                                暂无任务
+	                              </span>
+	                            ) : (
+	                              <span className="flex flex-wrap items-center gap-2">
+	                                {prioritySection.plans.slice(0, 4).map((item) => (
+	                                  <span
+	                                    className={`inline-flex max-w-full items-center truncate rounded-full border border-white/80 bg-white/80 px-2.5 py-1 text-xs font-black text-[#6f5d78] shadow-sm ${
+	                                      item.completed ? "opacity-60 line-through" : ""
+	                                    }`}
+	                                    key={item.id}
+	                                    title={item.title}
+	                                  >
+	                                    {item.completed ? "✓ " : ""}
+	                                    {item.title}
+	                                  </span>
+	                                ))}
+	                                {prioritySection.plans.length > 4 ? (
+	                                  <span className={`inline-flex rounded-full border border-white/80 px-2.5 py-1 text-xs font-black shadow-sm ${prioritySection.badgeClass}`}>
+	                                    +{prioritySection.plans.length - 4} 项
+	                                  </span>
+	                                ) : null}
+	                              </span>
+	                            )}
+	                            {isDropAtSectionEnd ? (
+	                              <span className="mt-2 block h-1.5 rounded-full bg-[#ff8fbc] shadow-sm shadow-pink-200" />
+	                            ) : null}
+	                          </button>
+	                        ) : prioritySection.plans.length === 0 ? (
+	                          <div className="rounded-[1.15rem] border border-dashed border-white/90 bg-white/45 px-4 py-4 text-center text-sm font-black text-[#8b7b91]">
+	                            把任务拖到这里
+	                          </div>
                         ) : (
-                          <div className="grid gap-4 md:grid-cols-2">
+                          <div
+                            className="grid justify-start gap-3"
+                            style={{
+                              gridTemplateColumns:
+                                "repeat(auto-fill, minmax(min(100%, 15rem), 17.5rem))",
+                            }}
+                          >
                             {prioritySection.plans.map((item) => {
                     const style = getCategoryStyle(item.category, customCategories);
                     const priorityOption = getPriorityOption(item.priority);
@@ -8566,7 +14343,7 @@ function App() {
                               ? [1, 1.035, 1]
                               : 1,
                         }}
-                        className={`relative overflow-hidden rounded-[1.5rem] border-2 border-dashed p-3 shadow-sm transition ${priorityOption.cardBg} ${priorityOption.cardBorder} ${
+                        className={`relative overflow-hidden rounded-[1.35rem] border-2 border-dashed p-2.5 shadow-sm transition ${priorityOption.cardBg} ${priorityOption.cardBorder} ${
                           item.completed ? "" : "hover:-translate-y-1"
                         } ${
                           highlightedTaskId === item.id
@@ -8613,14 +14390,47 @@ function App() {
                             <CardCompletionBurst feedback={completionFeedback} />
                           ) : null}
                         </AnimatePresence>
-                        <div className="relative flex gap-2.5">
-                          <div className="flex w-16 shrink-0 flex-col items-center gap-1.5">
+                        <button
+                          className={`absolute right-2.5 top-2.5 z-20 flex min-h-7 min-w-[4.4rem] items-center justify-center gap-1 whitespace-nowrap rounded-full px-2 py-1 text-xs font-black transition ${
+                            item.completed
+                              ? "bg-white text-[#7f7188]"
+                              : "bg-[#ff8fbc] text-white shadow-sm shadow-pink-200"
+                          }`}
+                          data-export-ignore="true"
+                          type="button"
+                          onClick={() => handleToggle(item.id)}
+                        >
+                          <AnimatePresence initial={false}>
+                            {item.completed ? (
+                              <motion.span
+                                aria-hidden="true"
+                                className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-[#a7dfbe] text-[9px] text-white"
+                                initial={{ scale: 0, rotate: -45 }}
+                                animate={{ scale: 1, rotate: 0 }}
+                                exit={{ scale: 0, rotate: 45 }}
+                                transition={{ type: "spring", stiffness: 420, damping: 18 }}
+                              >
+                                ✓
+                              </motion.span>
+                            ) : null}
+                          </AnimatePresence>
+                          {item.completed ? "已完成" : "完成"}
+                        </button>
+                        <div className="relative flex gap-2">
+                          <div className="flex w-14 shrink-0 flex-col items-center gap-1.5">
                             <button
                               aria-label="编辑分类"
-                              className="flex h-12 w-12 items-center justify-center overflow-hidden rounded-2xl border border-white/80 bg-white text-[1.18rem] leading-none shadow-sm transition hover:bg-white/90 focus:outline-none focus:ring-4 focus:ring-pink-100"
+                              aria-controls={`task-category-picker-${item.id}`}
+                              aria-expanded={isCategoryEditing}
+                              aria-haspopup="listbox"
+                              className="flex h-11 w-11 items-center justify-center overflow-hidden rounded-xl border border-white/80 bg-white text-[1.1rem] leading-none shadow-sm transition hover:bg-white/90 focus:outline-none focus:ring-4 focus:ring-pink-100"
                               data-export-ignore="true"
                               type="button"
-                              onClick={() => startTaskInlineEdit(item, "category")}
+                              onClick={() =>
+                                isCategoryEditing
+                                  ? cancelTaskInlineEdit(true)
+                                  : startTaskInlineEdit(item, "category")
+                              }
                             >
                               <span
                                 aria-label={style.caption}
@@ -8630,42 +14440,17 @@ function App() {
                                 {style.emoji}
                               </span>
                             </button>
-                            {isCategoryEditing ? (
-                              <select
-                                autoFocus
-                                className={`-mx-2 w-20 rounded-full border border-white bg-white/95 px-1.5 py-1 text-xs font-black outline-none transition focus:border-pink-300 focus:ring-4 focus:ring-pink-100 ${style.accent}`}
-                                data-export-ignore="true"
-                                draggable={false}
-                                value={item.category}
-                                onBlur={() => cancelTaskInlineEdit()}
-                                onChange={(event) => updateTaskCategory(item.id, event.target.value)}
-                                onDragStartCapture={(event) => {
-                                  event.preventDefault();
-                                  event.stopPropagation();
-                                }}
-                              >
-                                {categoryOptions.map((category) => (
-                                  <option key={category.id} value={category.name}>
-                                    {category.icon} {category.name}
-                                  </option>
-                                ))}
-                              </select>
-                            ) : (
-                              <button
-                                className={`max-w-full truncate whitespace-nowrap rounded-full bg-white/80 px-2 py-1 text-xs font-black transition hover:bg-white focus:outline-none focus:ring-4 focus:ring-pink-100 ${style.accent}`}
-                                data-export-ignore="true"
-                                title={item.category}
-                                type="button"
-                                onClick={() => startTaskInlineEdit(item, "category")}
-                              >
-                                {item.category}
-                              </button>
-                            )}
+                            <span
+                              className={`max-w-full truncate whitespace-nowrap rounded-full bg-white/80 px-2 py-1 text-xs font-black ${style.accent}`}
+                              title={item.category}
+                            >
+                              {item.category}
+                            </span>
                           </div>
                           <div className="min-w-0 flex-1">
-                            <div className="mb-1.5 flex flex-nowrap items-center justify-between gap-2">
+                            <div className="mb-1.5 flex items-center gap-2 pr-[4.75rem]">
                               <label
-                                className={`min-w-[8.75rem] shrink-0 rounded-full px-2.5 py-1 text-xs font-black ${priorityOption.badgeClass}`}
+                                className={`min-w-0 max-w-full flex-1 rounded-full px-2.5 py-1 text-xs font-black ${priorityOption.badgeClass}`}
                                 data-export-ignore="true"
                               >
                                 <span className="sr-only">优先级</span>
@@ -8688,32 +14473,6 @@ function App() {
                                   ))}
                                 </select>
                               </label>
-                              <button
-                                className={`flex min-h-7 shrink-0 items-center gap-1.5 rounded-full px-3 py-1 text-xs font-black transition ${
-                                  item.completed
-                                    ? "bg-white text-[#7f7188]"
-                                    : "bg-[#ff8fbc] text-white shadow-sm shadow-pink-200"
-                                }`}
-                                data-export-ignore="true"
-                                type="button"
-                                onClick={() => handleToggle(item.id)}
-                              >
-                                <AnimatePresence initial={false}>
-                                  {item.completed ? (
-                                    <motion.span
-                                      aria-hidden="true"
-                                      className="flex h-4 w-4 items-center justify-center rounded-full bg-[#a7dfbe] text-[10px] text-white"
-                                      initial={{ scale: 0, rotate: -45 }}
-                                      animate={{ scale: 1, rotate: 0 }}
-                                      exit={{ scale: 0, rotate: 45 }}
-                                      transition={{ type: "spring", stiffness: 420, damping: 18 }}
-                                    >
-                                      ✓
-                                    </motion.span>
-                                  ) : null}
-                                </AnimatePresence>
-                                {item.completed ? "已完成" : "完成"}
-                              </button>
                             </div>
                             <div className="flex items-baseline">
                               {isTitleEditing ? (
@@ -8756,34 +14515,59 @@ function App() {
                               )}
                             </div>
                             {isNoteEditing ? (
-                              <textarea
-                                autoFocus
-                                className="mt-1 min-h-12 w-full resize-none rounded-xl border border-pink-100 bg-white/95 px-2.5 py-1.5 text-sm font-bold leading-5 text-[#74667d] outline-none transition focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
-                                data-export-ignore="true"
-                                draggable={false}
-                                maxLength={160}
-                                placeholder="可选"
-                                value={inlineNoteDraft}
-                                onBlur={() => {
-                                  if (shouldSaveTaskInlineBlur()) {
-                                    saveInlineNote(item.id);
-                                  }
-                                }}
-                                onChange={(event) => setInlineNoteDraft(event.target.value)}
-                                onDragStartCapture={(event) => {
-                                  event.preventDefault();
-                                  event.stopPropagation();
-                                }}
-                                onKeyDown={(event) => {
-                                  if (event.key === "Escape") {
-                                    cancelTaskInlineEdit(true);
-                                  }
-                                  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                              <div className="mt-1 space-y-2" data-export-ignore="true">
+                                <textarea
+                                  autoFocus
+                                  className="min-h-16 w-full resize-none rounded-xl border border-pink-100 bg-white/95 px-2.5 py-1.5 text-sm font-bold leading-5 text-[#74667d] outline-none transition focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+                                  draggable={false}
+                                  maxLength={160}
+                                  placeholder="输入备注后点击保存"
+                                  value={inlineNoteDraft}
+                                  onBlur={() => {
+                                    if (shouldSaveTaskInlineBlur()) {
+                                      saveInlineNote(item.id);
+                                    }
+                                  }}
+                                  onChange={(event) => setInlineNoteDraft(event.target.value)}
+                                  onDragStartCapture={(event) => {
                                     event.preventDefault();
-                                    saveInlineNote(item.id);
-                                  }
-                                }}
-                              />
+                                    event.stopPropagation();
+                                  }}
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Escape") {
+                                      cancelTaskInlineEdit(true);
+                                    }
+                                    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                                      event.preventDefault();
+                                      saveInlineNote(item.id);
+                                    }
+                                  }}
+                                />
+                                <div className="flex flex-wrap justify-end gap-2">
+                                  <button
+                                    className="rounded-full bg-white/90 px-3 py-1.5 text-xs font-black text-[#6c5e75] shadow-sm transition hover:bg-white focus:outline-none focus:ring-4 focus:ring-pink-100"
+                                    type="button"
+                                    onMouseDown={(event) => {
+                                      event.preventDefault();
+                                      skipInlineBlurSave.current = true;
+                                    }}
+                                    onClick={() => cancelTaskInlineEdit(true)}
+                                  >
+                                    取消
+                                  </button>
+                                  <button
+                                    className="rounded-full bg-[#ff8fbc] px-3 py-1.5 text-xs font-black text-white shadow-sm shadow-pink-100 transition hover:bg-[#ff79ad] focus:outline-none focus:ring-4 focus:ring-pink-100"
+                                    type="button"
+                                    onMouseDown={(event) => {
+                                      event.preventDefault();
+                                      skipInlineBlurSave.current = true;
+                                    }}
+                                    onClick={() => saveInlineNote(item.id)}
+                                  >
+                                    保存备注
+                                  </button>
+                                </div>
+                              </div>
                             ) : item.note ? (
                               <p
                                 className={`mt-1 whitespace-pre-wrap break-words text-sm leading-5 text-[#74667d] ${
@@ -8796,6 +14580,46 @@ function App() {
                             ) : null}
                           </div>
                         </div>
+
+                        {isCategoryEditing ? (
+                          <div
+                            className="relative z-30 mt-2 rounded-[1rem] border border-white/80 bg-white/95 p-2 shadow-lg shadow-pink-100"
+                            data-export-ignore="true"
+                            draggable={false}
+                            id={`task-category-picker-${item.id}`}
+                            role="listbox"
+                            onDragStartCapture={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                            }}
+                          >
+                            <div className="grid grid-cols-2 gap-1.5">
+                              {categoryOptions.map((category) => {
+                                const isSelectedCategory = category.name === item.category;
+
+                                return (
+                                  <button
+                                    aria-selected={isSelectedCategory}
+                                    className={`flex min-w-0 items-center gap-1.5 rounded-full px-2.5 py-1.5 text-left text-xs font-black transition focus:outline-none focus:ring-4 focus:ring-pink-100 ${
+                                      isSelectedCategory
+                                        ? "bg-pink-50 text-pink-700 ring-1 ring-pink-200"
+                                        : "bg-[#f8f4fb] text-[#6f5d78] hover:bg-white"
+                                    }`}
+                                    key={category.id}
+                                    role="option"
+                                    type="button"
+                                    onClick={() => updateTaskCategory(item.id, category.name)}
+                                  >
+                                    <span aria-hidden="true" className="shrink-0">
+                                      {category.icon}
+                                    </span>
+                                    <span className="min-w-0 truncate">{category.name}</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ) : null}
 
                         <div className="relative mt-2 flex w-full flex-row flex-wrap items-center justify-start gap-2 text-xs font-black text-[#74667d] sm:gap-3">
                           {isTargetMinutesEditing ? (
@@ -8854,90 +14678,79 @@ function App() {
                               目标：{formatMinutes(item.targetMinutes)}
                             </button>
                           )}
-                          <button
+                          {isActualEditing ? (
+                            <form
+                              className="inline-flex min-h-7 shrink-0 items-center rounded-full bg-white/80 px-2.5 py-0.5"
+                              data-export-ignore="true"
+                              onDragStartCapture={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                              }}
+                              onSubmit={(event) => {
+                                event.preventDefault();
+                                saveActualMinutes(item.id);
+                              }}
+                            >
+                              <span className="mr-1 whitespace-nowrap">实际：</span>
+                              <input
+                                autoFocus
+                                className="w-16 bg-transparent text-xs font-black text-[#46394f] outline-none"
+                                draggable={false}
+                                id={`actual-minutes-${item.id}`}
+                                inputMode="numeric"
+                                min={1}
+                                pattern="[1-9][0-9]*"
+                                placeholder="分钟"
+                                step={1}
+                                type="text"
+                                value={actualMinutesDraft}
+                                onBlur={() => {
+                                  if (shouldSaveTaskInlineBlur()) {
+                                    saveActualMinutes(item.id);
+                                  }
+                                }}
+                                onChange={(event) => {
+                                  const nextValue = event.target.value;
+
+                                  if (nextValue === "" || /^[1-9]\d*$/.test(nextValue)) {
+                                    setActualMinutesDraft(nextValue);
+                                  }
+                                  setActualMinutesError("");
+                                }}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Escape") {
+                                    cancelActualMinutesEdit(true);
+                                  }
+                                }}
+                              />
+                            </form>
+                          ) : (
+                            <button
                               aria-label="编辑实际用时"
                               className="inline-flex min-h-7 shrink-0 items-center rounded-full bg-white/70 px-2.5 py-0.5 text-left transition hover:bg-white hover:text-sky-700 focus:outline-none focus:ring-4 focus:ring-sky-100"
                               type="button"
                               onClick={() => startActualMinutesEdit(item)}
                             >
                               实际：{formatMinutes(item.actualMinutes)}
-                              <span className="ml-1 text-[10px] text-sky-500/80">可改</span>
                             </button>
+                          )}
                           {targetMinutesEditError ? (
                             <p className="w-full text-xs font-bold text-rose-600">
                               {targetMinutesEditError}
                             </p>
                           ) : null}
+                          {actualMinutesError ? (
+                            <p className="w-full text-xs font-bold text-rose-600">
+                              {actualMinutesError}
+                            </p>
+                          ) : null}
                         </div>
-                        {isActualEditing ? (
-                          <form
-                            className="relative mt-2 flex w-full flex-col gap-2 rounded-[1rem] bg-white/70 p-2 sm:flex-row sm:items-end"
-                            data-export-ignore="true"
-                            onDragStartCapture={(event) => {
-                              event.preventDefault();
-                              event.stopPropagation();
-                            }}
-                            onSubmit={(event) => {
-                              event.preventDefault();
-                              saveActualMinutes(item.id);
-                            }}
-                          >
-                            <label
-                              className="min-w-0 flex-1 text-xs font-black text-[#6c5e75]"
-                              htmlFor={`actual-minutes-${item.id}`}
-                            >
-                              实际用时（分钟）
-                              <input
-                                className="mt-1 w-full rounded-xl border border-sky-100 bg-white px-3 py-1.5 text-sm font-bold text-[#46394f] outline-none transition placeholder:text-[#b8aabd] focus:border-sky-300 focus:ring-4 focus:ring-sky-100"
-                                draggable={false}
-                                id={`actual-minutes-${item.id}`}
-                                inputMode="numeric"
-                                min={1}
-                                pattern="[1-9][0-9]*"
-                                placeholder="留空表示未设置"
-                                step={1}
-                                type="text"
-                                value={actualMinutesDraft}
-                                onChange={(event) => {
-                                  const nextValue = event.target.value;
-                                  if (nextValue === "" || /^[1-9]\d*$/.test(nextValue)) {
-                                    setActualMinutesDraft(nextValue);
-                                  }
-                                  setActualMinutesError("");
-                                }}
-                              />
-                            </label>
-                            <div className="flex flex-wrap gap-2">
-                              <button
-                                className="rounded-full bg-sky-100 px-3 py-1.5 text-xs font-black text-sky-700 transition hover:bg-sky-200"
-                                type="submit"
-                              >
-                                保存
-                              </button>
-                              <button
-                                className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-[#6c5e75] transition hover:bg-slate-50"
-                                type="button"
-                                onClick={cancelActualMinutesEdit}
-                              >
-                                取消
-                              </button>
-                            </div>
-                            {actualMinutesError ? (
-                              <p className="w-full text-xs font-bold text-rose-600">
-                                {actualMinutesError}
-                              </p>
-                            ) : null}
-                          </form>
-                        ) : null}
 
-                        <div
-                          className="relative mt-2 flex flex-col gap-2 border-t border-white/80 pt-2"
-                          data-export-ignore="true"
-                        >
-                          <div className="flex flex-col gap-1.5 rounded-[1rem] bg-white/45 p-1.5">
-                            <div className="flex flex-row flex-wrap items-center justify-between gap-2">
+                        <div className="relative mt-2" data-export-ignore="true">
+                          <div className="flex flex-col gap-2 text-xs font-black text-[#74667d]">
+                            <div className="flex min-w-0 flex-nowrap items-center gap-1">
                               <div
-                                className={`flex max-w-full flex-wrap items-center gap-1.5 rounded-full border px-2 py-1 text-xs font-black ${
+                                className={`inline-flex min-h-7 shrink-0 flex-nowrap items-center gap-0.5 rounded-full border px-1.5 py-0.5 ${
                                   isTimerRunning
                                     ? "border-sky-200 bg-sky-50 text-sky-800"
                                     : isTimerPaused
@@ -8949,7 +14762,7 @@ function App() {
                                   ⏱ {formatTimerSeconds(timerElapsedSeconds)}
                                 </span>
                                 <button
-                                  className={`rounded-full px-2.5 py-1 text-xs font-black transition disabled:cursor-not-allowed disabled:opacity-55 ${
+                                  className={`rounded-full px-1.5 py-0.5 text-[11px] font-black leading-5 transition disabled:cursor-not-allowed disabled:opacity-55 ${
                                     isTimerRunning
                                       ? "bg-sky-500 text-white shadow-sm shadow-sky-100 hover:bg-sky-600"
                                       : isTimerPaused
@@ -8963,24 +14776,24 @@ function App() {
                                   {timerButtonLabel}
                                 </button>
                               </div>
-                              <div className="flex flex-wrap items-center gap-1.5">
+                              <div className="inline-flex shrink-0 items-center gap-1">
                                 <button
-                                  className="rounded-full bg-white/80 px-2.5 py-1 text-xs font-bold text-[#6c5e75] transition hover:bg-white"
+                                  className="inline-flex min-h-7 items-center rounded-full bg-white/80 px-1.5 py-0.5 text-[11px] font-bold leading-5 text-[#6c5e75] transition hover:bg-white"
                                   type="button"
                                   onClick={() => handleEdit(item)}
                                 >
-                                  备注
+                                  编辑备注
                                 </button>
                                 <button
-                                  className="rounded-full bg-white/80 px-2.5 py-1 text-xs font-bold text-rose-600 transition hover:bg-white"
+                                  className="inline-flex min-h-7 items-center rounded-full bg-white/80 px-1.5 py-0.5 text-[11px] font-bold leading-5 text-rose-600 transition hover:bg-white"
                                   type="button"
                                   onClick={() => handleDelete(item.id)}
                                 >
-                                  删除
+                                  删除计划
                                 </button>
                               </div>
                             </div>
-                            <div className={`flex max-w-full flex-wrap items-center gap-1 ${item.completed ? "opacity-60" : ""}`}>
+                            <div className={`flex max-w-full flex-nowrap items-center gap-0.5 overflow-visible pl-3 ${item.completed ? "opacity-60" : ""}`}>
                               {COUNTDOWN_OPTIONS.map((option) => {
                                 const optionSeconds = option.minutes * 60;
                                 const isActiveCountdown = activeCountdownSeconds === optionSeconds;
@@ -8989,7 +14802,7 @@ function App() {
                                   <span className="group relative inline-flex" key={option.minutes}>
                                     <button
                                       aria-label={option.title}
-                                      className={`flex h-7 w-7 items-center justify-center rounded-full border text-xs font-black transition disabled:cursor-not-allowed disabled:opacity-55 ${
+                                      className={`flex h-6 w-6 items-center justify-center rounded-full border text-[11px] font-black transition disabled:cursor-not-allowed disabled:opacity-55 ${
                                         isActiveCountdown ? option.activeClass : option.baseClass
                                       } ${isActiveCountdown && isCountdownRunning ? "ring-2 ring-white/80" : ""}`}
                                       disabled={item.completed}
@@ -9005,8 +14818,32 @@ function App() {
                                 );
                               })}
                               {hasCountdownTiming ? (
-                                <span className="ml-1 whitespace-nowrap rounded-full bg-white/80 px-2 py-0.5 text-xs font-black tabular-nums text-amber-800">
-                                  ⏳ {formatTimerSeconds(countdownRemainingSeconds)}
+                                <span className="inline-flex min-h-6 shrink-0 items-center gap-0.5 rounded-full border border-amber-100 bg-white/85 px-1 py-0.5 text-[11px] font-black tabular-nums text-amber-800 shadow-sm">
+                                  <span className="whitespace-nowrap">
+                                    ⏳ {formatTimerSeconds(countdownRemainingSeconds)}
+                                  </span>
+                                  <button
+                                    aria-label={isCountdownRunning ? "暂停倒计时" : "继续倒计时"}
+                                    className={`rounded-full px-1 py-0 text-[10px] font-black leading-5 transition disabled:cursor-not-allowed disabled:opacity-55 ${
+                                      isCountdownRunning
+                                        ? "bg-amber-500 text-white hover:bg-amber-600"
+                                        : "bg-emerald-500 text-white hover:bg-emerald-600"
+                                    }`}
+                                    disabled={item.completed}
+                                    type="button"
+                                    onClick={() => toggleCountdownTimer(item)}
+                                  >
+                                    {isCountdownRunning ? "暂停" : "继续"}
+                                  </button>
+                                  <button
+                                    aria-label="结束倒计时"
+                                    className="rounded-full bg-rose-50 px-1 py-0 text-[10px] font-black leading-5 text-rose-600 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-55"
+                                    disabled={item.completed}
+                                    type="button"
+                                    onClick={() => endCountdownTimer(item)}
+                                  >
+                                    结束
+                                  </button>
                                 </span>
                               ) : null}
                             </div>
@@ -9027,7 +14864,11 @@ function App() {
               )}
             </div>
           </section>
+          {activeWorkspaceTab === "projects" ? complexProjectWorkspace : null}
+          {activeWorkspaceTab === "time" ? timeStatsWorkspace : null}
+          {activeWorkspaceTab === "export" ? exportWorkspace : null}
         </section>
+        </div>
 
         <div
           aria-hidden="true"
@@ -9052,6 +14893,27 @@ function App() {
             />
           </div>
         </div>
+        {ganttExportProject ? (
+          <div
+            aria-hidden="true"
+            style={{
+              left: "-10000px",
+              pointerEvents: "none",
+              position: "fixed",
+              top: 0,
+              width: `${ganttExportWidth}px`,
+              zIndex: 0,
+            }}
+          >
+            <div
+              ref={ganttExportRef}
+              className="rounded-[1.35rem] border border-amber-100 bg-[#fffaf4] p-3"
+              style={{ width: `${ganttExportWidth}px` }}
+            >
+              <ComplexProjectGanttChart project={ganttExportProject} />
+            </div>
+          </div>
+        ) : null}
       </div>
     </main>
   );
