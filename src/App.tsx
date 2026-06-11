@@ -33,6 +33,10 @@ const primaryPencilCaseSticker = new URL("./assets/export-stickers/primary-penci
 const primaryRabbitSticker = new URL("./assets/export-stickers/primary-rabbit.png", import.meta.url).href;
 const primaryRainbowCloudSticker = new URL("./assets/export-stickers/primary-rainbow-cloud.png", import.meta.url).href;
 const primaryStrawberrySticker = new URL("./assets/export-stickers/primary-strawberry.png", import.meta.url).href;
+const avatarImageModules = import.meta.glob("./assets/avatars/*.png", {
+  eager: true,
+  import: "default",
+}) as Record<string, string>;
 
 const STORAGE_KEY = "daily-planner-journal-v1";
 const LEGACY_SYNC_STATE_KEY = "daily-planner-journal-sync-v1";
@@ -40,6 +44,7 @@ const DELETED_ITEM_IDS_KEY = "daily-planner-journal-deleted-v1";
 const CUSTOM_CATEGORIES_KEY = "daily-planner-journal-custom-categories-v1";
 const COMPLEX_PROJECTS_KEY = "daily-planner-journal-complex-projects-v1";
 const MOOD_BOOK_KEY = "daily-planner-journal-moods-v1";
+const USER_PROFILE_KEY = "daily-planner-journal-user-profile-v1";
 const SYNC_DEBOUNCE_MS = 800;
 const COUNTDOWN_OPTIONS = [
   {
@@ -121,7 +126,7 @@ const PRIORITY_OPTIONS = [
   },
 ] as const;
 type TaskPriority = (typeof PRIORITY_OPTIONS)[number]["id"];
-const DEFAULT_PRIORITY: TaskPriority = "medium";
+const DEFAULT_PRIORITY: TaskPriority = "high";
 const SORT_ORDER_STEP = 1000;
 const MOOD_OPTIONS = [
   {
@@ -176,10 +181,132 @@ const MOOD_OPTIONS = [
 type MoodId = (typeof MOOD_OPTIONS)[number]["id"];
 const DEFAULT_MOOD_ID: MoodId = "calm";
 
+const AVATAR_LIBRARY = [
+  { id: "animal-capybara-cute", group: "特别款" },
+  { id: "animal-bee-pig", group: "特别款" },
+  { id: "animal-hardworking-bee", group: "特别款" },
+  { id: "animal-calf", group: "特别款" },
+  { id: "animal-dragon", group: "特别款" },
+  { id: "person-anesthesiologist-candy", group: "特别款" },
+  { id: "person-office-doctor-girl", group: "特别款" },
+  { id: "nature-flower-field", group: "自然" },
+  { id: "nature-sunflower", group: "自然" },
+  { id: "nature-daisy", group: "自然" },
+  { id: "nature-sprout", group: "自然" },
+  { id: "nature-green-leaves", group: "自然" },
+  { id: "nature-garden", group: "自然" },
+  { id: "nature-lavender", group: "自然" },
+  { id: "nature-maple-leaf", group: "自然" },
+  { id: "nature-sunrise-mountains", group: "自然" },
+  { id: "nature-smiling-sun", group: "自然" },
+  { id: "nature-moon-stars", group: "自然" },
+  { id: "nature-night-stars", group: "自然" },
+  { id: "nature-rainbow-cloud", group: "自然" },
+  { id: "nature-ocean-wave", group: "自然" },
+  { id: "nature-snowflake", group: "自然" },
+  { id: "animal-cat", group: "动物" },
+  { id: "animal-dog", group: "动物" },
+  { id: "animal-rabbit", group: "动物" },
+  { id: "animal-bird", group: "动物" },
+  { id: "animal-deer", group: "动物" },
+  { id: "animal-panda", group: "动物" },
+  { id: "animal-fox", group: "动物" },
+  { id: "animal-squirrel", group: "动物" },
+  { id: "animal-penguin", group: "动物" },
+  { id: "animal-dolphin", group: "动物" },
+  { id: "animal-butterfly", group: "动物" },
+  { id: "animal-bumblebee-basic", group: "动物" },
+  { id: "animal-turtle", group: "动物" },
+  { id: "animal-koala", group: "动物" },
+  { id: "animal-owl", group: "动物" },
+  { id: "person-boy-blue", group: "人物" },
+  { id: "person-girl-yellow", group: "人物" },
+  { id: "person-doctor-boy", group: "人物" },
+  { id: "person-nurse", group: "人物" },
+  { id: "person-teacher", group: "人物" },
+  { id: "person-research-doctor", group: "人物" },
+  { id: "person-boy-green", group: "人物" },
+  { id: "person-girl-pink", group: "人物" },
+  { id: "person-sport-boy", group: "人物" },
+  { id: "person-calm-girl", group: "人物" },
+  { id: "person-sunshine-girl", group: "人物" },
+  { id: "person-happy-boy", group: "人物" },
+  { id: "person-longhair-girl", group: "人物" },
+  { id: "person-glasses-boy", group: "人物" },
+  { id: "person-apron-girl", group: "人物" },
+  { id: "person-little-artist", group: "人物" },
+  { id: "person-medical-girl", group: "人物" },
+  { id: "person-purple-girl", group: "人物" },
+  { id: "person-blue-boy", group: "人物" },
+  { id: "person-yellow-hat-girl", group: "人物" },
+  { id: "workplace-executive-woman-navy", group: "职场" },
+  { id: "workplace-executive-man-navy", group: "职场" },
+  { id: "workplace-project-manager-woman", group: "职场" },
+  { id: "workplace-glasses-man", group: "职场" },
+  { id: "workplace-young-man-pen", group: "职场" },
+  { id: "workplace-medical-manager-woman", group: "职场" },
+  { id: "workplace-tablet-woman", group: "职场" },
+  { id: "workplace-young-business-man", group: "职场" },
+  { id: "workplace-notebook-woman", group: "职场" },
+  { id: "workplace-tie-man", group: "职场" },
+  { id: "workplace-white-shirt-woman", group: "职场" },
+  { id: "workplace-senior-man", group: "职场" },
+] as const;
+const DEFAULT_AVATAR_ID = "animal-capybara-cute";
+type AvatarId = (typeof AVATAR_LIBRARY)[number]["id"];
+type AvatarOption = (typeof AVATAR_LIBRARY)[number] & {
+  src: string;
+};
+type UserProfile = {
+  avatarId: AvatarId;
+  updatedAt: number;
+};
+
+function getAvatarSrc(id: string): string {
+  return (
+    avatarImageModules[`./assets/avatars/${id}.png`] ??
+    avatarImageModules[`./assets/avatars/${DEFAULT_AVATAR_ID}.png`] ??
+    ""
+  );
+}
+
+const AVATAR_OPTIONS: AvatarOption[] = AVATAR_LIBRARY.map((avatar) => ({
+  ...avatar,
+  src: getAvatarSrc(avatar.id),
+}));
+const AVATAR_GROUPS = Array.from(
+  AVATAR_OPTIONS.reduce<Map<string, AvatarOption[]>>((groups, avatar) => {
+    const groupAvatars = groups.get(avatar.group) ?? [];
+    groupAvatars.push(avatar);
+    groups.set(avatar.group, groupAvatars);
+    return groups;
+  }, new Map<string, AvatarOption[]>()),
+).map(([group, avatars]) => ({ group, avatars }));
+
+function getAvatarOption(avatarId: string | null | undefined): AvatarOption {
+  return (
+    AVATAR_OPTIONS.find((avatar) => avatar.id === avatarId) ??
+    AVATAR_OPTIONS.find((avatar) => avatar.id === DEFAULT_AVATAR_ID) ??
+    AVATAR_OPTIONS[0]
+  );
+}
+
+function isAvatarId(value: unknown): value is AvatarId {
+  return typeof value === "string" && AVATAR_OPTIONS.some((avatar) => avatar.id === value);
+}
+
 type CustomCategory = {
   id: string;
   name: string;
   icon: string;
+};
+
+type TaskTimeEntry = {
+  id: string;
+  date: string;
+  startedAt: number;
+  endedAt?: number;
+  durationSeconds: number;
 };
 
 type PlanItem = {
@@ -192,6 +319,7 @@ type PlanItem = {
   priority: TaskPriority;
   targetMinutes?: number;
   actualMinutes?: number;
+  timeEntries: TaskTimeEntry[];
   sortOrder?: number;
   createdAt: number;
   updatedAt?: number;
@@ -283,6 +411,7 @@ type CloudPayload = {
   customCategories: CustomCategory[];
   complexProjects: ComplexProject[];
   moodBook: MoodBook;
+  userProfile: UserProfile;
 };
 
 type AuthMode = "sign-in" | "sign-up" | "forgot" | "update-password";
@@ -403,6 +532,10 @@ type ComplexProjectPhaseEdit = {
 type ComplexProjectPhaseTimeDetailTarget = {
   projectId: string;
   phaseId: string;
+  date: string;
+};
+type TaskTimeDetailTarget = {
+  itemId: string;
   date: string;
 };
 
@@ -2892,6 +3025,41 @@ function saveMoodBook(moodBook: MoodBook) {
   }
 }
 
+function createDefaultUserProfile(): UserProfile {
+  return {
+    avatarId: DEFAULT_AVATAR_ID,
+    updatedAt: 0,
+  };
+}
+
+function normalizeUserProfile(value: unknown): UserProfile {
+  if (!isPlainObject(value)) {
+    return createDefaultUserProfile();
+  }
+
+  return {
+    avatarId: isAvatarId(value.avatarId) ? value.avatarId : DEFAULT_AVATAR_ID,
+    updatedAt: normalizeTimestamp(value.updatedAt) ?? 0,
+  };
+}
+
+function loadUserProfile(): UserProfile {
+  try {
+    const rawData = window.localStorage.getItem(USER_PROFILE_KEY);
+    return normalizeUserProfile(rawData ? JSON.parse(rawData) : {});
+  } catch {
+    return createDefaultUserProfile();
+  }
+}
+
+function saveUserProfile(userProfile: UserProfile) {
+  try {
+    window.localStorage.setItem(USER_PROFILE_KEY, JSON.stringify(userProfile));
+  } catch {
+    // localStorage may be unavailable in private or restricted browser modes.
+  }
+}
+
 const COMPLEX_PROJECT_STATUSES: ComplexProjectStatus[] = ["active", "completed", "archived"];
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -3017,6 +3185,32 @@ function normalizeDurationSeconds(value: unknown): number {
 
 function getTimestampDateValue(timestamp: number): string {
   return formatDateInput(new Date(timestamp));
+}
+
+function normalizeTaskTimeEntry(value: unknown, fallbackDate: string): TaskTimeEntry | null {
+  if (!isPlainObject(value)) {
+    return null;
+  }
+
+  const startedAt = normalizeTimestamp(value.startedAt);
+
+  if (!startedAt) {
+    return null;
+  }
+
+  const endedAt = normalizeTimestamp(value.endedAt);
+  const date = normalizeDateInputString(value.date, getTimestampDateValue(startedAt) || fallbackDate);
+  const computedDuration =
+    endedAt && endedAt >= startedAt ? Math.floor((endedAt - startedAt) / 1000) : 0;
+  const durationSeconds = normalizeDurationSeconds(value.durationSeconds) || computedDuration;
+
+  return {
+    id: normalizeText(value.id) || createId(),
+    date,
+    startedAt,
+    ...(endedAt && endedAt >= startedAt ? { endedAt } : {}),
+    durationSeconds,
+  };
 }
 
 function normalizeComplexProjectPhaseTimeEntry(
@@ -3203,7 +3397,10 @@ function hasPlans(planBook: PlanBook): boolean {
 }
 
 function getItemTime(item: PlanItem): number {
-  return item.updatedAt ?? item.createdAt ?? 0;
+  return Math.max(
+    item.updatedAt ?? item.createdAt ?? 0,
+    ...item.timeEntries.map((entry) => entry.endedAt ?? entry.startedAt),
+  );
 }
 
 function normalizeMinutes(value: unknown): number | undefined {
@@ -3233,6 +3430,44 @@ function normalizeSortOrder(value: unknown, fallbackIndex: number): number {
 
 function getPlanSortOrder(item: PlanItem, fallbackIndex = 0): number {
   return normalizeSortOrder(item.sortOrder, fallbackIndex);
+}
+
+function normalizePlanItem(
+  value: unknown,
+  fallbackDate: string,
+  fallbackIndex = 0,
+): PlanItem | null {
+  if (!isPlainObject(value)) {
+    return null;
+  }
+
+  const createdAt = normalizeTimestamp(value.createdAt) ?? normalizeTimestamp(value.updatedAt) ?? Date.now();
+  const updatedAt = normalizeTimestamp(value.updatedAt) ?? createdAt;
+  const date = normalizeDateInputString(value.date, fallbackDate);
+  const title = normalizeText(value.title, "未命名计划");
+  const category = normalizeText(value.category, "其他") || "其他";
+  const timeEntries = Array.isArray(value.timeEntries)
+    ? value.timeEntries
+        .map((entry) => normalizeTaskTimeEntry(entry, date))
+        .filter((entry): entry is TaskTimeEntry => Boolean(entry))
+        .sort((left, right) => left.startedAt - right.startedAt)
+    : [];
+
+  return {
+    id: normalizeText(value.id) || createId(),
+    date,
+    title: title || "未命名计划",
+    category,
+    note: normalizeText(value.note),
+    completed: value.completed === true,
+    priority: normalizePriority(value.priority),
+    targetMinutes: normalizeMinutes(value.targetMinutes),
+    actualMinutes: normalizeMinutes(value.actualMinutes),
+    timeEntries,
+    sortOrder: normalizeSortOrder(value.sortOrder, fallbackIndex),
+    createdAt,
+    updatedAt,
+  };
 }
 
 function getPriorityIndex(priority: unknown): number {
@@ -3362,17 +3597,16 @@ function movePlanItemToPosition(
 
 function normalizePlanBook(planBook: PlanBook): PlanBook {
   return Object.entries(planBook).reduce<PlanBook>((result, [date, items]) => {
-    result[date] = sortPlansByDisplayOrder(
-      items.map((item, index) => ({
-        ...item,
-        date: item.date || date,
-        priority: normalizePriority(item.priority),
-        targetMinutes: normalizeMinutes(item.targetMinutes),
-        actualMinutes: normalizeMinutes(item.actualMinutes),
-        sortOrder: normalizeSortOrder(item.sortOrder, index),
-        updatedAt: item.updatedAt ?? item.createdAt ?? Date.now(),
-      })),
-    );
+    if (!Array.isArray(items)) {
+      return result;
+    }
+
+    const fallbackDate = normalizeDateInputString(date, formatDateInput(new Date()));
+    const normalizedItems = items
+      .map((item, index) => normalizePlanItem(item, fallbackDate, index))
+      .filter((item): item is PlanItem => Boolean(item));
+
+    result[fallbackDate] = sortPlansByDisplayOrder(normalizedItems);
     return result;
   }, {});
 }
@@ -3385,7 +3619,8 @@ function normalizePayload(payload: unknown): CloudPayload {
       "deletedItemIds" in payload ||
       "customCategories" in payload ||
       "complexProjects" in payload ||
-      "moodBook" in payload)
+      "moodBook" in payload ||
+      "userProfile" in payload)
   ) {
     const cloudPayload = payload as Partial<CloudPayload>;
 
@@ -3399,6 +3634,7 @@ function normalizePayload(payload: unknown): CloudPayload {
         normalizeComplexProjectBook(cloudPayload.complexProjects),
       ),
       moodBook: normalizeMoodBook(cloudPayload.moodBook),
+      userProfile: normalizeUserProfile(cloudPayload.userProfile),
     };
   }
 
@@ -3408,6 +3644,7 @@ function normalizePayload(payload: unknown): CloudPayload {
     customCategories: [],
     complexProjects: [],
     moodBook: {},
+    userProfile: createDefaultUserProfile(),
   };
 }
 
@@ -3429,15 +3666,12 @@ function mergePlanBooks(
         return;
       }
 
-      const normalizedItem = {
-        ...item,
-        date: item.date || date,
-        priority: normalizePriority(item.priority),
-        targetMinutes: normalizeMinutes(item.targetMinutes),
-        actualMinutes: normalizeMinutes(item.actualMinutes),
-        sortOrder: normalizeSortOrder(item.sortOrder, index),
-        updatedAt: item.updatedAt ?? item.createdAt ?? Date.now(),
-      };
+      const normalizedItem = normalizePlanItem(item, date, index);
+
+      if (!normalizedItem) {
+        return;
+      }
+
       const existingItem = itemMap.get(item.id);
 
       if (!existingItem || getItemTime(normalizedItem) >= getItemTime(existingItem)) {
@@ -3504,6 +3738,10 @@ function mergeMoodBooks(localMoodBook: MoodBook, cloudMoodBook: MoodBook): MoodB
   return normalizeMoodBook(merged);
 }
 
+function mergeUserProfiles(localUserProfile: UserProfile, cloudUserProfile: UserProfile): UserProfile {
+  return cloudUserProfile.updatedAt > localUserProfile.updatedAt ? cloudUserProfile : localUserProfile;
+}
+
 function mergeComplexProjectBooks(
   localComplexProjectBook: ComplexProjectBook,
   cloudComplexProjectBook: ComplexProjectBook,
@@ -3530,6 +3768,7 @@ function createCloudPayload(
   customCategories: CustomCategory[],
   complexProjectBook: ComplexProjectBook = {},
   moodBook: MoodBook = {},
+  userProfile: UserProfile = createDefaultUserProfile(),
 ): CloudPayload {
   return {
     plansByDate: normalizePlanBook(planBook),
@@ -3537,6 +3776,7 @@ function createCloudPayload(
     customCategories: normalizeCustomCategories(customCategories),
     complexProjects: getComplexProjectsForPayload(complexProjectBook),
     moodBook: normalizeMoodBook(moodBook),
+    userProfile: normalizeUserProfile(userProfile),
   };
 }
 
@@ -3607,6 +3847,67 @@ function formatTimerSeconds(seconds: number): string {
 
 function timerSecondsToActualMinutes(seconds: number): number {
   return Math.max(1, Math.ceil(Math.max(0, seconds) / 60));
+}
+
+function getTaskTimeEntries(item: PlanItem): TaskTimeEntry[] {
+  return item.timeEntries ?? [];
+}
+
+function getTaskTimeEntrySeconds(entry: TaskTimeEntry, now = Date.now()): number {
+  if (entry.endedAt) {
+    return Math.max(
+      entry.durationSeconds,
+      Math.floor(Math.max(0, entry.endedAt - entry.startedAt) / 1000),
+    );
+  }
+
+  return entry.durationSeconds + Math.floor(Math.max(0, now - entry.startedAt) / 1000);
+}
+
+function getTaskTimeTotalSeconds(item: PlanItem, now = Date.now()): number {
+  return getTaskTimeEntries(item).reduce(
+    (totalSeconds, entry) => totalSeconds + getTaskTimeEntrySeconds(entry, now),
+    0,
+  );
+}
+
+function getTaskTimeSecondsForDate(
+  item: PlanItem,
+  dateValue: string,
+  now = Date.now(),
+): number {
+  return getTaskTimeEntries(item)
+    .filter((entry) => entry.date === dateValue)
+    .reduce((totalSeconds, entry) => totalSeconds + getTaskTimeEntrySeconds(entry, now), 0);
+}
+
+function getTaskTimeEntriesForDate(item: PlanItem, dateValue: string): TaskTimeEntry[] {
+  return getTaskTimeEntries(item)
+    .filter((entry) => entry.date === dateValue)
+    .sort((left, right) => left.startedAt - right.startedAt);
+}
+
+function getRunningTaskTimeEntry(item: PlanItem): TaskTimeEntry | null {
+  return getTaskTimeEntries(item).find((entry) => !entry.endedAt) ?? null;
+}
+
+function stopRunningTaskTimeEntries(entries: TaskTimeEntry[], now = Date.now()): TaskTimeEntry[] {
+  return entries.map((entry) => {
+    if (entry.endedAt) {
+      return entry;
+    }
+
+    const durationSeconds = Math.max(
+      entry.durationSeconds,
+      Math.floor(Math.max(0, now - entry.startedAt) / 1000),
+    );
+
+    return {
+      ...entry,
+      endedAt: now,
+      durationSeconds,
+    };
+  });
 }
 
 function getComplexProjectPhaseEntrySeconds(
@@ -3772,6 +4073,73 @@ function createPhaseTimeEntriesExcelBlob({
           <th>序号</th>
           <th>复杂项目</th>
           <th>阶段</th>
+          <th>日期</th>
+          <th>开始时间</th>
+          <th>结束时间</th>
+          <th>持续时间</th>
+          <th>持续秒数</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.join("")}
+      </tbody>
+    </table>
+  </body>
+</html>`;
+
+  return new Blob([`\ufeff${html}`], {
+    type: "application/vnd.ms-excel;charset=utf-8",
+  });
+}
+
+function createTaskTimeEntriesExcelBlob({
+  category,
+  date,
+  entries,
+  now,
+  taskTitle,
+}: {
+  category: string;
+  date: string;
+  entries: TaskTimeEntry[];
+  now: number;
+  taskTitle: string;
+}): Blob {
+  const rows = entries.map((entry, index) => {
+    const durationSeconds = getTaskTimeEntrySeconds(entry, now);
+    const endedAtLabel = entry.endedAt ? formatDateTime(entry.endedAt) : "进行中";
+
+    return `
+      <tr>
+        <td>${index + 1}</td>
+        <td>${escapeSpreadsheetCell(taskTitle)}</td>
+        <td>${escapeSpreadsheetCell(category)}</td>
+        <td>${escapeSpreadsheetCell(date)}</td>
+        <td>${escapeSpreadsheetCell(formatDateTime(entry.startedAt))}</td>
+        <td>${escapeSpreadsheetCell(endedAtLabel)}</td>
+        <td>${escapeSpreadsheetCell(formatDashboardDuration(durationSeconds))}</td>
+        <td>${durationSeconds}</td>
+      </tr>`;
+  });
+  const html = `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      table { border-collapse: collapse; font-family: Arial, "Microsoft YaHei", sans-serif; }
+      th, td { border: 1px solid #d9e2ec; padding: 8px 10px; white-space: nowrap; }
+      th { background: #eff6ff; font-weight: 700; }
+      caption { padding: 10px; font-size: 16px; font-weight: 700; text-align: left; }
+    </style>
+  </head>
+  <body>
+    <table>
+      <caption>${escapeSpreadsheetCell(taskTitle)} ${escapeSpreadsheetCell(date)} 计时明细</caption>
+      <thead>
+        <tr>
+          <th>序号</th>
+          <th>任务</th>
+          <th>分类</th>
           <th>日期</th>
           <th>开始时间</th>
           <th>结束时间</th>
@@ -8334,6 +8702,7 @@ function App() {
     loadComplexProjectBook(),
   );
   const [moodBook, setMoodBook] = useState<MoodBook>(() => loadMoodBook());
+  const [userProfile, setUserProfile] = useState<UserProfile>(() => loadUserProfile());
   const [complexProjectForm, setComplexProjectForm] = useState<ComplexProjectForm>(() =>
     createEmptyComplexProjectForm(selectedDate),
   );
@@ -8350,6 +8719,9 @@ function App() {
   const [complexProjectPhaseMessage, setComplexProjectPhaseMessage] = useState<string>("");
   const [phaseTimeDetailTarget, setPhaseTimeDetailTarget] =
     useState<ComplexProjectPhaseTimeDetailTarget | null>(null);
+  const [taskTimeDetailTarget, setTaskTimeDetailTarget] = useState<TaskTimeDetailTarget | null>(
+    null,
+  );
   const [ganttPreviewProjectId, setGanttPreviewProjectId] = useState<string | null>(null);
   const [ganttExportProjectId, setGanttExportProjectId] = useState<string | null>(null);
   const [ganttExportWidth, setGanttExportWidth] = useState<number>(1020);
@@ -8402,7 +8774,7 @@ function App() {
     confirmPassword: "",
   });
   const [authStatus, setAuthStatus] = useState<string>(() =>
-    isSupabaseConfigured ? "未登录时仍可本地使用" : "Supabase 环境变量未配置，当前为本地模式",
+    isSupabaseConfigured ? "" : "Supabase 环境变量未配置，请先配置登录服务",
   );
   const [cloudStatus, setCloudStatus] = useState<string>(() =>
     isSupabaseConfigured ? "本地模式" : "Supabase 环境变量未配置，本地模式",
@@ -8410,7 +8782,9 @@ function App() {
   const [isAuthPanelOpen, setIsAuthPanelOpen] = useState<boolean>(() =>
     hasPasswordRecoveryMarker(),
   );
+  const [isAvatarPickerOpen, setIsAvatarPickerOpen] = useState<boolean>(false);
   const [isAuthBusy, setIsAuthBusy] = useState<boolean>(false);
+  const [isAuthChecking, setIsAuthChecking] = useState<boolean>(() => isSupabaseConfigured);
   const [isCloudSaving, setIsCloudSaving] = useState<boolean>(false);
   const [isMoodPanelOpen, setIsMoodPanelOpen] = useState<boolean>(false);
   const [moodDraftId, setMoodDraftId] = useState<MoodId>(DEFAULT_MOOD_ID);
@@ -8432,9 +8806,11 @@ function App() {
   const latestPlanBook = useRef<PlanBook>(plansByDate);
   const latestComplexProjectBook = useRef<ComplexProjectBook>(complexProjectBook);
   const latestMoodBook = useRef<MoodBook>(moodBook);
+  const latestUserProfile = useRef<UserProfile>(userProfile);
   const latestDeletedItemIds = useRef<string[]>(deletedItemIds);
   const latestCustomCategories = useRef<CustomCategory[]>(customCategories);
   const currentUserId = currentUser?.id ?? null;
+  const selectedAvatar = getAvatarOption(userProfile.avatarId);
   const ganttExportProject = ganttExportProjectId
     ? complexProjectBook[ganttExportProjectId] ?? null
     : null;
@@ -8619,6 +8995,20 @@ function App() {
     (totalSeconds, entry) => totalSeconds + getComplexProjectPhaseEntrySeconds(entry, timerTick),
     0,
   );
+  const taskTimeDetailItem =
+    taskTimeDetailTarget
+      ? (plansByDate[taskTimeDetailTarget.date] ?? []).find(
+          (item) => item.id === taskTimeDetailTarget.itemId,
+        ) ?? null
+      : null;
+  const taskTimeDetailEntries =
+    taskTimeDetailItem && taskTimeDetailTarget
+      ? getTaskTimeEntriesForDate(taskTimeDetailItem, taskTimeDetailTarget.date)
+      : [];
+  const taskTimeDetailTotalSeconds = taskTimeDetailEntries.reduce(
+    (totalSeconds, entry) => totalSeconds + getTaskTimeEntrySeconds(entry, timerTick),
+    0,
+  );
   const planSearchResults = useMemo(
     () => searchPlans(planSearchQuery, plansByDate),
     [planSearchQuery, plansByDate],
@@ -8656,35 +9046,21 @@ function App() {
       0,
     );
     const temporaryTimerSeconds = plans.reduce((totalSeconds, item) => {
-      const timer = taskTimersByTaskId[item.id];
-
-      if (
-        !timer ||
-        item.completed ||
-        item.actualMinutes ||
-        (!timer.forwardHasStarted && !timer.isRunning)
-      ) {
+      if (item.actualMinutes) {
         return totalSeconds;
       }
 
-      return totalSeconds + getTaskTimerElapsedSeconds(timer, timerTick);
+      return totalSeconds + getTaskTimeSecondsForDate(item, selectedDate, timerTick);
     }, 0);
     const liveActualSeconds = savedActualMinutes * 60 + temporaryTimerSeconds + projectActualSeconds;
     const targetTotalSeconds = targetTotalMinutes * 60;
     const comparableSavedActualMinutes = getTotalMinutes(plannedTimePlans, "actualMinutes");
     const comparableTemporaryTimerSeconds = plannedTimePlans.reduce((totalSeconds, item) => {
-      const timer = taskTimersByTaskId[item.id];
-
-      if (
-        !timer ||
-        item.completed ||
-        item.actualMinutes ||
-        (!timer.forwardHasStarted && !timer.isRunning)
-      ) {
+      if (item.actualMinutes) {
         return totalSeconds;
       }
 
-      return totalSeconds + getTaskTimerElapsedSeconds(timer, timerTick);
+      return totalSeconds + getTaskTimeSecondsForDate(item, selectedDate, timerTick);
     }, 0);
     const comparableActualSeconds =
       comparableSavedActualMinutes * 60 + comparableTemporaryTimerSeconds;
@@ -8712,22 +9088,16 @@ function App() {
       missingTargetCount: plans.filter((item) => !item.targetMinutes).length,
       missingActualCount: plans.filter((item) => !item.actualMinutes).length,
       activeTimerCount:
-        plans.filter((item) => taskTimersByTaskId[item.id]?.isRunning).length +
+        plans.filter((item) => Boolean(getRunningTaskTimeEntry(item))).length +
         projectActiveTimerCount,
       trackedTimerCount: plans.filter((item) => {
-        const timer = taskTimersByTaskId[item.id];
-        return Boolean(
-          timer &&
-            !item.completed &&
-            !item.actualMinutes &&
-            (timer.forwardHasStarted || timer.isRunning),
-        );
+        return !item.actualMinutes && getTaskTimeEntriesForDate(item, selectedDate).length > 0;
       }).length,
       completedCount: completedPlans.length,
       actualPercent,
       actualProgress: Math.min(100, actualPercent),
     };
-  }, [complexProjects, plans, selectedDate, taskTimersByTaskId, timerTick]);
+  }, [complexProjects, plans, selectedDate, timerTick]);
 
   useEffect(() => {
     savePlanBook(plansByDate);
@@ -8743,6 +9113,11 @@ function App() {
     saveMoodBook(moodBook);
     latestMoodBook.current = moodBook;
   }, [moodBook]);
+
+  useEffect(() => {
+    saveUserProfile(userProfile);
+    latestUserProfile.current = userProfile;
+  }, [userProfile]);
 
   useEffect(() => {
     latestDeletedItemIds.current = deletedItemIds;
@@ -8790,13 +9165,17 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const hasRunningTaskTimer = Object.values(taskTimersByTaskId).some(
-      (timer) => timer.isRunning || timer.countdownIsRunning,
+    const hasRunningTaskTimer = Object.values(plansByDate).some((items) =>
+      items.some((item) => Boolean(getRunningTaskTimeEntry(item))),
+    );
+    const hasRunningCountdownTimer = Object.values(taskTimersByTaskId).some(
+      (timer) => timer.countdownIsRunning,
     );
     const hasRunningComplexProjectTimer = complexProjects.some((project) =>
       project.phases.some((phase) => phase.timeEntries.some((entry) => !entry.endedAt)),
     );
-    const hasRunningTimer = hasRunningTaskTimer || hasRunningComplexProjectTimer;
+    const hasRunningTimer =
+      hasRunningTaskTimer || hasRunningCountdownTimer || hasRunningComplexProjectTimer;
 
     if (!hasRunningTimer) {
       return;
@@ -8810,7 +9189,7 @@ function App() {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [complexProjects, taskTimersByTaskId]);
+  }, [complexProjects, plansByDate, taskTimersByTaskId]);
 
   useEffect(() => {
     const finishedCountdownIds = Object.entries(taskTimersByTaskId)
@@ -8881,6 +9260,7 @@ function App() {
 
   useEffect(() => {
     if (!isSupabaseConfigured) {
+      setIsAuthChecking(false);
       return;
     }
 
@@ -8895,11 +9275,13 @@ function App() {
       .then((session) => {
         if (isMounted) {
           setCurrentUser(session?.user ?? null);
+          setIsAuthChecking(false);
         }
       })
       .catch((error) => {
         if (isMounted) {
           setAuthStatus(error instanceof Error ? error.message : "读取登录状态失败");
+          setIsAuthChecking(false);
         }
       });
 
@@ -8958,6 +9340,7 @@ function App() {
           latestComplexProjectBook.current,
         );
         const localMoodBook = normalizeMoodBook(latestMoodBook.current);
+        const localUserProfile = normalizeUserProfile(latestUserProfile.current);
         const nextDeletedItemIds = uniqueValues([
           ...latestDeletedItemIds.current,
           ...cloudPayload.deletedItemIds,
@@ -8976,6 +9359,7 @@ function App() {
           nextDeletedItemIds,
         );
         const mergedMoodBook = mergeMoodBooks(localMoodBook, cloudPayload.moodBook);
+        const mergedUserProfile = mergeUserProfiles(localUserProfile, cloudPayload.userProfile);
 
         if (isCancelled) {
           return;
@@ -8985,6 +9369,7 @@ function App() {
         setCustomCategories(nextCustomCategories);
         setComplexProjectBook(mergedComplexProjectBook);
         setMoodBook(mergedMoodBook);
+        setUserProfile(mergedUserProfile);
         setPlansByDate(mergedPlanBook);
         await upsertDailyPlannerUserData({
           userId: currentUserId,
@@ -8994,6 +9379,7 @@ function App() {
             nextCustomCategories,
             mergedComplexProjectBook,
             mergedMoodBook,
+            mergedUserProfile,
           ),
         });
 
@@ -9037,7 +9423,7 @@ function App() {
         window.clearTimeout(cloudTimer.current);
       }
     };
-  }, [currentUserId, complexProjectBook, customCategories, deletedItemIds, moodBook, plansByDate]);
+  }, [currentUserId, complexProjectBook, customCategories, deletedItemIds, moodBook, plansByDate, userProfile]);
 
   const updatePlansForSelectedDate = (updater: (current: PlanItem[]) => PlanItem[]) => {
     setPlansByDate((currentBook) => ({
@@ -9440,6 +9826,29 @@ function App() {
     );
   };
 
+  const openTaskTimeDetails = (itemId: string, date = selectedDate) => {
+    setTaskTimeDetailTarget({ itemId, date });
+  };
+
+  const exportTaskTimeDetailsExcel = () => {
+    if (!taskTimeDetailItem || !taskTimeDetailTarget) {
+      return;
+    }
+
+    const blob = createTaskTimeEntriesExcelBlob({
+      category: taskTimeDetailItem.category,
+      date: taskTimeDetailTarget.date,
+      entries: taskTimeDetailEntries,
+      now: timerTick,
+      taskTitle: taskTimeDetailItem.title,
+    });
+
+    downloadBlob(
+      blob,
+      `任务计时明细-${sanitizeExportFileNamePart(taskTimeDetailItem.title)}-${taskTimeDetailTarget.date}.xls`,
+    );
+  };
+
   const toggleComplexProjectPhaseTimer = (projectId: string, phaseId: string) => {
     const project = complexProjectBook[projectId];
     const phase = project?.phases.find((item) => item.id === phaseId);
@@ -9827,6 +10236,10 @@ function App() {
         nextDeletedItemIds,
       );
       const mergedMoodBook = mergeMoodBooks(latestMoodBook.current, cloudPayload.moodBook);
+      const mergedUserProfile = mergeUserProfiles(
+        latestUserProfile.current,
+        cloudPayload.userProfile,
+      );
 
       if (!arePlanBooksEqual(latestPlanBook.current, mergedPlanBook)) {
         setPlansByDate(mergedPlanBook);
@@ -9848,6 +10261,9 @@ function App() {
       if (JSON.stringify(mergedMoodBook) !== JSON.stringify(latestMoodBook.current)) {
         setMoodBook(mergedMoodBook);
       }
+      if (JSON.stringify(mergedUserProfile) !== JSON.stringify(latestUserProfile.current)) {
+        setUserProfile(mergedUserProfile);
+      }
 
       await upsertDailyPlannerUserData({
         userId,
@@ -9857,6 +10273,7 @@ function App() {
           nextCustomCategories,
           mergedComplexProjectBook,
           mergedMoodBook,
+          mergedUserProfile,
         ),
       });
       setCloudStatus("已保存到云端");
@@ -9891,7 +10308,8 @@ function App() {
           return;
         }
 
-        await updatePassword(password);
+        const updatedUser = await updatePassword(password);
+        setCurrentUser(updatedUser);
         cleanAuthUrl();
         setAuthMode("sign-in");
         setAuthForm((current) => ({ ...current, password: "", confirmPassword: "" }));
@@ -9924,7 +10342,8 @@ function App() {
         return;
       }
 
-      await signIn(email, password);
+      const signedInUser = await signIn(email, password);
+      setCurrentUser(signedInUser);
       setAuthForm({ email, password: "", confirmPassword: "" });
       setAuthStatus("登录成功，正在合并云端数据");
       setIsAuthPanelOpen(false);
@@ -9936,6 +10355,16 @@ function App() {
   };
 
   const handleSignOut = async () => {
+    const returnToLoginPage = () => {
+      setIsAuthPanelOpen(false);
+      window.location.href = `${window.location.origin}${window.location.pathname}`;
+    };
+
+    if (isPreviewMode || !isSignedIn) {
+      returnToLoginPage();
+      return;
+    }
+
     try {
       setIsAuthBusy(true);
       await signOut();
@@ -9946,8 +10375,9 @@ function App() {
       }
       setCurrentUser(null);
       setAuthMode("sign-in");
-      setAuthStatus("已退出登录，可继续本地使用");
-      setCloudStatus("已退出登录，本地模式");
+      setAuthStatus("已退出登录，请重新登录");
+      setCloudStatus("已退出登录");
+      returnToLoginPage();
     } catch (error) {
       setAuthStatus(error instanceof Error ? error.message : "退出登录失败");
     } finally {
@@ -9962,7 +10392,13 @@ function App() {
       password: "",
       confirmPassword: "",
     }));
-    setAuthStatus(nextMode === "forgot" ? "输入邮箱接收重置密码邮件" : "未登录时仍可本地使用");
+    setAuthStatus(
+      !isSupabaseConfigured
+        ? "Supabase 环境变量未配置，请先配置登录服务"
+        : nextMode === "forgot"
+          ? "输入邮箱接收重置密码邮件"
+          : "",
+    );
   };
 
   const handleAddCustomCategory = () => {
@@ -10057,6 +10493,7 @@ function App() {
       note: form.note.trim(),
       completed: false,
       targetMinutes,
+      timeEntries: [],
       createdAt: updatedAt,
       updatedAt,
     };
@@ -10276,20 +10713,59 @@ function App() {
 
     const now = Date.now();
     setTimerTick(now);
-    const currentTimer = taskTimersByTaskId[item.id];
-    const nextBaseTimer = currentTimer ?? createTaskTimerState(item.id);
-    const elapsedSeconds = getTaskTimerElapsedSeconds(nextBaseTimer, now);
 
-    setTaskTimersByTaskId((currentTimers) => ({
-      ...currentTimers,
-      [item.id]: {
-        ...nextBaseTimer,
-        elapsedSeconds,
-        forwardHasStarted: true,
-        isRunning: !nextBaseTimer.isRunning,
-        startedAt: nextBaseTimer.isRunning ? null : now,
-      },
-    }));
+    updatePlansForSelectedDate((currentPlans) =>
+      currentPlans.map((currentItem) => {
+        if (currentItem.id !== item.id || currentItem.completed) {
+          return currentItem;
+        }
+
+        const timeEntries = getTaskTimeEntries(currentItem);
+        const hasRunningEntry = timeEntries.some((entry) => !entry.endedAt);
+        const stoppedEntries = stopRunningTaskTimeEntries(timeEntries, now);
+
+        return {
+          ...currentItem,
+          timeEntries: hasRunningEntry
+            ? stoppedEntries
+            : [
+                ...stoppedEntries,
+                {
+                  id: createId(),
+                  date: selectedDate,
+                  startedAt: now,
+                  durationSeconds: 0,
+                },
+              ],
+          updatedAt: now,
+        };
+      }),
+    );
+
+    setTaskTimersByTaskId((currentTimers) => {
+      const currentTimer = currentTimers[item.id];
+
+      if (!currentTimer) {
+        return currentTimers;
+      }
+
+      const nextTimers = { ...currentTimers };
+
+      if (!currentTimer.countdownHasStarted && !currentTimer.countdownIsRunning) {
+        delete nextTimers[item.id];
+        return nextTimers;
+      }
+
+      nextTimers[item.id] = {
+        ...currentTimer,
+        elapsedSeconds: 0,
+        forwardHasStarted: false,
+        isRunning: false,
+        startedAt: null,
+      };
+
+      return nextTimers;
+    });
   };
 
   const handleCountdownClick = (item: PlanItem, minutes: number) => {
@@ -10416,11 +10892,6 @@ function App() {
     const now = Date.now();
     const taskTimer = taskTimersByTaskId[id];
     const hasTimerForTask = Boolean(taskTimer);
-    const timerElapsedSeconds =
-      hasTimerForTask && taskTimer ? getTaskTimerElapsedSeconds(taskTimer, now) : 0;
-    const hasForwardTimer = Boolean(
-      hasTimerForTask && taskTimer && (taskTimer.forwardHasStarted || timerElapsedSeconds > 0),
-    );
 
     if (targetPlan && !targetPlan.completed) {
       const nextCompletedCount = plans.filter((item) => item.completed || item.id === id).length;
@@ -10456,19 +10927,28 @@ function App() {
     }
 
     updatePlansForSelectedDate((currentPlans) =>
-      currentPlans.map((item) =>
-        item.id === id
-          ? {
-              ...item,
-              completed: !item.completed,
-              actualMinutes:
-                !item.completed && hasForwardTimer && !item.actualMinutes
-                  ? timerSecondsToActualMinutes(timerElapsedSeconds)
-                  : item.actualMinutes,
-              updatedAt: now,
-            }
-          : item,
-      ),
+      currentPlans.map((item) => {
+        if (item.id !== id) {
+          return item;
+        }
+
+        const isCompleting = !item.completed;
+        const timeEntries = isCompleting
+          ? stopRunningTaskTimeEntries(getTaskTimeEntries(item), now)
+          : getTaskTimeEntries(item);
+        const totalTimeSeconds = getTaskTimeTotalSeconds({ ...item, timeEntries }, now);
+
+        return {
+          ...item,
+          completed: !item.completed,
+          actualMinutes:
+            isCompleting && totalTimeSeconds > 0 && !item.actualMinutes
+              ? timerSecondsToActualMinutes(totalTimeSeconds)
+              : item.actualMinutes,
+          timeEntries,
+          updatedAt: now,
+        };
+      }),
     );
   };
 
@@ -10782,11 +11262,9 @@ function App() {
     },
   ];
   const getLiveActualSecondsForPlan = (item: PlanItem) => {
-    const timer = taskTimersByTaskId[item.id];
-    const liveTimerSeconds =
-      timer && !item.completed && !item.actualMinutes && (timer.forwardHasStarted || timer.isRunning)
-        ? getTaskTimerElapsedSeconds(timer, timerTick)
-        : 0;
+    const liveTimerSeconds = item.actualMinutes
+      ? 0
+      : getTaskTimeSecondsForDate(item, selectedDate, timerTick);
 
     return (item.actualMinutes ?? 0) * 60 + liveTimerSeconds;
   };
@@ -10935,12 +11413,7 @@ function App() {
     })
     .filter((item) => item.totalSeconds > 0 || item.todaySessionCount > 0);
   const isSignedIn = Boolean(currentUser && authMode !== "update-password");
-  const accountStatusLabel = isSignedIn ? "已登录" : "本地模式";
-  const accountStatusDetail = isSignedIn
-    ? isCloudSaving
-      ? "云端保存中..."
-      : cloudStatus
-    : authStatus;
+  const isPreviewMode = new URLSearchParams(window.location.search).has("preview");
   const toggleTodayWorkspaceSection = (sectionId: TodayWorkspaceSectionId) => {
     setTodayWorkspaceCollapsed((current) => ({
       ...current,
@@ -10958,43 +11431,149 @@ function App() {
     resetForm();
     setIsTaskFormOpen(false);
   };
-  const authPanel = (
-    <section className="rounded-[1.5rem] border border-dashed border-violet-200 bg-violet-50/80 p-3">
-      <div className="mb-2 flex items-start justify-between gap-3">
-        <div>
-          <p className="text-sm font-black text-[#6f5d78]">个人中心</p>
-          <p className="mt-1 text-xs font-bold text-[#8a7a94]">
-            {isSignedIn ? "云端自动保存已开启" : "未登录也可继续本地使用"}
-          </p>
-        </div>
-        <span className="rounded-full bg-white/85 px-3 py-1 text-xs font-black text-violet-700">
-          {accountStatusLabel}
-        </span>
-      </div>
+  const selectAvatar = (avatarId: AvatarId) => {
+    setUserProfile((current) =>
+      current.avatarId === avatarId
+        ? current
+        : {
+            avatarId,
+            updatedAt: Date.now(),
+          },
+    );
+    setIsAvatarPickerOpen(false);
+  };
+  const renderAvatarPicker = (compact = false) => {
+    const avatarMenuId = compact ? "account-avatar-picker-menu" : "standalone-avatar-picker-menu";
+    const toggleAvatarPicker = () => setIsAvatarPickerOpen((current) => !current);
 
-      {isSignedIn ? (
-        <div className="space-y-2">
-          <div className="rounded-2xl bg-white/85 px-3 py-2">
-            <p className="break-all text-sm font-black text-[#46394f]">
-              {currentUser?.email ?? "已登录账号"}
-            </p>
-            <p className="mt-1 text-xs font-bold text-[#76687f]">{accountStatusDetail}</p>
+    return (
+      <div
+        className={`relative rounded-[1.35rem] border border-pink-100 bg-pink-50/55 ${
+          compact ? "p-2.5" : "p-3"
+        }`}
+      >
+        <button
+          aria-controls={avatarMenuId}
+          aria-expanded={isAvatarPickerOpen}
+          aria-label={isAvatarPickerOpen ? "收起头像选择" : "展开头像选择"}
+          className="flex w-full items-center gap-3 text-left transition hover:opacity-90 focus:outline-none focus:ring-4 focus:ring-pink-100"
+          type="button"
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              toggleAvatarPicker();
+            }
+          }}
+          onPointerDown={(event) => {
+            event.preventDefault();
+            toggleAvatarPicker();
+          }}
+        >
+          <div className="flex min-w-0 items-center gap-2.5">
+            <img
+              alt="当前头像"
+              className="h-11 w-11 shrink-0 rounded-full border-2 border-white bg-white object-cover shadow-sm shadow-pink-100"
+              src={selectedAvatar.src}
+            />
+            <div className="min-w-0">
+              <p className="text-sm font-black text-pink-600">领取头像</p>
+            </div>
           </div>
-          <button
-            className="w-full rounded-2xl border border-violet-200 bg-white px-4 py-2 text-sm font-black text-violet-700 transition hover:bg-violet-100 disabled:opacity-50"
-            disabled={isAuthBusy}
-            type="button"
-            onClick={handleSignOut}
+        </button>
+
+        {isAvatarPickerOpen ? (
+          <div
+            className={`absolute left-0 right-0 top-full z-30 mt-2 rounded-[1.35rem] border border-pink-100 bg-white/95 p-3 shadow-2xl shadow-pink-100/70 backdrop-blur ${
+              compact ? "max-h-64" : "max-h-72"
+            } overflow-y-auto`}
+            id={avatarMenuId}
           >
-            退出登录
-          </button>
+            <div className="space-y-3">
+              {AVATAR_GROUPS.map(({ group, avatars }) => (
+                <section key={group}>
+                  <p className="mb-2 px-1 text-[11px] font-black text-[#8a7a94]">{group}</p>
+                  <div className="grid grid-cols-5 gap-2 sm:grid-cols-7">
+                    {avatars.map((avatar) => {
+                      const isSelected = avatar.id === userProfile.avatarId;
+                      const avatarIndex =
+                        AVATAR_OPTIONS.findIndex((option) => option.id === avatar.id) + 1;
+
+                      return (
+                        <button
+                          aria-label={`选择第 ${avatarIndex} 个头像`}
+                          className={`relative aspect-square rounded-2xl border bg-white p-1 transition hover:-translate-y-0.5 hover:border-pink-200 hover:shadow-sm hover:shadow-pink-100 focus:outline-none focus:ring-4 focus:ring-pink-100 ${
+                            isSelected
+                              ? "border-pink-300 ring-4 ring-pink-100"
+                              : "border-white/80 shadow-sm shadow-pink-50"
+                          }`}
+                          key={avatar.id}
+                          type="button"
+                          onClick={() => selectAvatar(avatar.id)}
+                        >
+                          <img
+                            alt=""
+                            className="h-full w-full rounded-full object-cover"
+                            src={avatar.src}
+                          />
+                          {isSelected ? (
+                            <span className="absolute -right-1 -top-1 inline-flex h-5 w-5 items-center justify-center rounded-full bg-pink-500 text-[11px] font-black text-white shadow-sm shadow-pink-200">
+                              ✓
+                            </span>
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    );
+  };
+  const authPanel = (
+    <section>
+      <button
+        className="whitespace-nowrap rounded-full border border-violet-100 bg-violet-50/95 px-2.5 py-1 text-xs font-black leading-none text-violet-700 shadow-sm shadow-violet-100/60 transition hover:bg-violet-100 disabled:opacity-50"
+        disabled={isAuthBusy}
+        type="button"
+        onClick={handleSignOut}
+      >
+        {isAuthBusy ? "退出中" : "退出"}
+      </button>
+    </section>
+  );
+  const standaloneAuthTitle =
+    authMode === "sign-up"
+      ? "创建账号"
+      : authMode === "forgot"
+        ? "找回密码"
+        : authMode === "update-password"
+          ? "设置新密码"
+          : "登录";
+  const standaloneAuthSubmitLabel = isAuthBusy
+    ? "处理中..."
+    : authMode === "sign-up"
+      ? "注册"
+      : authMode === "forgot"
+        ? "发送重置邮件"
+        : authMode === "update-password"
+          ? "设置新密码"
+          : "登录";
+  const standaloneAuthPage = (
+    <main className="flex min-h-screen items-center justify-center bg-[#fff8ef] bg-[linear-gradient(180deg,#fff8ef_0%,#f6f1ff_48%,#edf8ff_100%)] px-4 py-8 text-[#46394f]">
+      <section className="w-full max-w-md rounded-[2rem] border border-white/80 bg-white/90 p-5 shadow-2xl shadow-violet-100/70 backdrop-blur sm:p-6">
+        <div className="mb-5">
+          <p className="mb-1 text-sm font-semibold text-pink-500">Daily Planner Journal</p>
+          <h1 className="text-3xl font-black tracking-normal text-[#382b44]">今日计划手帐</h1>
         </div>
-      ) : (
-        <form className="space-y-2.5" onSubmit={handleAuthSubmit}>
+
+        <form className="space-y-3" onSubmit={handleAuthSubmit}>
           {authMode === "sign-in" || authMode === "sign-up" ? (
-            <div className="grid grid-cols-2 gap-2 rounded-2xl bg-white/70 p-1">
+            <div className="grid grid-cols-2 gap-2 rounded-2xl bg-violet-50/80 p-1">
               <button
-                className={`rounded-[0.9rem] px-3 py-1.5 text-sm font-black transition ${
+                className={`rounded-[0.9rem] px-3 py-2 text-sm font-black transition ${
                   authMode === "sign-in"
                     ? "bg-[#9f8cff] text-white shadow-sm shadow-violet-200"
                     : "text-[#7a6b84] hover:bg-white"
@@ -11005,27 +11584,34 @@ function App() {
                 登录
               </button>
               <button
-                className={`rounded-[0.9rem] px-3 py-1.5 text-sm font-black transition ${
+                className={`rounded-[0.9rem] px-3 py-2 text-sm font-black transition ${
                   authMode === "sign-up"
                     ? "bg-[#9f8cff] text-white shadow-sm shadow-violet-200"
                     : "text-[#7a6b84] hover:bg-white"
                 }`}
                 type="button"
                 onClick={() => switchAuthMode("sign-up")}
-              >
-                注册
-              </button>
-            </div>
-          ) : null}
+	              >
+	                注册
+	              </button>
+	            </div>
+	          ) : (
+            <p className="rounded-2xl bg-violet-50/80 px-3 py-2 text-sm font-black text-violet-700">
+	              {standaloneAuthTitle}
+	            </p>
+	          )}
 
-          {authMode === "update-password" ? (
+	          {authMode === "sign-in" || authMode === "sign-up" ? renderAvatarPicker() : null}
+	
+	          {authMode === "update-password" ? (
             <>
-              <label className="block text-xs font-black text-[#6f5d78]" htmlFor="account-new-password">
+              <label className="block text-xs font-black text-[#6f5d78]" htmlFor="standalone-new-password">
                 新密码
               </label>
               <input
-                className="w-full rounded-2xl border border-violet-100 bg-white px-3 py-2 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
-                id="account-new-password"
+                autoComplete="new-password"
+                className="w-full rounded-2xl border border-violet-100 bg-white px-3 py-2.5 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                id="standalone-new-password"
                 minLength={6}
                 placeholder="至少 6 位"
                 type="password"
@@ -11036,13 +11622,14 @@ function App() {
               />
               <label
                 className="block text-xs font-black text-[#6f5d78]"
-                htmlFor="account-confirm-password"
+                htmlFor="standalone-confirm-password"
               >
                 确认新密码
               </label>
               <input
-                className="w-full rounded-2xl border border-violet-100 bg-white px-3 py-2 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
-                id="account-confirm-password"
+                autoComplete="new-password"
+                className="w-full rounded-2xl border border-violet-100 bg-white px-3 py-2.5 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                id="standalone-confirm-password"
                 minLength={6}
                 placeholder="再次输入新密码"
                 type="password"
@@ -11054,13 +11641,13 @@ function App() {
             </>
           ) : (
             <>
-              <label className="block text-xs font-black text-[#6f5d78]" htmlFor="account-auth-email">
+              <label className="block text-xs font-black text-[#6f5d78]" htmlFor="standalone-auth-email">
                 邮箱
               </label>
               <input
                 autoComplete="email"
-                className="w-full rounded-2xl border border-violet-100 bg-white px-3 py-2 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
-                id="account-auth-email"
+                className="w-full rounded-2xl border border-violet-100 bg-white px-3 py-2.5 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                id="standalone-auth-email"
                 placeholder="QQ、163、Gmail 等邮箱"
                 type="email"
                 value={authForm.email}
@@ -11073,14 +11660,14 @@ function App() {
                 <>
                   <label
                     className="block text-xs font-black text-[#6f5d78]"
-                    htmlFor="account-auth-password"
+                    htmlFor="standalone-auth-password"
                   >
                     密码
                   </label>
                   <input
                     autoComplete={authMode === "sign-up" ? "new-password" : "current-password"}
-                    className="w-full rounded-2xl border border-violet-100 bg-white px-3 py-2 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
-                    id="account-auth-password"
+                    className="w-full rounded-2xl border border-violet-100 bg-white px-3 py-2.5 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                    id="standalone-auth-password"
                     minLength={6}
                     placeholder="本站登录密码"
                     type="password"
@@ -11095,45 +11682,43 @@ function App() {
           )}
 
           <button
-            className="w-full rounded-2xl bg-[#9f8cff] px-4 py-2 text-sm font-black text-white shadow-sm shadow-violet-200 transition hover:bg-[#8f7af2] disabled:opacity-50"
+            className="w-full rounded-2xl bg-[#9f8cff] px-4 py-3 text-sm font-black text-white shadow-sm shadow-violet-200 transition hover:bg-[#8f7af2] disabled:opacity-50"
             disabled={isAuthBusy || !isSupabaseConfigured}
             type="submit"
           >
-            {isAuthBusy
-              ? "处理中..."
-              : authMode === "sign-up"
-                ? "注册"
-                : authMode === "forgot"
-                  ? "发送重置邮件"
-                  : authMode === "update-password"
-                    ? "设置新密码"
-                    : "登录"}
+            {standaloneAuthSubmitLabel}
           </button>
 
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-bold text-[#76687f]">
-            <span>{authStatus}</span>
-            {authMode === "sign-in" ? (
-              <button
-                className="text-violet-700 underline decoration-violet-300 underline-offset-4"
-                type="button"
-                onClick={() => switchAuthMode("forgot")}
-              >
-                忘记密码
-              </button>
-            ) : null}
-            {authMode === "forgot" ? (
-              <button
-                className="text-violet-700 underline decoration-violet-300 underline-offset-4"
-                type="button"
-                onClick={() => switchAuthMode("sign-in")}
-              >
-                返回登录
-              </button>
-            ) : null}
-          </div>
+          {authStatus || authMode === "sign-in" || authMode === "forgot" ? (
+            <div
+              className={`flex flex-wrap items-center gap-2 text-xs font-bold text-[#76687f] ${
+                authStatus ? "justify-between" : "justify-end"
+              }`}
+            >
+              {authStatus ? <span>{authStatus}</span> : null}
+              {authMode === "sign-in" ? (
+                <button
+                  className="text-violet-700 underline decoration-violet-300 underline-offset-4"
+                  type="button"
+                  onClick={() => switchAuthMode("forgot")}
+                >
+                  忘记密码
+                </button>
+              ) : null}
+              {authMode === "forgot" ? (
+                <button
+                  className="text-violet-700 underline decoration-violet-300 underline-offset-4"
+                  type="button"
+                  onClick={() => switchAuthMode("sign-in")}
+                >
+                  返回登录
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </form>
-      )}
-    </section>
+      </section>
+    </main>
   );
   const moodPanel = (
     <section className="max-h-[calc(100vh-2.5rem)] overflow-y-auto rounded-[1.5rem] border border-white/80 bg-white p-4 shadow-2xl shadow-pink-200/40 sm:p-5">
@@ -12463,6 +13048,24 @@ function App() {
     </section>
   );
 
+  if (isAuthChecking && !isPreviewMode) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-[#fff8ef] bg-[linear-gradient(180deg,#fff8ef_0%,#f6f1ff_48%,#edf8ff_100%)] px-4 py-8 text-[#46394f]">
+        <section className="w-full max-w-sm rounded-[2rem] border border-white/80 bg-white/90 p-6 text-center shadow-2xl shadow-violet-100/70">
+          <p className="text-sm font-semibold text-pink-500">Daily Planner Journal</p>
+          <h1 className="mt-1 text-3xl font-black tracking-normal text-[#382b44]">
+            今日计划手帐
+          </h1>
+          <p className="mt-4 text-sm font-black text-[#7b6c84]">正在检查登录状态...</p>
+        </section>
+      </main>
+    );
+  }
+
+  if (!isSignedIn && !isPreviewMode) {
+    return standaloneAuthPage;
+  }
+
   return (
     <main className="min-h-screen bg-[#fff8ef] bg-[linear-gradient(180deg,#fff8ef_0%,#f6f1ff_48%,#edf8ff_100%)] px-4 py-4 text-[#46394f] sm:px-6 lg:px-8">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-0">
@@ -12575,22 +13178,36 @@ function App() {
             />
           </div>
 
-          <div className="relative z-[1002] flex w-full justify-end md:w-auto md:self-start">
-            <button
-              className="inline-flex min-h-10 items-center justify-center rounded-full border border-violet-100 bg-white/90 px-4 py-2 text-sm font-black text-violet-700 shadow-sm transition hover:bg-violet-50 focus:outline-none focus:ring-4 focus:ring-violet-100"
-              type="button"
-              title="个人中心"
-              onClick={() => setIsAuthPanelOpen((current) => !current)}
-            >
-              {isSignedIn ? "账号" : "登录"}
-            </button>
+	          <div className="relative z-[1002] flex w-full justify-end md:w-auto md:self-start">
+	            <button
+	              aria-label="个人中心"
+	              className="inline-flex h-12 w-12 items-center justify-center rounded-full border border-violet-100 bg-white/90 p-1.5 shadow-sm transition hover:bg-violet-50 focus:outline-none focus:ring-4 focus:ring-violet-100"
+	              type="button"
+	              title="个人中心"
+	              onKeyDown={(event) => {
+	                if (event.key === "Enter" || event.key === " ") {
+	                  event.preventDefault();
+	                  setIsAuthPanelOpen((current) => !current);
+	                }
+	              }}
+	              onPointerDown={(event) => {
+	                event.preventDefault();
+	                setIsAuthPanelOpen((current) => !current);
+	              }}
+	            >
+	              <img
+	                alt=""
+	                className="h-full w-full rounded-full object-cover"
+	                src={selectedAvatar.src}
+	              />
+	            </button>
             <AnimatePresence>
               {isAuthPanelOpen ? (
                 <motion.div
                   animate={{ opacity: 1, y: 0 }}
-                  className="absolute right-0 top-[calc(100%+10px)] z-[10000] w-[min(92vw,28rem)]"
-                  exit={{ opacity: 0, y: -6 }}
-                  initial={{ opacity: 0, y: -6 }}
+                  className="absolute right-0 top-[calc(100%+2px)] z-[10000]"
+                  exit={{ opacity: 0, y: -4 }}
+                  initial={{ opacity: 0, y: -4 }}
                   transition={{ duration: 0.16, ease: "easeOut" }}
                 >
                   {authPanel}
@@ -12662,6 +13279,116 @@ function App() {
                   onClick={(event) => event.stopPropagation()}
                 >
                   {moodPanel}
+                </motion.div>
+              </motion.div>
+            ) : null}
+          </AnimatePresence>,
+          document.body,
+        )}
+
+        {createPortal(
+          <AnimatePresence>
+            {taskTimeDetailTarget && taskTimeDetailItem ? (
+              <motion.div
+                animate={{ opacity: 1 }}
+                className="fixed inset-0 z-[9999] flex items-center justify-center overflow-y-auto bg-[#2d2433]/45 px-4 py-5 backdrop-blur-sm"
+                exit={{ opacity: 0 }}
+                initial={{ opacity: 0 }}
+                onClick={() => setTaskTimeDetailTarget(null)}
+              >
+                <motion.div
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  className="w-full max-w-4xl"
+                  exit={{ opacity: 0, scale: 0.98, y: 8 }}
+                  initial={{ opacity: 0, scale: 0.98, y: 8 }}
+                  transition={{ duration: 0.18 }}
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <section className="max-h-[calc(100vh-2.5rem)] overflow-y-auto rounded-[1.5rem] border border-white/80 bg-white p-4 shadow-2xl shadow-sky-200/40 sm:p-5">
+                    <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
+                        <p className="text-sm font-black text-sky-700">任务计时明细</p>
+                        <h2 className="mt-1 break-words text-xl font-black text-[#3f3349]">
+                          {taskTimeDetailItem.title}
+                        </h2>
+                        <p className="mt-1 text-sm font-bold text-[#8b7b91]">
+                          {taskTimeDetailTarget.date} · {taskTimeDetailEntries.length} 段 · 总计{" "}
+                          {formatDashboardDuration(taskTimeDetailTotalSeconds)}
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 flex-wrap gap-2">
+                        <button
+                          className="rounded-full bg-emerald-50 px-3 py-2 text-xs font-black text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
+                          disabled={taskTimeDetailEntries.length === 0}
+                          type="button"
+                          onClick={exportTaskTimeDetailsExcel}
+                        >
+                          导出 Excel
+                        </button>
+                        <button
+                          className="rounded-full bg-slate-100 px-3 py-2 text-xs font-black text-[#6d5d75] transition hover:bg-slate-200"
+                          type="button"
+                          onClick={() => setTaskTimeDetailTarget(null)}
+                        >
+                          关闭
+                        </button>
+                      </div>
+                    </div>
+
+                    {taskTimeDetailEntries.length > 0 ? (
+                      <div className="overflow-x-auto rounded-[1.15rem] border border-sky-100">
+                        <table className="min-w-full border-collapse text-left text-sm">
+                          <thead className="bg-sky-50 text-xs font-black text-sky-800">
+                            <tr>
+                              <th className="whitespace-nowrap px-3 py-2">序号</th>
+                              <th className="whitespace-nowrap px-3 py-2">开始时间</th>
+                              <th className="whitespace-nowrap px-3 py-2">结束时间</th>
+                              <th className="whitespace-nowrap px-3 py-2">持续时间</th>
+                              <th className="whitespace-nowrap px-3 py-2">状态</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-sky-50 bg-white">
+                            {taskTimeDetailEntries.map((entry, index) => {
+                              const isRunning = !entry.endedAt;
+                              const durationSeconds = getTaskTimeEntrySeconds(entry, timerTick);
+
+                              return (
+                                <tr key={entry.id}>
+                                  <td className="whitespace-nowrap px-3 py-2 font-black text-[#6f5d78]">
+                                    {index + 1}
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2 font-bold text-[#46394f]">
+                                    {formatDateTime(entry.startedAt)}
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2 font-bold text-[#46394f]">
+                                    {entry.endedAt ? formatDateTime(entry.endedAt) : "进行中"}
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2 font-black text-sky-800">
+                                    {formatDashboardDuration(durationSeconds)}
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2">
+                                    <span
+                                      className={`rounded-full px-2 py-0.5 text-xs font-black ${
+                                        isRunning
+                                          ? "bg-emerald-50 text-emerald-700"
+                                          : "bg-slate-100 text-slate-600"
+                                      }`}
+                                    >
+                                      {isRunning ? "计时中" : "已结束"}
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <div className="rounded-[1.15rem] border border-dashed border-sky-200 bg-sky-50/60 px-4 py-8 text-center text-sm font-black text-[#8b7b91]">
+                        当天还没有分段计时记录
+                      </div>
+                    )}
+                  </section>
                 </motion.div>
               </motion.div>
             ) : null}
@@ -12809,207 +13536,6 @@ function App() {
           </nav>
 
           <aside aria-hidden="true" className="hidden">
-            <section className="mb-3 rounded-[1.5rem] border border-dashed border-violet-200 bg-violet-50/70 p-3">
-              <div className="mb-2 flex items-start justify-between gap-3">
-                <div>
-                  <p className="text-sm font-black text-[#6f5d78]">邮箱账号</p>
-                  <p className="mt-1 text-xs font-bold text-[#8a7a94]">
-                    {currentUser && authMode !== "update-password"
-                      ? "云端自动保存已开启"
-                      : "未登录也可继续本地使用"}
-                  </p>
-                </div>
-                <span className="rounded-full bg-white/80 px-3 py-1 text-xs font-black text-violet-700">
-                  {currentUser && authMode !== "update-password" ? "已登录" : "本地模式"}
-                </span>
-              </div>
-
-              {currentUser && authMode !== "update-password" ? (
-                <div className="space-y-2">
-                  <div className="rounded-2xl bg-white/80 px-3 py-2">
-                    <p className="break-all text-sm font-black text-[#46394f]">
-                      {currentUser.email ?? "已登录账号"}
-                    </p>
-                    <p className="mt-1 text-xs font-bold text-[#76687f]">
-                      {isCloudSaving ? "云端保存中..." : cloudStatus}
-                    </p>
-                  </div>
-                  <button
-                    className="w-full rounded-2xl border border-violet-200 bg-white px-4 py-2 text-sm font-black text-violet-700 transition hover:bg-violet-100 disabled:opacity-50"
-                    disabled={isAuthBusy}
-                    type="button"
-                    onClick={handleSignOut}
-                  >
-                    退出登录
-                  </button>
-                </div>
-              ) : (
-                <form className="space-y-2.5" onSubmit={handleAuthSubmit}>
-                  {authMode === "sign-in" || authMode === "sign-up" ? (
-                    <div className="grid grid-cols-2 gap-2 rounded-2xl bg-white/70 p-1">
-                      <button
-                        className={`rounded-[0.9rem] px-3 py-1.5 text-sm font-black transition ${
-                          authMode === "sign-in"
-                            ? "bg-[#9f8cff] text-white shadow-sm shadow-violet-200"
-                            : "text-[#7a6b84] hover:bg-white"
-                        }`}
-                        type="button"
-                        onClick={() => switchAuthMode("sign-in")}
-                      >
-                        登录
-                      </button>
-                      <button
-                        className={`rounded-[0.9rem] px-3 py-1.5 text-sm font-black transition ${
-                          authMode === "sign-up"
-                            ? "bg-[#9f8cff] text-white shadow-sm shadow-violet-200"
-                            : "text-[#7a6b84] hover:bg-white"
-                        }`}
-                        type="button"
-                        onClick={() => switchAuthMode("sign-up")}
-                      >
-                        注册
-                      </button>
-                    </div>
-                  ) : null}
-
-                  {authMode === "update-password" ? (
-                    <>
-                      <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center">
-                        <label
-                          className="text-xs font-black text-[#6f5d78] sm:w-20 sm:shrink-0"
-                          htmlFor="new-password"
-                        >
-                          新密码
-                        </label>
-                        <input
-                          className="min-w-0 flex-1 rounded-2xl border border-violet-100 bg-white px-3 py-2 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
-                          id="new-password"
-                          minLength={6}
-                          placeholder="至少 6 位"
-                          type="password"
-                          value={authForm.password}
-                          onChange={(event) =>
-                            setAuthForm((current) => ({
-                              ...current,
-                              password: event.target.value,
-                            }))
-                          }
-                        />
-                      </div>
-                      <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center">
-                        <label
-                          className="text-xs font-black text-[#6f5d78] sm:w-20 sm:shrink-0"
-                          htmlFor="confirm-password"
-                        >
-                          确认新密码
-                        </label>
-                        <input
-                          className="min-w-0 flex-1 rounded-2xl border border-violet-100 bg-white px-3 py-2 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
-                          id="confirm-password"
-                          minLength={6}
-                          placeholder="再次输入新密码"
-                          type="password"
-                          value={authForm.confirmPassword}
-                          onChange={(event) =>
-                            setAuthForm((current) => ({
-                              ...current,
-                              confirmPassword: event.target.value,
-                            }))
-                          }
-                        />
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center">
-                        <label
-                          className="text-xs font-black text-[#6f5d78] sm:w-12 sm:shrink-0"
-                          htmlFor="auth-email"
-                        >
-                          邮箱
-                        </label>
-                        <input
-                          autoComplete="email"
-                          className="min-w-0 flex-1 rounded-2xl border border-violet-100 bg-white px-3 py-2 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
-                          id="auth-email"
-                          placeholder="QQ、163、Gmail 等邮箱"
-                          type="email"
-                          value={authForm.email}
-                          onChange={(event) =>
-                            setAuthForm((current) => ({ ...current, email: event.target.value }))
-                          }
-                        />
-                      </div>
-
-                      {authMode === "forgot" ? null : (
-                        <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center">
-                          <label
-                            className="text-xs font-black text-[#6f5d78] sm:w-12 sm:shrink-0"
-                            htmlFor="auth-password"
-                          >
-                            密码
-                          </label>
-                          <input
-                            autoComplete={authMode === "sign-up" ? "new-password" : "current-password"}
-                            className="min-w-0 flex-1 rounded-2xl border border-violet-100 bg-white px-3 py-2 text-sm outline-none transition placeholder:text-[#b8aabd] focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
-                            id="auth-password"
-                            minLength={6}
-                            placeholder="本站登录密码"
-                            type="password"
-                            value={authForm.password}
-                            onChange={(event) =>
-                              setAuthForm((current) => ({
-                                ...current,
-                                password: event.target.value,
-                              }))
-                            }
-                          />
-                        </div>
-                      )}
-                    </>
-                  )}
-
-                  <button
-                    className="w-full rounded-2xl bg-[#9f8cff] px-4 py-2 text-sm font-black text-white shadow-sm shadow-violet-200 transition hover:bg-[#8f7af2] disabled:opacity-50"
-                    disabled={isAuthBusy || !isSupabaseConfigured}
-                    type="submit"
-                  >
-                    {isAuthBusy
-                      ? "处理中..."
-                      : authMode === "sign-up"
-                        ? "注册"
-                        : authMode === "forgot"
-                          ? "发送重置邮件"
-                          : authMode === "update-password"
-                            ? "设置新密码"
-                            : "登录"}
-                  </button>
-
-                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-bold text-[#76687f]">
-                    <span>{authStatus}</span>
-                    {authMode === "sign-in" ? (
-                      <button
-                        className="text-violet-700 underline decoration-violet-300 underline-offset-4"
-                        type="button"
-                        onClick={() => switchAuthMode("forgot")}
-                      >
-                        忘记密码
-                      </button>
-                    ) : null}
-                    {authMode === "forgot" ? (
-                      <button
-                        className="text-violet-700 underline decoration-violet-300 underline-offset-4"
-                        type="button"
-                        onClick={() => switchAuthMode("sign-in")}
-                      >
-                        返回登录
-                      </button>
-                    ) : null}
-                  </div>
-                </form>
-              )}
-            </section>
-
             <form className="space-y-2.5" onSubmit={handleSubmit}>
               <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center">
                 <label className="text-xs font-black text-[#6f5d78] sm:w-16 sm:shrink-0" htmlFor="title">
@@ -14287,7 +14813,7 @@ function App() {
                             className="grid justify-start gap-3"
                             style={{
                               gridTemplateColumns:
-                                "repeat(auto-fill, minmax(min(100%, 15rem), 17.5rem))",
+                                "repeat(auto-fill, minmax(min(100%, 15.5rem), 18rem))",
                             }}
                           >
                             {prioritySection.plans.map((item) => {
@@ -14300,14 +14826,15 @@ function App() {
                         ? taskDropTarget.placement
                         : null;
                     const timerForItem = taskTimersByTaskId[item.id] ?? null;
-                    const timerElapsedSeconds = timerForItem
-                      ? getTaskTimerElapsedSeconds(timerForItem, timerTick)
-                      : 0;
-                    const hasForwardTiming = Boolean(
-                      timerForItem?.forwardHasStarted || timerElapsedSeconds > 0,
+                    const taskTimeEntries = getTaskTimeEntriesForDate(item, selectedDate);
+                    const timerElapsedSeconds = getTaskTimeSecondsForDate(
+                      item,
+                      selectedDate,
+                      timerTick,
                     );
-                    const isTimerRunning = Boolean(timerForItem?.isRunning);
-                    const isTimerPaused = Boolean(hasForwardTiming && !timerForItem?.isRunning);
+                    const hasForwardTiming = taskTimeEntries.length > 0 || timerElapsedSeconds > 0;
+                    const isTimerRunning = Boolean(getRunningTaskTimeEntry(item));
+                    const isTimerPaused = Boolean(hasForwardTiming && !isTimerRunning);
                     const timerButtonLabel = isTimerRunning
                       ? "暂停计时"
                       : isTimerPaused
@@ -14750,7 +15277,7 @@ function App() {
                           <div className="flex flex-col gap-2 text-xs font-black text-[#74667d]">
                             <div className="flex min-w-0 flex-nowrap items-center gap-1">
                               <div
-                                className={`inline-flex min-h-7 shrink-0 flex-nowrap items-center gap-0.5 rounded-full border px-1.5 py-0.5 ${
+                                className={`inline-flex min-h-7 shrink-0 flex-nowrap items-center gap-0.5 rounded-full border px-1 py-0.5 ${
                                   isTimerRunning
                                     ? "border-sky-200 bg-sky-50 text-sky-800"
                                     : isTimerPaused
@@ -14762,7 +15289,7 @@ function App() {
                                   ⏱ {formatTimerSeconds(timerElapsedSeconds)}
                                 </span>
                                 <button
-                                  className={`rounded-full px-1.5 py-0.5 text-[11px] font-black leading-5 transition disabled:cursor-not-allowed disabled:opacity-55 ${
+                                  className={`rounded-full px-1 py-0.5 text-[11px] font-black leading-5 transition disabled:cursor-not-allowed disabled:opacity-55 ${
                                     isTimerRunning
                                       ? "bg-sky-500 text-white shadow-sm shadow-sky-100 hover:bg-sky-600"
                                       : isTimerPaused
@@ -14776,16 +15303,26 @@ function App() {
                                   {timerButtonLabel}
                                 </button>
                               </div>
+                              {taskTimeEntries.length > 0 ? (
+                                <button
+                                  aria-label={`查看${item.title}的计时明细`}
+                                  className="inline-flex min-h-7 shrink-0 items-center rounded-full border border-sky-100 bg-white/85 px-1 py-0.5 text-[11px] font-black leading-5 text-sky-700 transition hover:bg-sky-50 focus:outline-none focus:ring-4 focus:ring-sky-100"
+                                  type="button"
+                                  onClick={() => openTaskTimeDetails(item.id, selectedDate)}
+                                >
+                                  {taskTimeEntries.length} 段
+                                </button>
+                              ) : null}
                               <div className="inline-flex shrink-0 items-center gap-1">
                                 <button
-                                  className="inline-flex min-h-7 items-center rounded-full bg-white/80 px-1.5 py-0.5 text-[11px] font-bold leading-5 text-[#6c5e75] transition hover:bg-white"
+                                  className="inline-flex min-h-7 items-center rounded-full bg-white/80 px-1 py-0.5 text-[11px] font-bold leading-5 text-[#6c5e75] transition hover:bg-white"
                                   type="button"
                                   onClick={() => handleEdit(item)}
                                 >
                                   编辑备注
                                 </button>
                                 <button
-                                  className="inline-flex min-h-7 items-center rounded-full bg-white/80 px-1.5 py-0.5 text-[11px] font-bold leading-5 text-rose-600 transition hover:bg-white"
+                                  className="inline-flex min-h-7 items-center rounded-full bg-white/80 px-1 py-0.5 text-[11px] font-bold leading-5 text-rose-600 transition hover:bg-white"
                                   type="button"
                                   onClick={() => handleDelete(item.id)}
                                 >
