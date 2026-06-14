@@ -320,6 +320,8 @@ type PlanItem = {
   targetMinutes?: number;
   actualMinutes?: number;
   timeEntries: TaskTimeEntry[];
+  timerResetAtByDate: Record<string, number>;
+  timerEndedDates: string[];
   sortOrder?: number;
   createdAt: number;
   updatedAt?: number;
@@ -535,6 +537,10 @@ type ComplexProjectPhaseTimeDetailTarget = {
   date: string;
 };
 type TaskTimeDetailTarget = {
+  itemId: string;
+  date: string;
+};
+type TaskRescheduleEdit = {
   itemId: string;
   date: string;
 };
@@ -1835,6 +1841,42 @@ async function captureGanttElement(element: HTMLElement): Promise<HTMLCanvasElem
     width,
     windowHeight: height,
     windowWidth: width,
+  });
+}
+
+async function captureDashboardElement(element: HTMLElement): Promise<HTMLCanvasElement> {
+  if ("fonts" in document) {
+    await document.fonts.ready;
+  }
+
+  await waitForImages(element);
+
+  const elementRect = element.getBoundingClientRect();
+  const width = Math.ceil(elementRect.width || element.scrollWidth);
+  const height = Math.ceil(Math.max(element.scrollHeight, elementRect.height));
+  const viewportWidth = Math.ceil(
+    Math.max(document.documentElement.clientWidth, window.innerWidth || 0, width),
+  );
+  const viewportHeight = Math.ceil(
+    Math.max(document.documentElement.clientHeight, window.innerHeight || 0, height),
+  );
+
+  return html2canvas(element, {
+    backgroundColor: "#ffffff",
+    height,
+    logging: false,
+    onclone: (_clonedDocument, clonedElement) => {
+      clonedElement.style.overflow = "visible";
+      clonedElement.style.width = `${width}px`;
+      clonedElement.querySelectorAll<HTMLElement>("[data-export-ignore]").forEach((node) => {
+        node.style.display = "none";
+      });
+    },
+    scale: 2,
+    useCORS: true,
+    width,
+    windowHeight: viewportHeight,
+    windowWidth: viewportWidth,
   });
 }
 
@@ -3452,6 +3494,34 @@ function normalizePlanItem(
         .filter((entry): entry is TaskTimeEntry => Boolean(entry))
         .sort((left, right) => left.startedAt - right.startedAt)
     : [];
+  const timerEndedDates = Array.isArray(value.timerEndedDates)
+    ? uniqueValues(
+        value.timerEndedDates
+          .map((dateValue) => normalizeDateInputString(dateValue, ""))
+          .filter(Boolean),
+      )
+    : [];
+  const timerResetAtByDate = isPlainObject(value.timerResetAtByDate)
+    ? Object.entries(value.timerResetAtByDate).reduce<Record<string, number>>(
+        (result, [dateValue, timestampValue]) => {
+          const normalizedDate = normalizeDateInputString(dateValue, "");
+          const timestamp = normalizeTimestamp(timestampValue);
+
+          if (normalizedDate && timestamp) {
+            result[normalizedDate] = timestamp;
+          }
+
+          return result;
+        },
+        {},
+      )
+    : {};
+
+  timerEndedDates.forEach((endedDate) => {
+    if (!timerResetAtByDate[endedDate]) {
+      timerResetAtByDate[endedDate] = updatedAt;
+    }
+  });
 
   return {
     id: normalizeText(value.id) || createId(),
@@ -3464,6 +3534,8 @@ function normalizePlanItem(
     targetMinutes: normalizeMinutes(value.targetMinutes),
     actualMinutes: normalizeMinutes(value.actualMinutes),
     timeEntries,
+    timerResetAtByDate,
+    timerEndedDates,
     sortOrder: normalizeSortOrder(value.sortOrder, fallbackIndex),
     createdAt,
     updatedAt,
@@ -3654,36 +3726,51 @@ function mergePlanBooks(
   deletedItemIds: string[],
 ): PlanBook {
   const deletedSet = new Set(deletedItemIds);
-  const dates = new Set([...Object.keys(localPlanBook), ...Object.keys(cloudPlanBook)]);
+  const latestItemsById = new Map<string, PlanItem>();
   const merged: PlanBook = {};
 
-  dates.forEach((date) => {
-    const itemMap = new Map<string, PlanItem>();
-    const dateItems = [...(localPlanBook[date] ?? []), ...(cloudPlanBook[date] ?? [])];
-
-    dateItems.forEach((item, index) => {
-      if (deletedSet.has(item.id)) {
+  const collectItems = (planBook: PlanBook) => {
+    Object.entries(planBook).forEach(([date, items]) => {
+      if (!Array.isArray(items)) {
         return;
       }
 
-      const normalizedItem = normalizePlanItem(item, date, index);
+      items.forEach((item, index) => {
+        if (deletedSet.has(item.id)) {
+          return;
+        }
 
-      if (!normalizedItem) {
-        return;
-      }
+        const normalizedItem = normalizePlanItem(item, date, index);
 
-      const existingItem = itemMap.get(item.id);
+        if (!normalizedItem) {
+          return;
+        }
 
-      if (!existingItem || getItemTime(normalizedItem) >= getItemTime(existingItem)) {
-        itemMap.set(item.id, normalizedItem);
-      }
+        const existingItem = latestItemsById.get(normalizedItem.id);
+
+        if (!existingItem || getItemTime(normalizedItem) >= getItemTime(existingItem)) {
+          latestItemsById.set(normalizedItem.id, normalizedItem);
+        }
+      });
     });
+  };
 
-    const items = sortPlansByDisplayOrder(Array.from(itemMap.values()));
+  collectItems(cloudPlanBook);
+  collectItems(localPlanBook);
 
-    if (items.length > 0) {
-      merged[date] = items;
-    }
+  latestItemsById.forEach((item) => {
+    const date = normalizeDateInputString(item.date, formatDateInput(new Date()));
+    const items = merged[date] ?? [];
+
+    items.push({
+      ...item,
+      date,
+    });
+    merged[date] = items;
+  });
+
+  Object.entries(merged).forEach(([date, items]) => {
+    merged[date] = sortPlansByDisplayOrder(items);
   });
 
   return merged;
@@ -3885,6 +3972,26 @@ function getTaskTimeEntriesForDate(item: PlanItem, dateValue: string): TaskTimeE
   return getTaskTimeEntries(item)
     .filter((entry) => entry.date === dateValue)
     .sort((left, right) => left.startedAt - right.startedAt);
+}
+
+function getTaskTimeEntriesForDateAfter(
+  item: PlanItem,
+  dateValue: string,
+  resetAt = 0,
+): TaskTimeEntry[] {
+  return getTaskTimeEntriesForDate(item, dateValue).filter((entry) => entry.startedAt > resetAt);
+}
+
+function getTaskTimeSecondsForDateAfter(
+  item: PlanItem,
+  dateValue: string,
+  resetAt = 0,
+  now = Date.now(),
+): number {
+  return getTaskTimeEntriesForDateAfter(item, dateValue, resetAt).reduce(
+    (totalSeconds, entry) => totalSeconds + getTaskTimeEntrySeconds(entry, now),
+    0,
+  );
 }
 
 function getRunningTaskTimeEntry(item: PlanItem): TaskTimeEntry | null {
@@ -4653,6 +4760,10 @@ function addMonthsToDateValue(dateValue: string, monthOffset: number): string {
   return formatDateInput(new Date(date.getFullYear(), date.getMonth() + monthOffset, 1));
 }
 
+function addDaysToDateValue(dateValue: string, dayOffset: number): string {
+  return formatDateInput(addDays(parseDateInputValue(dateValue), dayOffset));
+}
+
 function createDateRange(startDate: string, endDate: string): string[] {
   const dates: string[] = [];
   const start = parseDateInputValue(startDate);
@@ -5250,6 +5361,20 @@ function createId(): string {
   }
 
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function withColorAlpha(hexColor: string, alpha: number): string {
+  const normalizedColor = hexColor.replace("#", "");
+
+  if (!/^[0-9a-f]{6}$/i.test(normalizedColor)) {
+    return hexColor;
+  }
+
+  const red = parseInt(normalizedColor.slice(0, 2), 16);
+  const green = parseInt(normalizedColor.slice(2, 4), 16);
+  const blue = parseInt(normalizedColor.slice(4, 6), 16);
+
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
 }
 
 function waitForImages(element: HTMLElement): Promise<void> {
@@ -8728,6 +8853,7 @@ function App() {
   const [form, setForm] = useState<PlanForm>(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [taskInlineEdit, setTaskInlineEdit] = useState<TaskInlineFieldEdit | null>(null);
+  const [taskRescheduleEdit, setTaskRescheduleEdit] = useState<TaskRescheduleEdit | null>(null);
   const [inlineTitleDraft, setInlineTitleDraft] = useState<string>("");
   const [inlineNoteDraft, setInlineNoteDraft] = useState<string>("");
   const [targetMinutesEditDraft, setTargetMinutesEditDraft] = useState<string>("");
@@ -8759,6 +8885,7 @@ function App() {
   const [isCustomCategoryOpen, setIsCustomCategoryOpen] = useState<boolean>(false);
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [isGanttExporting, setIsGanttExporting] = useState<boolean>(false);
+  const [isTimeStatsExporting, setIsTimeStatsExporting] = useState<boolean>(false);
   const [exportEncouragement, setExportEncouragement] = useState<string>(() => getRandomPrimaryEncouragement());
   const [selectedExportTemplateId, setSelectedExportTemplateId] = useState<string>(
     EXPORT_TEMPLATES[0].id,
@@ -8794,6 +8921,7 @@ function App() {
   const journalRef = useRef<HTMLDivElement | null>(null);
   const exportRef = useRef<HTMLDivElement | null>(null);
   const ganttExportRef = useRef<HTMLDivElement | null>(null);
+  const timeStatsRef = useRef<HTMLElement | null>(null);
   const moodTimelineRef = useRef<HTMLDivElement | null>(null);
   const feedbackTimer = useRef<number | null>(null);
   const complexProjectFeedbackTimer = useRef<number | null>(null);
@@ -10182,6 +10310,7 @@ function App() {
     setActualEditId(null);
     setActualMinutesDraft("");
     setActualMinutesError("");
+    cancelTaskReschedule();
     setIsPlanSearchOpen(false);
 
     if (!result.item.id) {
@@ -10494,6 +10623,8 @@ function App() {
       completed: false,
       targetMinutes,
       timeEntries: [],
+      timerResetAtByDate: {},
+      timerEndedDates: [],
       createdAt: updatedAt,
       updatedAt,
     };
@@ -10544,6 +10675,7 @@ function App() {
       resetForm();
     }
 
+    cancelTaskReschedule();
     setTaskInlineEdit({ itemId: item.id, field });
     setInlineTitleDraft(field === "title" ? item.title : "");
     setInlineNoteDraft(field === "note" ? item.note : "");
@@ -10648,6 +10780,9 @@ function App() {
     if (taskInlineEdit?.itemId === id) {
       cancelTaskInlineEdit();
     }
+    if (taskRescheduleEdit?.itemId === id) {
+      cancelTaskReschedule();
+    }
     setTaskTimersByTaskId((currentTimers) => {
       const nextTimers = { ...currentTimers };
       delete nextTimers[id];
@@ -10657,6 +10792,7 @@ function App() {
 
   const startActualMinutesEdit = (item: PlanItem) => {
     cancelTaskInlineEdit();
+    cancelTaskReschedule();
     setActualEditId(item.id);
     setActualMinutesDraft(item.actualMinutes ? String(item.actualMinutes) : "");
     setActualMinutesError("");
@@ -10675,11 +10811,118 @@ function App() {
     }
   };
 
+  const cancelTaskReschedule = () => {
+    setTaskRescheduleEdit(null);
+  };
+
+  const startTaskReschedule = (item: PlanItem) => {
+    if (item.completed) {
+      return;
+    }
+
+    resetForm();
+    cancelTaskInlineEdit();
+    cancelActualMinutesEdit();
+    setTaskRescheduleEdit((current) =>
+      current?.itemId === item.id
+        ? null
+        : {
+            itemId: item.id,
+            date: addDaysToDateValue(selectedDate, 1),
+          },
+    );
+  };
+
+  const updateTaskRescheduleDate = (itemId: string, date: string) => {
+    setTaskRescheduleEdit((current) =>
+      current?.itemId === itemId
+        ? {
+            ...current,
+            date,
+          }
+        : current,
+    );
+  };
+
+  const rescheduleTask = (itemId: string, targetDate: string) => {
+    const targetDateValue = normalizeDateInputString(targetDate, selectedDate);
+    const item =
+      (plansByDate[selectedDate] ?? []).find((planItem) => planItem.id === itemId) ??
+      Object.values(plansByDate)
+        .flat()
+        .find((planItem) => planItem.id === itemId);
+
+    if (!item || item.completed) {
+      cancelTaskReschedule();
+      return;
+    }
+
+    const sourceDate = normalizeDateInputString(item.date, selectedDate);
+
+    if (targetDateValue === sourceDate) {
+      cancelTaskReschedule();
+      return;
+    }
+
+    const updatedAt = Date.now();
+
+    setTimerTick(updatedAt);
+    setPlansByDate((currentBook) => {
+      const sourceItem =
+        (currentBook[sourceDate] ?? []).find((planItem) => planItem.id === itemId) ??
+        Object.values(currentBook)
+          .flat()
+          .find((planItem) => planItem.id === itemId) ??
+        item;
+      const targetPlans = (currentBook[targetDateValue] ?? []).filter(
+        (planItem) => planItem.id !== itemId,
+      );
+      const movedItem: PlanItem = {
+        ...sourceItem,
+        date: targetDateValue,
+        timeEntries: stopRunningTaskTimeEntries(getTaskTimeEntries(sourceItem), updatedAt),
+        sortOrder: getTopSortOrderForPriority(targetPlans, sourceItem.priority),
+        updatedAt,
+      };
+      const nextBook = Object.entries(currentBook).reduce<PlanBook>((book, [date, items]) => {
+        const remainingItems = items.filter((planItem) => planItem.id !== itemId);
+
+        if (remainingItems.length > 0 || date === sourceDate) {
+          book[date] = sortPlansByDisplayOrder(remainingItems);
+        }
+
+        return book;
+      }, {});
+
+      nextBook[targetDateValue] = sortPlansByDisplayOrder([
+        movedItem,
+        ...(nextBook[targetDateValue] ?? []),
+      ]);
+
+      return normalizePlanBook(nextBook);
+    });
+    setTaskTimersByTaskId((currentTimers) => {
+      if (!currentTimers[itemId]) {
+        return currentTimers;
+      }
+
+      const nextTimers = { ...currentTimers };
+      delete nextTimers[itemId];
+      return nextTimers;
+    });
+    cancelTaskInlineEdit();
+    cancelActualMinutesEdit();
+    cancelTaskReschedule();
+    clearTimerNotice();
+    showTimerNotice(`已移到 ${formatDisplayDate(targetDateValue)}`);
+  };
+
   const selectPlannerDate = (dateValue: string) => {
     setSelectedDate(dateValue);
     resetForm();
     cancelTaskInlineEdit();
     cancelActualMinutesEdit();
+    cancelTaskReschedule();
   };
 
   const saveActualMinutes = (id: string) => {
@@ -10737,6 +10980,9 @@ function App() {
                   durationSeconds: 0,
                 },
               ],
+          timerEndedDates: (currentItem.timerEndedDates ?? []).filter(
+            (date) => date !== selectedDate,
+          ),
           updatedAt: now,
         };
       }),
@@ -10766,6 +11012,54 @@ function App() {
 
       return nextTimers;
     });
+  };
+
+  const endTaskTimer = (item: PlanItem) => {
+    if (item.completed) {
+      return;
+    }
+
+    clearTimerNotice();
+
+    const now = Date.now();
+    setTimerTick(now);
+    updatePlansForSelectedDate((currentPlans) =>
+      currentPlans.map((currentItem) => {
+        if (currentItem.id !== item.id) {
+          return currentItem;
+        }
+
+        const stoppedEntries = stopRunningTaskTimeEntries(getTaskTimeEntries(currentItem), now);
+        const hasEntriesForSelectedDate = stoppedEntries.some(
+          (entry) => entry.date === selectedDate,
+        );
+
+        return {
+          ...currentItem,
+          timeEntries: stoppedEntries,
+          timerResetAtByDate: hasEntriesForSelectedDate
+            ? {
+                ...(currentItem.timerResetAtByDate ?? {}),
+                [selectedDate]: now,
+              }
+            : (currentItem.timerResetAtByDate ?? {}),
+          timerEndedDates: hasEntriesForSelectedDate
+            ? uniqueValues([...(currentItem.timerEndedDates ?? []), selectedDate])
+            : (currentItem.timerEndedDates ?? []),
+          updatedAt: now,
+        };
+      }),
+    );
+    setTaskTimersByTaskId((currentTimers) => {
+      if (!currentTimers[item.id]) {
+        return currentTimers;
+      }
+
+      const nextTimers = { ...currentTimers };
+      delete nextTimers[item.id];
+      return nextTimers;
+    });
+    showTimerNotice(`已结束“${item.title}”计时，可重新开始`);
   };
 
   const handleCountdownClick = (item: PlanItem, minutes: number) => {
@@ -10925,6 +11219,9 @@ function App() {
     if (targetPlan?.completed && actualEditId === id) {
       cancelActualMinutesEdit();
     }
+    if (taskRescheduleEdit?.itemId === id) {
+      cancelTaskReschedule();
+    }
 
     updatePlansForSelectedDate((currentPlans) =>
       currentPlans.map((item) => {
@@ -10967,6 +11264,7 @@ function App() {
     setDeletedItemIds((current) => uniqueValues([...current, ...plans.map((item) => item.id)]));
     cancelActualMinutesEdit();
     cancelTaskInlineEdit();
+    cancelTaskReschedule();
     setTaskTimersByTaskId({});
     clearTimerNotice();
     resetForm();
@@ -11035,6 +11333,77 @@ function App() {
     }
 
     pdf.save(`今日计划手帐-${selectedDate}.pdf`);
+  };
+
+  const captureTimeStats = async () => {
+    if (!timeStatsRef.current) {
+      throw new Error("用时统计看板尚未准备好");
+    }
+
+    const dashboardElement = timeStatsRef.current;
+
+    try {
+      flushSync(() => {
+        setIsTimeStatsExporting(true);
+        setActiveWorkspaceTab("time");
+      });
+      dashboardElement.classList.add("time-stats-export-mode");
+      await new Promise<void>((resolve) =>
+        window.requestAnimationFrame(() =>
+          window.requestAnimationFrame(() => resolve()),
+        ),
+      );
+
+      return await captureDashboardElement(dashboardElement);
+    } finally {
+      dashboardElement.classList.remove("time-stats-export-mode");
+      flushSync(() => {
+        setIsTimeStatsExporting(false);
+      });
+    }
+  };
+
+  const handleExportTimeStatsPng = async () => {
+    try {
+      const canvas = await captureTimeStats();
+      const link = document.createElement("a");
+
+      link.download = `每日用时看板-${selectedDate}.png`;
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "用时统计 PNG 导出失败");
+    }
+  };
+
+  const handleExportTimeStatsPdf = async () => {
+    try {
+      const canvas = await captureTimeStats();
+      const imageData = canvas.toDataURL("image/png");
+      const pdf = new jsPDF({ format: "a4", orientation: "portrait", unit: "pt" });
+      const margin = 24;
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const imageWidth = pageWidth - margin * 2;
+      const imageHeight = (canvas.height * imageWidth) / canvas.width;
+      const printableHeight = pageHeight - margin * 2;
+      let remainingHeight = imageHeight;
+      let imageTop = margin;
+
+      pdf.addImage(imageData, "PNG", margin, imageTop, imageWidth, imageHeight);
+      remainingHeight -= printableHeight;
+
+      while (remainingHeight > 0) {
+        imageTop -= printableHeight;
+        pdf.addPage();
+        pdf.addImage(imageData, "PNG", margin, imageTop, imageWidth, imageHeight);
+        remainingHeight -= printableHeight;
+      }
+
+      pdf.save(`每日用时看板-${selectedDate}.pdf`);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "用时统计 PDF 导出失败");
+    }
   };
 
   const captureComplexProjectGantt = async (project: ComplexProject) => {
@@ -11283,7 +11652,26 @@ function App() {
       current.actualSeconds += getLiveActualSecondsForPlan(item);
       categoryMap.set(key, current);
       return categoryMap;
-    }, new Map<string, { actualSeconds: number; count: number; label: string; targetSeconds: number }>()),
+    }, complexProjects.reduce((categoryMap, project) => {
+      const actualSeconds = getComplexProjectSecondsForDate(project, selectedDate, timerTick);
+
+      if (actualSeconds <= 0) {
+        return categoryMap;
+      }
+
+      const key = project.category || "未分类";
+      const current = categoryMap.get(key) ?? {
+        actualSeconds: 0,
+        count: 0,
+        label: key,
+        targetSeconds: 0,
+      };
+
+      current.count += 1;
+      current.actualSeconds += actualSeconds;
+      categoryMap.set(key, current);
+      return categoryMap;
+    }, new Map<string, { actualSeconds: number; count: number; label: string; targetSeconds: number }>())),
   )
     .map(([, value]) => value)
     .filter((item) => item.targetSeconds > 0 || item.actualSeconds > 0)
@@ -11412,8 +11800,22 @@ function App() {
       };
     })
     .filter((item) => item.totalSeconds > 0 || item.todaySessionCount > 0);
+  const timeStatsSummaryParts = [
+    plans.length > 0 ? `${plans.length} 项任务` : "",
+    complexProjectTimeItems.length > 0 ? `${complexProjectTimeItems.length} 个项目` : "",
+  ].filter(Boolean);
+  const timeStatsSummaryText =
+    timeStatsSummaryParts.length > 0
+      ? `当前 ${timeStatsSummaryParts.join(" · ")}`
+      : dailyTimeStats.liveActualSeconds > 0
+        ? `已记录 ${formatDashboardDuration(dailyTimeStats.liveActualSeconds)}`
+        : "暂无用时数据";
   const isSignedIn = Boolean(currentUser && authMode !== "update-password");
   const isPreviewMode = new URLSearchParams(window.location.search).has("preview");
+  const isTimeStatsExportPreviewMode = new URLSearchParams(window.location.search).has(
+    "timeStatsExportPreview",
+  );
+  const shouldUseTimeStatsExportLayout = isTimeStatsExporting || isTimeStatsExportPreviewMode;
   const toggleTodayWorkspaceSection = (sectionId: TodayWorkspaceSectionId) => {
     setTodayWorkspaceCollapsed((current) => ({
       ...current,
@@ -11425,10 +11827,12 @@ function App() {
     resetForm();
     cancelTaskInlineEdit();
     cancelActualMinutesEdit();
+    cancelTaskReschedule();
     setIsTaskFormOpen(true);
   };
   const closeTaskForm = () => {
     resetForm();
+    cancelTaskReschedule();
     setIsTaskFormOpen(false);
   };
   const selectAvatar = (avatarId: AvatarId) => {
@@ -12708,23 +13112,53 @@ function App() {
     </section>
   );
   const timeStatsWorkspace = (
-    <section className="p-4 sm:p-6">
+    <section
+      className={`time-stats-dashboard p-4 sm:p-6 ${
+        shouldUseTimeStatsExportLayout
+          ? "time-stats-export-mode w-[1120px] max-w-[1120px] overflow-hidden bg-white"
+          : ""
+      }`}
+      ref={timeStatsRef}
+    >
       <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p className="text-sm font-black text-violet-700">用时统计</p>
           <h2 className="mt-1 text-2xl font-black text-[#3f3349]">每日用时看板</h2>
           <p className="mt-1 text-sm font-bold text-[#8b7b91]">
-            {plans.length > 0 ? `当前 ${plans.length} 项任务` : "暂无用时数据"}
+            {timeStatsSummaryText}
           </p>
         </div>
-        <span className="w-fit rounded-full bg-violet-50 px-3 py-1 text-xs font-black text-violet-700">
-          {dailyTimeStats.activeTimerCount > 0
-            ? `${dailyTimeStats.activeTimerCount} 项计时中`
-            : "实时更新"}
-        </span>
+        <div className="flex flex-wrap items-center gap-2" data-export-ignore="true">
+          <span className="w-fit rounded-full bg-violet-50 px-3 py-1 text-xs font-black text-violet-700">
+            {dailyTimeStats.activeTimerCount > 0
+              ? `${dailyTimeStats.activeTimerCount} 项计时中`
+              : "实时更新"}
+          </span>
+          <button
+            className="rounded-full border border-sky-200 bg-white px-3 py-1.5 text-xs font-black text-sky-700 shadow-sm transition hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-55"
+            disabled={isTimeStatsExporting}
+            type="button"
+            onClick={handleExportTimeStatsPng}
+          >
+            {isTimeStatsExporting ? "导出中" : "导出图片"}
+          </button>
+          <button
+            className="rounded-full border border-violet-200 bg-white px-3 py-1.5 text-xs font-black text-violet-700 shadow-sm transition hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-55"
+            disabled={isTimeStatsExporting}
+            type="button"
+            onClick={handleExportTimeStatsPdf}
+          >
+            {isTimeStatsExporting ? "导出中" : "导出 PDF"}
+          </button>
+        </div>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div
+        data-time-stats-summary-grid="true"
+        className={`grid gap-3 ${
+          shouldUseTimeStatsExportLayout ? "grid-cols-5" : "sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-5"
+        }`}
+      >
         {dailyTimeStatCards.map((card) => (
           <div className={`rounded-[1.15rem] border px-4 py-3 ${card.className}`} key={card.label}>
             <p className="text-xs font-black opacity-75">{card.label}</p>
@@ -12732,7 +13166,12 @@ function App() {
             <p className="mt-1 text-xs font-bold opacity-75">{card.detail}</p>
           </div>
         ))}
-        <div className="flex items-center justify-between gap-3 rounded-[1.15rem] border border-violet-100 bg-violet-50 px-4 py-3 text-violet-700">
+        <div
+          data-time-stats-progress-card="true"
+          className={`flex items-center justify-between gap-3 rounded-[1.15rem] border border-violet-100 bg-violet-50 px-4 py-3 text-violet-700 ${
+            shouldUseTimeStatsExportLayout ? "" : "sm:col-span-2 xl:col-span-4 2xl:col-span-1"
+          }`}
+        >
           <div>
             <p className="text-xs font-black opacity-75">实际 / 计划</p>
             <p className="mt-2 text-sm font-bold leading-tight opacity-75">按目标完成比例</p>
@@ -12743,8 +13182,14 @@ function App() {
               background: `conic-gradient(#8b5cf6 ${dailyTimeStats.actualProgress * 3.6}deg, #eaf2ff 0deg)`,
             }}
           >
-            <div className="absolute inset-3 flex flex-col items-center justify-center rounded-full bg-white text-center shadow-sm">
-              <span className="text-xl font-black text-[#4b3a59]">
+            <div
+              data-time-stats-progress-inner="true"
+              className="absolute inset-3 grid place-items-center rounded-full bg-white text-center shadow-sm"
+            >
+              <span
+                data-time-stats-progress-value="true"
+                className="block w-full text-center text-xl font-black leading-none text-[#4b3a59]"
+              >
                 {dailyTimeStats.targetTotalMinutes > 0 ? `${dailyTimeStats.actualPercent}%` : "暂无"}
               </span>
             </div>
@@ -12763,35 +13208,78 @@ function App() {
             </span>
           </div>
           {categoryVisualizationItems.length > 0 ? (
-            <div className="grid gap-3 sm:grid-cols-2">
+            <div
+              data-item-count={categoryVisualizationItems.length}
+              data-time-stats-category-grid="true"
+              className={`grid gap-4 ${
+                shouldUseTimeStatsExportLayout ? "grid-cols-2" : "sm:grid-cols-2"
+              }`}
+            >
               {categoryVisualizationItems.map((item) => (
                 <div
-                  className="rounded-[1rem] border p-3"
+                  data-time-stats-category-card="true"
+                  className="min-w-0 overflow-hidden rounded-[1rem] border p-4"
                   key={item.label}
                   style={{
-                    background: `linear-gradient(180deg, ${item.color}16 0%, #ffffff 100%)`,
-                    borderColor: `${item.color}55`,
+                    background: `linear-gradient(180deg, ${withColorAlpha(item.color, 0.09)} 0%, #ffffff 100%)`,
+                    borderColor: withColorAlpha(item.color, 0.33),
                   }}
                 >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="inline-flex min-w-0 items-center gap-1.5 text-sm font-black text-[#5a4b63]">
+                  <div
+                    data-time-stats-category-header="true"
+                    className="flex min-h-8 items-center justify-between gap-3"
+                  >
+                    <span className="inline-flex min-w-0 items-center gap-2 text-sm font-black leading-tight text-[#5a4b63]">
                       <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: item.color }} />
-                      <span className="truncate">{item.label}</span>
+                      <span className="min-w-0 break-words">{item.label}</span>
                     </span>
-                    <span className="shrink-0 rounded-full bg-white/80 px-2 py-0.5 text-xs font-black text-[#8b7b91]">
+                    <span className="inline-flex min-h-7 shrink-0 items-center rounded-full bg-white/85 px-2.5 py-0.5 text-xs font-black text-[#8b7b91]">
                       {item.count} 项
                     </span>
                   </div>
-                  <div className="mt-3 flex h-28 items-end justify-center gap-5 rounded-[0.9rem] bg-white/70 px-2 py-2">
+
+                  <div data-time-stats-category-metrics="true" className="mt-3 grid grid-cols-2 gap-2">
+                    {[
+                      {
+                        backgroundColor: "rgba(56, 189, 248, 0.12)",
+                        borderColor: "rgba(56, 189, 248, 0.28)",
+                        label: "计划",
+                        textColor: "#0369a1",
+                        value: item.targetSeconds,
+                      },
+                      {
+                        backgroundColor: withColorAlpha(item.color, 0.12),
+                        borderColor: withColorAlpha(item.color, 0.28),
+                        label: "实际",
+                        textColor: item.color,
+                        value: item.actualSeconds,
+                      },
+                    ].map((metric) => (
+                      <div
+                        data-time-stats-category-metric="true"
+                        className="min-w-0 rounded-xl border px-2 py-1.5 text-center"
+                        key={metric.label}
+                        style={{
+                          backgroundColor: metric.backgroundColor,
+                          borderColor: metric.borderColor,
+                          color: metric.textColor,
+                        }}
+                      >
+                        <span className="block text-[10px] font-black leading-none opacity-75">{metric.label}</span>
+                        <span className="mt-1 block break-words text-[11px] font-black leading-tight">
+                          {formatDashboardDuration(metric.value)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="mt-3 flex h-32 items-end justify-center gap-8 rounded-[0.9rem] bg-white/70 px-3 pb-3 pt-4">
                     {[
                       { label: "计划", value: item.targetSeconds, height: item.targetHeight, color: "#38bdf8" },
                       { label: "实际", value: item.actualSeconds, height: item.actualHeight, color: item.color },
                     ].map((bar) => (
-                      <div className="flex min-w-0 flex-col items-center gap-1" key={bar.label}>
-                        <span className="whitespace-nowrap text-center text-xs font-black leading-tight text-[#786981]">
-                          {formatDashboardDuration(bar.value)}
-                        </span>
-                        <div className="flex h-20 w-8 items-end rounded-full bg-white p-0.5 shadow-inner">
+                      <div className="flex h-full min-w-0 flex-col items-center justify-end gap-1.5" key={bar.label}>
+                        <div className="flex h-24 w-9 items-end rounded-full bg-white p-0.5 shadow-inner">
                           <div className="w-full rounded-full" style={{ backgroundColor: bar.color, height: `${bar.height}%` }} />
                         </div>
                         <span className="text-xs font-black text-[#8b7b91]">{bar.label}</span>
@@ -12818,11 +13306,15 @@ function App() {
             </span>
           </div>
           {taskTimeChartItems.length > 0 ? (
-            <div className="overflow-x-auto">
-              <div className="flex min-w-max items-stretch gap-3 rounded-[1rem] bg-[#faf7fb] px-3 pb-3 pt-3">
+            <div>
+              <div
+                data-time-stats-task-chart-list="true"
+                className="grid grid-cols-[repeat(auto-fit,minmax(7.5rem,1fr))] items-stretch gap-3 rounded-[1rem] bg-[#faf7fb] px-3 pb-3 pt-3"
+              >
                 {taskTimeChartItems.map((item) => (
                   <div
-                    className="flex w-32 shrink-0 flex-col items-center rounded-[1rem] border border-violet-100 bg-white/80 px-2 py-2 shadow-sm shadow-violet-100/60"
+                    data-time-stats-task-chart-item="true"
+                    className="flex min-w-0 flex-col items-center rounded-[1rem] border border-violet-100 bg-white/80 px-2 py-2 shadow-sm shadow-violet-100/60"
                     key={item.id}
                   >
                     <div className="flex h-36 items-end justify-center gap-2">
@@ -12849,7 +13341,7 @@ function App() {
                         </div>
                       ))}
                     </div>
-                    <p className="mt-2 w-full truncate text-center text-sm font-black text-[#5a4b63]">
+                    <p className="mt-2 w-full break-words text-center text-sm font-black leading-tight text-[#5a4b63]">
                       {item.title}
                     </p>
                   </div>
@@ -12874,10 +13366,15 @@ function App() {
           </span>
         </div>
         {complexProjectTimeItems.length > 0 ? (
-          <div className="grid gap-3 xl:grid-cols-2">
+          <div
+            data-time-stats-complex-grid="true"
+            className={`grid gap-3 ${
+              !shouldUseTimeStatsExportLayout && complexProjectTimeItems.length > 1 ? "xl:grid-cols-2" : ""
+            }`}
+          >
             {complexProjectTimeItems.map((projectItem) => (
               <div
-                className="rounded-[1.1rem] border border-white/80 bg-white/85 p-3 shadow-sm shadow-amber-100/50"
+                className="min-w-0 overflow-hidden rounded-[1.1rem] border border-white/80 bg-white/85 p-3 shadow-sm shadow-amber-100/50"
                 key={projectItem.id}
               >
                 <div className="flex flex-wrap items-start justify-between gap-2">
@@ -12894,14 +13391,18 @@ function App() {
                     总计 {formatDashboardDuration(projectItem.totalSeconds)}
                   </span>
                 </div>
-                <div className="mt-3 space-y-2.5">
+                <div
+                  data-phase-count={projectItem.phases.length}
+                  data-time-stats-complex-phases="true"
+                  className="mt-3 space-y-2.5"
+                >
                   {projectItem.phases.length > 0 ? (
                     projectItem.phases.map((phase) => {
                       const hasTodayTime = phase.todaySessionCount > 0;
 
                       return (
                         <div
-                          className={`rounded-[0.9rem] border px-3 py-2 transition ${
+                          className={`min-w-0 overflow-hidden rounded-[0.9rem] border px-3 py-2 transition ${
                             phase.isRunning || hasTodayTime
                               ? "border-sky-200 bg-sky-50/70 shadow-sm shadow-sky-100/60"
                               : "border-amber-100 bg-white/80"
@@ -14832,9 +15333,33 @@ function App() {
                       selectedDate,
                       timerTick,
                     );
+                    const timerResetAt =
+                      (item.timerResetAtByDate ?? {})[selectedDate] ?? 0;
+                    const activeTaskTimeEntries = getTaskTimeEntriesForDateAfter(
+                      item,
+                      selectedDate,
+                      timerResetAt,
+                    );
+                    const activeTimerElapsedSeconds = getTaskTimeSecondsForDateAfter(
+                      item,
+                      selectedDate,
+                      timerResetAt,
+                      timerTick,
+                    );
                     const hasForwardTiming = taskTimeEntries.length > 0 || timerElapsedSeconds > 0;
+                    const hasActiveForwardTiming =
+                      activeTaskTimeEntries.length > 0 || activeTimerElapsedSeconds > 0;
                     const isTimerRunning = Boolean(getRunningTaskTimeEntry(item));
-                    const isTimerPaused = Boolean(hasForwardTiming && !isTimerRunning);
+                    const isTimerEnded = Boolean(
+                      hasForwardTiming &&
+                        !isTimerRunning &&
+                        !hasActiveForwardTiming &&
+                        timerResetAt > 0,
+                    );
+                    const isTimerPaused = Boolean(
+                      hasActiveForwardTiming && !isTimerRunning && !isTimerEnded,
+                    );
+                    const timerDisplaySeconds = activeTimerElapsedSeconds;
                     const timerButtonLabel = isTimerRunning
                       ? "暂停计时"
                       : isTimerPaused
@@ -14857,7 +15382,12 @@ function App() {
                     const isTitleEditing = activeInlineField === "title";
                     const isNoteEditing = activeInlineField === "note";
                     const isActualEditing = actualEditId === item.id;
-                    const isCardInputEditing = Boolean(activeInlineField) || isActualEditing;
+                    const isTaskRescheduling = taskRescheduleEdit?.itemId === item.id;
+                    const taskRescheduleDate = isTaskRescheduling
+                      ? taskRescheduleEdit.date
+                      : addDaysToDateValue(selectedDate, 1);
+                    const isCardInputEditing =
+                      Boolean(activeInlineField) || isActualEditing || isTaskRescheduling;
 
                     return (
                       <motion.article
@@ -15275,7 +15805,7 @@ function App() {
 
                         <div className="relative mt-2" data-export-ignore="true">
                           <div className="flex flex-col gap-2 text-xs font-black text-[#74667d]">
-                            <div className="flex min-w-0 flex-nowrap items-center gap-1">
+                            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                               <div
                                 className={`inline-flex min-h-7 shrink-0 flex-nowrap items-center gap-0.5 rounded-full border px-1 py-0.5 ${
                                   isTimerRunning
@@ -15286,7 +15816,7 @@ function App() {
                                 } ${item.completed ? "opacity-60" : ""}`}
                               >
                                 <span className="whitespace-nowrap tabular-nums">
-                                  ⏱ {formatTimerSeconds(timerElapsedSeconds)}
+                                  ⏱ {formatTimerSeconds(timerDisplaySeconds)}
                                 </span>
                                 <button
                                   className={`rounded-full px-1 py-0.5 text-[11px] font-black leading-5 transition disabled:cursor-not-allowed disabled:opacity-55 ${
@@ -15302,6 +15832,17 @@ function App() {
                                 >
                                   {timerButtonLabel}
                                 </button>
+                                {hasActiveForwardTiming && !isTimerEnded ? (
+                                  <button
+                                    aria-label={`结束${item.title}计时`}
+                                    className="rounded-full bg-white px-1 py-0.5 text-[11px] font-black leading-5 text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-55"
+                                    disabled={item.completed}
+                                    type="button"
+                                    onClick={() => endTaskTimer(item)}
+                                  >
+                                    结束计时
+                                  </button>
+                                ) : null}
                               </div>
                               {taskTimeEntries.length > 0 ? (
                                 <button
@@ -15313,7 +15854,21 @@ function App() {
                                   {taskTimeEntries.length} 段
                                 </button>
                               ) : null}
-                              <div className="inline-flex shrink-0 items-center gap-1">
+                              <div className="inline-flex shrink-0 flex-wrap items-center gap-1">
+                                {!item.completed ? (
+                                  <button
+                                    aria-expanded={isTaskRescheduling}
+                                    className={`inline-flex min-h-7 items-center rounded-full px-1.5 py-0.5 text-[11px] font-bold leading-5 transition ${
+                                      isTaskRescheduling
+                                        ? "bg-amber-100 text-amber-800"
+                                        : "bg-white/80 text-[#6c5e75] hover:bg-white"
+                                    }`}
+                                    type="button"
+                                    onClick={() => startTaskReschedule(item)}
+                                  >
+                                    改期
+                                  </button>
+                                ) : null}
                                 <button
                                   className="inline-flex min-h-7 items-center rounded-full bg-white/80 px-1 py-0.5 text-[11px] font-bold leading-5 text-[#6c5e75] transition hover:bg-white"
                                   type="button"
@@ -15330,6 +15885,60 @@ function App() {
                                 </button>
                               </div>
                             </div>
+                            {isTaskRescheduling ? (
+                              <form
+                                className="flex flex-wrap items-center gap-1.5 rounded-xl border border-white/80 bg-white/80 p-2 shadow-sm shadow-pink-100"
+                                draggable={false}
+                                onDragStartCapture={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                }}
+                                onSubmit={(event) => {
+                                  event.preventDefault();
+                                  rescheduleTask(item.id, taskRescheduleDate);
+                                }}
+                              >
+                                <label
+                                  className="whitespace-nowrap text-[11px] font-black text-[#6c5e75]"
+                                  htmlFor={`task-reschedule-date-${item.id}`}
+                                >
+                                  改到
+                                </label>
+                                <button
+                                  className="rounded-full bg-amber-100 px-2 py-1 text-[11px] font-black text-amber-800 transition hover:bg-amber-200 focus:outline-none focus:ring-4 focus:ring-amber-100"
+                                  type="button"
+                                  onClick={() =>
+                                    rescheduleTask(item.id, addDaysToDateValue(selectedDate, 1))
+                                  }
+                                >
+                                  明天
+                                </button>
+                                <input
+                                  className="min-h-7 min-w-0 flex-1 rounded-full border border-amber-100 bg-white px-2 py-0.5 text-[11px] font-black text-[#46394f] outline-none transition focus:border-amber-200 focus:ring-4 focus:ring-amber-100"
+                                  draggable={false}
+                                  id={`task-reschedule-date-${item.id}`}
+                                  required
+                                  type="date"
+                                  value={taskRescheduleDate}
+                                  onChange={(event) =>
+                                    updateTaskRescheduleDate(item.id, event.target.value)
+                                  }
+                                />
+                                <button
+                                  className="rounded-full bg-[#ff8fbc] px-2 py-1 text-[11px] font-black text-white shadow-sm shadow-pink-100 transition hover:bg-[#ff79ad] focus:outline-none focus:ring-4 focus:ring-pink-100"
+                                  type="submit"
+                                >
+                                  保存
+                                </button>
+                                <button
+                                  className="rounded-full bg-white px-2 py-1 text-[11px] font-black text-[#6c5e75] transition hover:bg-[#fff7fb] focus:outline-none focus:ring-4 focus:ring-pink-100"
+                                  type="button"
+                                  onClick={cancelTaskReschedule}
+                                >
+                                  取消
+                                </button>
+                              </form>
+                            ) : null}
                             <div className={`flex max-w-full flex-nowrap items-center gap-0.5 overflow-visible pl-3 ${item.completed ? "opacity-60" : ""}`}>
                               {COUNTDOWN_OPTIONS.map((option) => {
                                 const optionSeconds = option.minutes * 60;

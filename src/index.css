@@ -35,3 +35,106 @@ button {
 button:disabled {
   cursor: not-allowed;
 }
+
+.time-stats-export-mode {
+  width: 1120px !important;
+  max-width: 1120px !important;
+  overflow: hidden !important;
+  background: #ffffff;
+}
+
+.time-stats-export-mode [data-time-stats-summary-grid] {
+  grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+}
+
+.time-stats-export-mode [data-time-stats-progress-card] {
+  grid-column: auto !important;
+}
+
+.time-stats-export-mode [data-time-stats-progress-inner] {
+  display: grid !important;
+  place-items: center !important;
+}
+
+.time-stats-export-mode [data-time-stats-progress-value] {
+  display: block !important;
+  line-height: 1 !important;
+}
+
+.time-stats-export-mode [data-time-stats-category-grid] {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  gap: 1rem !important;
+}
+
+.time-stats-export-mode [data-time-stats-category-card] {
+  overflow: hidden !important;
+}
+
+.time-stats-export-mode [data-time-stats-category-card] span {
+  line-height: 1.2 !important;
+}
+
+.time-stats-export-mode [data-time-stats-category-header] {
+  align-items: center !important;
+  min-height: 2rem !important;
+}
+
+.time-stats-export-mode [data-time-stats-category-metrics] {
+  margin-top: 0.875rem !important;
+}
+
+.time-stats-export-mode [data-time-stats-category-metric] span {
+  line-height: 1.15 !important;
+}
+
+.time-stats-export-mode [data-time-stats-task-chart-list] {
+  grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr)) !important;
+  min-width: 0 !important;
+  width: 100% !important;
+  overflow: visible !important;
+}
+
+.time-stats-export-mode [data-time-stats-task-chart-item] {
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
+.time-stats-export-mode [data-time-stats-complex-grid] {
+  grid-template-columns: minmax(0, 1fr) !important;
+}
+
+.time-stats-export-mode [data-time-stats-complex-phases] > * {
+  min-width: 0 !important;
+}
+
+.time-stats-export-mode p,
+.time-stats-export-mode span {
+  line-height: 1.65 !important;
+}
+
+.time-stats-export-mode .truncate {
+  min-height: 1.55em !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  white-space: nowrap !important;
+}
+
+.time-stats-export-mode [data-time-stats-category-grid] .truncate,
+.time-stats-export-mode [data-time-stats-complex-grid] .truncate,
+.time-stats-export-mode [data-time-stats-complex-phases] .truncate {
+  display: inline-block !important;
+  min-height: 1.35em !important;
+}
+
+.time-stats-export-mode [data-time-stats-complex-grid] > * {
+  overflow: visible !important;
+}
+
+.time-stats-export-mode [data-time-stats-complex-phases] > * {
+  padding-top: 0.75rem !important;
+  padding-bottom: 0.75rem !important;
+}
+
+.time-stats-export-mode [data-time-stats-complex-phases] [class*="shadow-inner"] {
+  margin-top: 0.625rem !important;
+}
