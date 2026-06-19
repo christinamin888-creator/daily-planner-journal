@@ -1,4 +1,4 @@
-import { DragEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DragEvent, FormEvent, Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
@@ -3683,6 +3683,26 @@ function normalizePlanBook(planBook: PlanBook): PlanBook {
   }, {});
 }
 
+function getUniquePlanItemsFromBook(planBook: PlanBook): PlanItem[] {
+  const itemsById = new Map<string, PlanItem>();
+
+  Object.values(planBook).forEach((items) => {
+    if (!Array.isArray(items)) {
+      return;
+    }
+
+    items.forEach((item) => {
+      const existingItem = itemsById.get(item.id);
+
+      if (!existingItem || getItemTime(item) >= getItemTime(existingItem)) {
+        itemsById.set(item.id, item);
+      }
+    });
+  });
+
+  return Array.from(itemsById.values());
+}
+
 function normalizePayload(payload: unknown): CloudPayload {
   if (
     payload &&
@@ -3974,6 +3994,15 @@ function getTaskTimeEntriesForDate(item: PlanItem, dateValue: string): TaskTimeE
     .sort((left, right) => left.startedAt - right.startedAt);
 }
 
+function getLatestTaskTimeEntryForDate(
+  item: PlanItem,
+  dateValue: string,
+): TaskTimeEntry | null {
+  const entries = getTaskTimeEntriesForDate(item, dateValue);
+
+  return entries[entries.length - 1] ?? null;
+}
+
 function getTaskTimeEntriesForDateAfter(
   item: PlanItem,
   dateValue: string,
@@ -4201,13 +4230,13 @@ function createPhaseTimeEntriesExcelBlob({
 
 function createTaskTimeEntriesExcelBlob({
   category,
-  date,
+  dateLabel,
   entries,
   now,
   taskTitle,
 }: {
   category: string;
-  date: string;
+  dateLabel: string;
   entries: TaskTimeEntry[];
   now: number;
   taskTitle: string;
@@ -4221,7 +4250,7 @@ function createTaskTimeEntriesExcelBlob({
         <td>${index + 1}</td>
         <td>${escapeSpreadsheetCell(taskTitle)}</td>
         <td>${escapeSpreadsheetCell(category)}</td>
-        <td>${escapeSpreadsheetCell(date)}</td>
+        <td>${escapeSpreadsheetCell(entry.date)}</td>
         <td>${escapeSpreadsheetCell(formatDateTime(entry.startedAt))}</td>
         <td>${escapeSpreadsheetCell(endedAtLabel)}</td>
         <td>${escapeSpreadsheetCell(formatDashboardDuration(durationSeconds))}</td>
@@ -4241,7 +4270,7 @@ function createTaskTimeEntriesExcelBlob({
   </head>
   <body>
     <table>
-      <caption>${escapeSpreadsheetCell(taskTitle)} ${escapeSpreadsheetCell(date)} 计时明细</caption>
+      <caption>${escapeSpreadsheetCell(taskTitle)} ${escapeSpreadsheetCell(dateLabel)} 计时明细</caption>
       <thead>
         <tr>
           <th>序号</th>
@@ -9102,6 +9131,20 @@ function App() {
     EXPORT_TEMPLATES.find((template) => template.id === selectedExportTemplateId) ??
     EXPORT_TEMPLATES[0];
   const plans = plansByDate[selectedDate] ?? [];
+  const allPlans = useMemo(() => getUniquePlanItemsFromBook(plansByDate), [plansByDate]);
+  const selectedPlanIdSet = useMemo(
+    () => new Set(plans.map((item) => item.id)),
+    [plans],
+  );
+  const timerOnlyPlansForSelectedDate = useMemo(
+    () =>
+      allPlans.filter(
+        (item) =>
+          !selectedPlanIdSet.has(item.id) &&
+          getTaskTimeEntriesForDate(item, selectedDate).length > 0,
+      ),
+    [allPlans, selectedDate, selectedPlanIdSet],
+  );
   const selectedMoodEntries = useMemo(
     () => [...(moodBook[selectedDate] ?? [])].sort((left, right) => left.timestamp - right.timestamp),
     [moodBook, selectedDate],
@@ -9125,18 +9168,34 @@ function App() {
   );
   const taskTimeDetailItem =
     taskTimeDetailTarget
-      ? (plansByDate[taskTimeDetailTarget.date] ?? []).find(
-          (item) => item.id === taskTimeDetailTarget.itemId,
-        ) ?? null
+      ? allPlans.find((item) => item.id === taskTimeDetailTarget.itemId) ?? null
       : null;
   const taskTimeDetailEntries =
-    taskTimeDetailItem && taskTimeDetailTarget
-      ? getTaskTimeEntriesForDate(taskTimeDetailItem, taskTimeDetailTarget.date)
+    taskTimeDetailItem
+      ? [...getTaskTimeEntries(taskTimeDetailItem)].sort((left, right) => left.startedAt - right.startedAt)
       : [];
   const taskTimeDetailTotalSeconds = taskTimeDetailEntries.reduce(
     (totalSeconds, entry) => totalSeconds + getTaskTimeEntrySeconds(entry, timerTick),
     0,
   );
+  const taskTimeDetailEntriesByDate = taskTimeDetailEntries.reduce<
+    { date: string; entries: TaskTimeEntry[]; totalSeconds: number }[]
+  >((groups, entry) => {
+    const currentGroup = groups.find((group) => group.date === entry.date);
+
+    if (currentGroup) {
+      currentGroup.entries.push(entry);
+      currentGroup.totalSeconds += getTaskTimeEntrySeconds(entry, timerTick);
+      return groups;
+    }
+
+    groups.push({
+      date: entry.date,
+      entries: [entry],
+      totalSeconds: getTaskTimeEntrySeconds(entry, timerTick),
+    });
+    return groups;
+  }, []);
   const planSearchResults = useMemo(
     () => searchPlans(planSearchQuery, plansByDate),
     [planSearchQuery, plansByDate],
@@ -9173,13 +9232,19 @@ function App() {
         project.phases.filter((phase) => phase.timeEntries.some((entry) => !entry.endedAt)).length,
       0,
     );
-    const temporaryTimerSeconds = plans.reduce((totalSeconds, item) => {
+    const scheduledTimerSeconds = plans.reduce((totalSeconds, item) => {
       if (item.actualMinutes) {
         return totalSeconds;
       }
 
       return totalSeconds + getTaskTimeSecondsForDate(item, selectedDate, timerTick);
     }, 0);
+    const carriedTimerSeconds = timerOnlyPlansForSelectedDate.reduce(
+      (totalSeconds, item) =>
+        totalSeconds + getTaskTimeSecondsForDate(item, selectedDate, timerTick),
+      0,
+    );
+    const temporaryTimerSeconds = scheduledTimerSeconds + carriedTimerSeconds;
     const liveActualSeconds = savedActualMinutes * 60 + temporaryTimerSeconds + projectActualSeconds;
     const targetTotalSeconds = targetTotalMinutes * 60;
     const comparableSavedActualMinutes = getTotalMinutes(plannedTimePlans, "actualMinutes");
@@ -9216,16 +9281,22 @@ function App() {
       missingTargetCount: plans.filter((item) => !item.targetMinutes).length,
       missingActualCount: plans.filter((item) => !item.actualMinutes).length,
       activeTimerCount:
-        plans.filter((item) => Boolean(getRunningTaskTimeEntry(item))).length +
+        plans.filter((item) =>
+          getTaskTimeEntriesForDate(item, selectedDate).some((entry) => !entry.endedAt),
+        ).length +
+        timerOnlyPlansForSelectedDate.filter((item) =>
+          getTaskTimeEntriesForDate(item, selectedDate).some((entry) => !entry.endedAt),
+        ).length +
         projectActiveTimerCount,
-      trackedTimerCount: plans.filter((item) => {
-        return !item.actualMinutes && getTaskTimeEntriesForDate(item, selectedDate).length > 0;
-      }).length,
+      trackedTimerCount:
+        plans.filter((item) => {
+          return !item.actualMinutes && getTaskTimeEntriesForDate(item, selectedDate).length > 0;
+        }).length + timerOnlyPlansForSelectedDate.length,
       completedCount: completedPlans.length,
       actualPercent,
       actualProgress: Math.min(100, actualPercent),
     };
-  }, [complexProjects, plans, selectedDate, timerTick]);
+  }, [complexProjects, plans, selectedDate, timerOnlyPlansForSelectedDate, timerTick]);
 
   useEffect(() => {
     savePlanBook(plansByDate);
@@ -9965,7 +10036,7 @@ function App() {
 
     const blob = createTaskTimeEntriesExcelBlob({
       category: taskTimeDetailItem.category,
-      date: taskTimeDetailTarget.date,
+      dateLabel: "全部日期",
       entries: taskTimeDetailEntries,
       now: timerTick,
       taskTitle: taskTimeDetailItem.title,
@@ -9973,7 +10044,7 @@ function App() {
 
     downloadBlob(
       blob,
-      `任务计时明细-${sanitizeExportFileNamePart(taskTimeDetailItem.title)}-${taskTimeDetailTarget.date}.xls`,
+      `任务计时明细-${sanitizeExportFileNamePart(taskTimeDetailItem.title)}-全部日期.xls`,
     );
   };
 
@@ -11062,6 +11133,174 @@ function App() {
     showTimerNotice(`已结束“${item.title}”计时，可重新开始`);
   };
 
+  const resetLatestTaskTimerEntryForSelectedDate = (item: PlanItem) => {
+    const latestEntry = getLatestTaskTimeEntryForDate(item, selectedDate);
+    const currentTimer = taskTimersByTaskId[item.id] ?? null;
+    const hasForwardTimerState = Boolean(
+      currentTimer?.forwardHasStarted || currentTimer?.isRunning || currentTimer?.elapsedSeconds,
+    );
+
+    if (!latestEntry && !hasForwardTimerState) {
+      showTimerNotice(`“${item.title}”在 ${formatDisplayDate(selectedDate)} 没有可重置的计时`);
+      return;
+    }
+
+    const shouldReset = window.confirm(
+      `重置“${item.title}”在 ${formatDisplayDate(selectedDate)} 的最近一段计时？其他分段会保留。`,
+    );
+
+    if (!shouldReset) {
+      return;
+    }
+
+    clearTimerNotice();
+
+    const now = Date.now();
+    setTimerTick(now);
+    updatePlansForSelectedDate((currentPlans) =>
+      currentPlans.map((currentItem) => {
+        if (currentItem.id !== item.id) {
+          return currentItem;
+        }
+
+        const currentLatestEntry = getLatestTaskTimeEntryForDate(currentItem, selectedDate);
+
+        if (!currentLatestEntry) {
+          return currentItem;
+        }
+
+        const timeEntries = getTaskTimeEntries(currentItem).filter(
+          (entry) => entry.id !== currentLatestEntry.id,
+        );
+        const hasEntriesForSelectedDate = timeEntries.some((entry) => entry.date === selectedDate);
+        const timerResetAtByDate = { ...(currentItem.timerResetAtByDate ?? {}) };
+
+        if (!hasEntriesForSelectedDate) {
+          delete timerResetAtByDate[selectedDate];
+        }
+
+        return {
+          ...currentItem,
+          timeEntries,
+          timerResetAtByDate,
+          timerEndedDates: hasEntriesForSelectedDate
+            ? (currentItem.timerEndedDates ?? [])
+            : (currentItem.timerEndedDates ?? []).filter((date) => date !== selectedDate),
+          updatedAt: now,
+        };
+      }),
+    );
+    setTaskTimersByTaskId((currentTimers) => {
+      const timer = currentTimers[item.id];
+
+      if (!timer) {
+        return currentTimers;
+      }
+
+      const nextTimers = { ...currentTimers };
+
+      if (!timer.countdownHasStarted && !timer.countdownIsRunning) {
+        delete nextTimers[item.id];
+        return nextTimers;
+      }
+
+      nextTimers[item.id] = {
+        ...timer,
+        elapsedSeconds: 0,
+        forwardHasStarted: false,
+        isRunning: false,
+        startedAt: null,
+      };
+
+      return nextTimers;
+    });
+    showTimerNotice(`已重置“${item.title}”在 ${formatDisplayDate(selectedDate)} 的最近一段计时`);
+  };
+
+  const deleteTaskTimeEntry = (itemId: string, dateValue: string, entryId: string) => {
+    const item = allPlans.find((planItem) => planItem.id === itemId);
+    const entriesForDate = item ? getTaskTimeEntriesForDate(item, dateValue) : [];
+    const entryIndex = entriesForDate.findIndex((entry) => entry.id === entryId);
+    const entry = entryIndex >= 0 ? entriesForDate[entryIndex] : null;
+
+    if (!item || !entry) {
+      showTimerNotice("没有找到这段计时记录");
+      return;
+    }
+
+    const shouldDelete = window.confirm(
+      `删除“${item.title}”在 ${formatDisplayDate(dateValue)} 的第 ${entryIndex + 1} 段计时？其他分段会保留。`,
+    );
+
+    if (!shouldDelete) {
+      return;
+    }
+
+    clearTimerNotice();
+
+    const now = Date.now();
+    setTimerTick(now);
+    setPlansByDate((currentBook) => {
+      const nextBook = Object.entries(currentBook).reduce<PlanBook>((book, [date, items]) => {
+        book[date] = items.map((currentItem) => {
+          if (currentItem.id !== itemId) {
+            return currentItem;
+          }
+
+          const timeEntries = getTaskTimeEntries(currentItem).filter(
+            (currentEntry) => currentEntry.id !== entryId,
+          );
+          const hasEntriesForDate = timeEntries.some(
+            (currentEntry) => currentEntry.date === dateValue,
+          );
+          const timerResetAtByDate = { ...(currentItem.timerResetAtByDate ?? {}) };
+
+          if (!hasEntriesForDate) {
+            delete timerResetAtByDate[dateValue];
+          }
+
+          return {
+            ...currentItem,
+            timeEntries,
+            timerResetAtByDate,
+            timerEndedDates: hasEntriesForDate
+              ? (currentItem.timerEndedDates ?? [])
+              : (currentItem.timerEndedDates ?? []).filter((dateItem) => dateItem !== dateValue),
+            updatedAt: now,
+          };
+        });
+
+        return book;
+      }, {});
+
+      return normalizePlanBook(nextBook);
+    });
+    setTaskTimersByTaskId((currentTimers) => {
+      if (entry.endedAt || !currentTimers[itemId]) {
+        return currentTimers;
+      }
+
+      const nextTimers = { ...currentTimers };
+      const timer = currentTimers[itemId];
+
+      if (!timer.countdownHasStarted && !timer.countdownIsRunning) {
+        delete nextTimers[itemId];
+        return nextTimers;
+      }
+
+      nextTimers[itemId] = {
+        ...timer,
+        elapsedSeconds: 0,
+        forwardHasStarted: false,
+        isRunning: false,
+        startedAt: null,
+      };
+
+      return nextTimers;
+    });
+    showTimerNotice(`已删除“${item.title}”第 ${entryIndex + 1} 段计时`);
+  };
+
   const handleCountdownClick = (item: PlanItem, minutes: number) => {
     if (item.completed) {
       return;
@@ -11233,14 +11472,18 @@ function App() {
         const timeEntries = isCompleting
           ? stopRunningTaskTimeEntries(getTaskTimeEntries(item), now)
           : getTaskTimeEntries(item);
-        const totalTimeSeconds = getTaskTimeTotalSeconds({ ...item, timeEntries }, now);
+        const selectedDateTimeSeconds = getTaskTimeSecondsForDate(
+          { ...item, timeEntries },
+          selectedDate,
+          now,
+        );
 
         return {
           ...item,
           completed: !item.completed,
           actualMinutes:
-            isCompleting && totalTimeSeconds > 0 && !item.actualMinutes
-              ? timerSecondsToActualMinutes(totalTimeSeconds)
+            isCompleting && selectedDateTimeSeconds > 0 && !item.actualMinutes
+              ? timerSecondsToActualMinutes(selectedDateTimeSeconds)
               : item.actualMinutes,
           timeEntries,
           updatedAt: now,
@@ -11630,36 +11873,34 @@ function App() {
       className: timeDifferenceToneClass,
     },
   ];
-  const getLiveActualSecondsForPlan = (item: PlanItem) => {
-    const liveTimerSeconds = item.actualMinutes
-      ? 0
-      : getTaskTimeSecondsForDate(item, selectedDate, timerTick);
+  const getLiveActualSecondsForPlan = (
+    item: PlanItem,
+    options: { timerOnly?: boolean } = {},
+  ) => {
+    const selectedDateTimerSeconds = getTaskTimeSecondsForDate(item, selectedDate, timerTick);
+
+    if (options.timerOnly) {
+      return selectedDateTimerSeconds;
+    }
+
+    const liveTimerSeconds = item.actualMinutes ? 0 : selectedDateTimerSeconds;
 
     return (item.actualMinutes ?? 0) * 60 + liveTimerSeconds;
   };
-  const categoryTimeChartItems = Array.from(
-    plans.reduce((categoryMap, item) => {
-      const key = item.category || "未分类";
-      const current = categoryMap.get(key) ?? {
-        actualSeconds: 0,
-        count: 0,
-        label: key,
-        targetSeconds: 0,
-      };
-
-      current.count += 1;
-      current.targetSeconds += (item.targetMinutes ?? 0) * 60;
-      current.actualSeconds += getLiveActualSecondsForPlan(item);
-      categoryMap.set(key, current);
-      return categoryMap;
-    }, complexProjects.reduce((categoryMap, project) => {
-      const actualSeconds = getComplexProjectSecondsForDate(project, selectedDate, timerTick);
-
-      if (actualSeconds <= 0) {
-        return categoryMap;
+  const categoryTimeChartItems = (() => {
+    const categoryMap = new Map<
+      string,
+      { actualSeconds: number; count: number; label: string; targetSeconds: number }
+    >();
+    const addCategoryTime = (
+      key: string,
+      targetSeconds: number,
+      actualSeconds: number,
+    ) => {
+      if (targetSeconds <= 0 && actualSeconds <= 0) {
+        return;
       }
 
-      const key = project.category || "未分类";
       const current = categoryMap.get(key) ?? {
         actualSeconds: 0,
         count: 0,
@@ -11668,24 +11909,59 @@ function App() {
       };
 
       current.count += 1;
+      current.targetSeconds += targetSeconds;
       current.actualSeconds += actualSeconds;
       categoryMap.set(key, current);
-      return categoryMap;
-    }, new Map<string, { actualSeconds: number; count: number; label: string; targetSeconds: number }>())),
-  )
-    .map(([, value]) => value)
-    .filter((item) => item.targetSeconds > 0 || item.actualSeconds > 0)
-    .sort((left, right) => right.actualSeconds + right.targetSeconds - (left.actualSeconds + left.targetSeconds))
-    .slice(0, 5);
+    };
+
+    complexProjects.forEach((project) => {
+      addCategoryTime(
+        project.category || "未分类",
+        0,
+        getComplexProjectSecondsForDate(project, selectedDate, timerTick),
+      );
+    });
+    plans.forEach((item) => {
+      addCategoryTime(
+        item.category || "未分类",
+        (item.targetMinutes ?? 0) * 60,
+        getLiveActualSecondsForPlan(item),
+      );
+    });
+    timerOnlyPlansForSelectedDate.forEach((item) => {
+      addCategoryTime(
+        item.category || "未分类",
+        0,
+        getLiveActualSecondsForPlan(item, { timerOnly: true }),
+      );
+    });
+
+    return Array.from(categoryMap.values())
+      .filter((item) => item.targetSeconds > 0 || item.actualSeconds > 0)
+      .sort(
+        (left, right) =>
+          right.actualSeconds + right.targetSeconds - (left.actualSeconds + left.targetSeconds),
+      )
+      .slice(0, 5);
+  })();
   const priorityTimeChartItems = PRIORITY_OPTIONS.map((priorityOption) => {
     const priorityPlans = plans.filter((item) => normalizePriority(item.priority) === priorityOption.id);
+    const priorityTimerOnlyPlans = timerOnlyPlansForSelectedDate.filter(
+      (item) => normalizePriority(item.priority) === priorityOption.id,
+    );
 
     return {
-      actualSeconds: priorityPlans.reduce(
-        (totalSeconds, item) => totalSeconds + getLiveActualSecondsForPlan(item),
-        0,
-      ),
-      count: priorityPlans.length,
+      actualSeconds:
+        priorityPlans.reduce(
+          (totalSeconds, item) => totalSeconds + getLiveActualSecondsForPlan(item),
+          0,
+        ) +
+        priorityTimerOnlyPlans.reduce(
+          (totalSeconds, item) =>
+            totalSeconds + getLiveActualSecondsForPlan(item, { timerOnly: true }),
+          0,
+        ),
+      count: priorityPlans.length + priorityTimerOnlyPlans.length,
       hint: priorityOption.hint,
       icon: priorityOption.icon,
       id: priorityOption.id,
@@ -11693,8 +11969,8 @@ function App() {
       targetSeconds: getTotalMinutes(priorityPlans, "targetMinutes") * 60,
     };
   }).filter((item) => item.count > 0);
-  const taskTimeChartItems = plans
-    .map((item) => {
+  const taskTimeChartItems = [
+    ...plans.map((item) => {
       const targetSeconds = (item.targetMinutes ?? 0) * 60;
       const actualSeconds = getLiveActualSecondsForPlan(item);
 
@@ -11704,7 +11980,14 @@ function App() {
         targetSeconds,
         title: item.title || "未命名计划",
       };
-    })
+    }),
+    ...timerOnlyPlansForSelectedDate.map((item) => ({
+      actualSeconds: getLiveActualSecondsForPlan(item, { timerOnly: true }),
+      id: `${item.id}-${selectedDate}-timer`,
+      targetSeconds: 0,
+      title: item.title || "未命名计划",
+    })),
+  ]
     .filter((item) => item.targetSeconds > 0 || item.actualSeconds > 0)
     .slice(0, 6);
   const taskTimeChartMaxSeconds = Math.max(
@@ -11802,6 +12085,9 @@ function App() {
     .filter((item) => item.totalSeconds > 0 || item.todaySessionCount > 0);
   const timeStatsSummaryParts = [
     plans.length > 0 ? `${plans.length} 项任务` : "",
+    timerOnlyPlansForSelectedDate.length > 0
+      ? `${timerOnlyPlansForSelectedDate.length} 项跨日计时`
+      : "",
     complexProjectTimeItems.length > 0 ? `${complexProjectTimeItems.length} 个项目` : "",
   ].filter(Boolean);
   const timeStatsSummaryText =
@@ -13813,9 +14099,14 @@ function App() {
                           {taskTimeDetailItem.title}
                         </h2>
                         <p className="mt-1 text-sm font-bold text-[#8b7b91]">
-                          {taskTimeDetailTarget.date} · {taskTimeDetailEntries.length} 段 · 总计{" "}
+                          全部日期 · {taskTimeDetailEntries.length} 段 · 总计{" "}
                           {formatDashboardDuration(taskTimeDetailTotalSeconds)}
                         </p>
+                        {taskTimeDetailTarget.date ? (
+                          <p className="mt-1 text-xs font-black text-sky-700">
+                            当前日期：{taskTimeDetailTarget.date}
+                          </p>
+                        ) : null}
                       </div>
                       <div className="flex shrink-0 flex-wrap gap-2">
                         <button
@@ -13846,41 +14137,71 @@ function App() {
                               <th className="whitespace-nowrap px-3 py-2">结束时间</th>
                               <th className="whitespace-nowrap px-3 py-2">持续时间</th>
                               <th className="whitespace-nowrap px-3 py-2">状态</th>
+                              <th className="whitespace-nowrap px-3 py-2">操作</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-sky-50 bg-white">
-                            {taskTimeDetailEntries.map((entry, index) => {
-                              const isRunning = !entry.endedAt;
-                              const durationSeconds = getTaskTimeEntrySeconds(entry, timerTick);
-
-                              return (
-                                <tr key={entry.id}>
-                                  <td className="whitespace-nowrap px-3 py-2 font-black text-[#6f5d78]">
-                                    {index + 1}
-                                  </td>
-                                  <td className="whitespace-nowrap px-3 py-2 font-bold text-[#46394f]">
-                                    {formatDateTime(entry.startedAt)}
-                                  </td>
-                                  <td className="whitespace-nowrap px-3 py-2 font-bold text-[#46394f]">
-                                    {entry.endedAt ? formatDateTime(entry.endedAt) : "进行中"}
-                                  </td>
-                                  <td className="whitespace-nowrap px-3 py-2 font-black text-sky-800">
-                                    {formatDashboardDuration(durationSeconds)}
-                                  </td>
-                                  <td className="whitespace-nowrap px-3 py-2">
-                                    <span
-                                      className={`rounded-full px-2 py-0.5 text-xs font-black ${
-                                        isRunning
-                                          ? "bg-emerald-50 text-emerald-700"
-                                          : "bg-slate-100 text-slate-600"
-                                      }`}
-                                    >
-                                      {isRunning ? "计时中" : "已结束"}
-                                    </span>
+                            {taskTimeDetailEntriesByDate.map((dateGroup) => (
+                              <Fragment key={dateGroup.date}>
+                                <tr>
+                                  <td
+                                    className="bg-sky-50/70 px-3 py-2 text-xs font-black text-sky-800"
+                                    colSpan={6}
+                                  >
+                                    {dateGroup.date} · {formatDisplayDate(dateGroup.date)} ·{" "}
+                                    {dateGroup.entries.length} 段 · 小计{" "}
+                                    {formatDashboardDuration(dateGroup.totalSeconds)}
                                   </td>
                                 </tr>
-                              );
-                            })}
+                                {dateGroup.entries.map((entry, index) => {
+                                  const isRunning = !entry.endedAt;
+                                  const durationSeconds = getTaskTimeEntrySeconds(entry, timerTick);
+
+                                  return (
+                                    <tr key={entry.id}>
+                                      <td className="whitespace-nowrap px-3 py-2 font-black text-[#6f5d78]">
+                                        {index + 1}
+                                      </td>
+                                      <td className="whitespace-nowrap px-3 py-2 font-bold text-[#46394f]">
+                                        {formatDateTime(entry.startedAt)}
+                                      </td>
+                                      <td className="whitespace-nowrap px-3 py-2 font-bold text-[#46394f]">
+                                        {entry.endedAt ? formatDateTime(entry.endedAt) : "进行中"}
+                                      </td>
+                                      <td className="whitespace-nowrap px-3 py-2 font-black text-sky-800">
+                                        {formatDashboardDuration(durationSeconds)}
+                                      </td>
+                                      <td className="whitespace-nowrap px-3 py-2">
+                                        <span
+                                          className={`rounded-full px-2 py-0.5 text-xs font-black ${
+                                            isRunning
+                                              ? "bg-emerald-50 text-emerald-700"
+                                              : "bg-slate-100 text-slate-600"
+                                          }`}
+                                        >
+                                          {isRunning ? "计时中" : "已结束"}
+                                        </span>
+                                      </td>
+                                      <td className="whitespace-nowrap px-3 py-2">
+                                        <button
+                                          className="rounded-full bg-rose-50 px-2.5 py-1 text-xs font-black text-rose-700 transition hover:bg-rose-100 focus:outline-none focus:ring-4 focus:ring-rose-100"
+                                          type="button"
+                                          onClick={() =>
+                                            deleteTaskTimeEntry(
+                                              taskTimeDetailItem.id,
+                                              entry.date,
+                                              entry.id,
+                                            )
+                                          }
+                                        >
+                                          删除本段
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </Fragment>
+                            ))}
                           </tbody>
                         </table>
                       </div>
@@ -15327,11 +15648,16 @@ function App() {
                         ? taskDropTarget.placement
                         : null;
                     const timerForItem = taskTimersByTaskId[item.id] ?? null;
+                    const allTaskTimeEntries = getTaskTimeEntries(item);
                     const taskTimeEntries = getTaskTimeEntriesForDate(item, selectedDate);
                     const timerElapsedSeconds = getTaskTimeSecondsForDate(
                       item,
                       selectedDate,
                       timerTick,
+                    );
+                    const latestTaskTimeEntry = getLatestTaskTimeEntryForDate(
+                      item,
+                      selectedDate,
                     );
                     const timerResetAt =
                       (item.timerResetAtByDate ?? {})[selectedDate] ?? 0;
@@ -15843,15 +16169,25 @@ function App() {
                                     结束计时
                                   </button>
                                 ) : null}
+                                {latestTaskTimeEntry ? (
+                                  <button
+                                    aria-label={`重置${item.title}在${formatDisplayDate(selectedDate)}的最近一段计时`}
+                                    className="rounded-full bg-rose-50 px-1 py-0.5 text-[11px] font-black leading-5 text-rose-700 transition hover:bg-rose-100 focus:outline-none focus:ring-4 focus:ring-rose-100"
+                                    type="button"
+                                    onClick={() => resetLatestTaskTimerEntryForSelectedDate(item)}
+                                  >
+                                    重置本段
+                                  </button>
+                                ) : null}
                               </div>
-                              {taskTimeEntries.length > 0 ? (
+                              {allTaskTimeEntries.length > 0 ? (
                                 <button
-                                  aria-label={`查看${item.title}的计时明细`}
+                                  aria-label={`查看${item.title}的全部计时明细`}
                                   className="inline-flex min-h-7 shrink-0 items-center rounded-full border border-sky-100 bg-white/85 px-1 py-0.5 text-[11px] font-black leading-5 text-sky-700 transition hover:bg-sky-50 focus:outline-none focus:ring-4 focus:ring-sky-100"
                                   type="button"
                                   onClick={() => openTaskTimeDetails(item.id, selectedDate)}
                                 >
-                                  {taskTimeEntries.length} 段
+                                  {allTaskTimeEntries.length} 段
                                 </button>
                               ) : null}
                               <div className="inline-flex shrink-0 flex-wrap items-center gap-1">
