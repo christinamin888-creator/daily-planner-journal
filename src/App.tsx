@@ -540,6 +540,15 @@ type TaskTimeDetailTarget = {
   itemId: string;
   date: string;
 };
+type TaskTimeEntryEdit = {
+  itemId: string;
+  entryId: string | null;
+  mode: "create" | "edit";
+  startValue: string;
+  endValue: string;
+  durationMinutesValue: string;
+  error: string;
+};
 type TaskRescheduleEdit = {
   itemId: string;
   date: string;
@@ -4151,6 +4160,74 @@ function formatDateTime(timestamp: number): string {
     minute: "2-digit",
     second: "2-digit",
   }).format(new Date(timestamp));
+}
+
+function formatDateTimeLocalInput(timestamp: number): string {
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+
+  return `${year}-${month}-${day}T${hour}:${minute}`;
+}
+
+function parseDateTimeLocalInput(value: string): number | null {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+
+  if (!match) {
+    return null;
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const date = new Date(year, month - 1, day, hour, minute);
+
+  return date.getFullYear() === year &&
+    date.getMonth() === month - 1 &&
+    date.getDate() === day &&
+    date.getHours() === hour &&
+    date.getMinutes() === minute
+    ? date.getTime()
+    : null;
+}
+
+function formatDurationMinutesInput(seconds: number): string {
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+
+  if (!safeSeconds) {
+    return "";
+  }
+
+  const roundedMinutes = Math.round((safeSeconds / 60) * 100) / 100;
+
+  return Number.isInteger(roundedMinutes)
+    ? String(roundedMinutes)
+    : String(roundedMinutes).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function parseDurationMinutesToSeconds(value: string): number | null | undefined {
+  const trimmedValue = value.trim();
+
+  if (!trimmedValue) {
+    return undefined;
+  }
+
+  if (!/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(trimmedValue)) {
+    return null;
+  }
+
+  const minutes = Number(trimmedValue);
+
+  if (!Number.isFinite(minutes) || minutes <= 0) {
+    return null;
+  }
+
+  return Math.max(1, Math.round(minutes * 60));
 }
 
 function escapeSpreadsheetCell(value: string): string {
@@ -8876,6 +8953,7 @@ function App() {
   const [taskTimeDetailTarget, setTaskTimeDetailTarget] = useState<TaskTimeDetailTarget | null>(
     null,
   );
+  const [taskTimeEntryEdit, setTaskTimeEntryEdit] = useState<TaskTimeEntryEdit | null>(null);
   const [ganttPreviewProjectId, setGanttPreviewProjectId] = useState<string | null>(null);
   const [ganttExportProjectId, setGanttExportProjectId] = useState<string | null>(null);
   const [ganttExportWidth, setGanttExportWidth] = useState<number>(1020);
@@ -10025,8 +10103,14 @@ function App() {
     );
   };
 
+  const closeTaskTimeDetails = () => {
+    setTaskTimeDetailTarget(null);
+    setTaskTimeEntryEdit(null);
+  };
+
   const openTaskTimeDetails = (itemId: string, date = selectedDate) => {
     setTaskTimeDetailTarget({ itemId, date });
+    setTaskTimeEntryEdit(null);
   };
 
   const exportTaskTimeDetailsExcel = () => {
@@ -10045,6 +10129,279 @@ function App() {
     downloadBlob(
       blob,
       `任务计时明细-${sanitizeExportFileNamePart(taskTimeDetailItem.title)}-全部日期.xls`,
+    );
+  };
+
+  const startCreateTaskTimeEntry = () => {
+    if (!taskTimeDetailItem || !taskTimeDetailTarget) {
+      return;
+    }
+
+    const defaultDurationSeconds = 30 * 60;
+    const dayStart = parseDateInputValue(taskTimeDetailTarget.date).getTime();
+    const endedAt = createTimestampForDateAtCurrentTime(taskTimeDetailTarget.date);
+    const startedAt = Math.max(dayStart, endedAt - defaultDurationSeconds * 1000);
+    const durationSeconds = Math.max(1, Math.floor((endedAt - startedAt) / 1000));
+
+    setTaskTimeEntryEdit({
+      itemId: taskTimeDetailItem.id,
+      entryId: null,
+      mode: "create",
+      startValue: formatDateTimeLocalInput(startedAt),
+      endValue: formatDateTimeLocalInput(endedAt),
+      durationMinutesValue: formatDurationMinutesInput(durationSeconds),
+      error: "",
+    });
+  };
+
+  const startTaskTimeEntryEdit = (entry: TaskTimeEntry) => {
+    if (!taskTimeDetailItem) {
+      return;
+    }
+
+    const durationSeconds = getTaskTimeEntrySeconds(entry, timerTick);
+    const endedAt = entry.endedAt ?? entry.startedAt + durationSeconds * 1000;
+
+    setTaskTimeEntryEdit({
+      itemId: taskTimeDetailItem.id,
+      entryId: entry.id,
+      mode: "edit",
+      startValue: formatDateTimeLocalInput(entry.startedAt),
+      endValue: formatDateTimeLocalInput(endedAt),
+      durationMinutesValue: formatDurationMinutesInput(durationSeconds),
+      error: "",
+    });
+  };
+
+  const cancelTaskTimeEntryEdit = () => {
+    setTaskTimeEntryEdit(null);
+  };
+
+  const updateTaskTimeEntryStartValue = (value: string) => {
+    setTaskTimeEntryEdit((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const startedAt = parseDateTimeLocalInput(value);
+      const durationSeconds = parseDurationMinutesToSeconds(current.durationMinutesValue);
+
+      return {
+        ...current,
+        startValue: value,
+        endValue:
+          startedAt && durationSeconds
+            ? formatDateTimeLocalInput(startedAt + durationSeconds * 1000)
+            : current.endValue,
+        error: "",
+      };
+    });
+  };
+
+  const updateTaskTimeEntryEndValue = (value: string) => {
+    setTaskTimeEntryEdit((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const startedAt = parseDateTimeLocalInput(current.startValue);
+      const endedAt = parseDateTimeLocalInput(value);
+      const durationSeconds =
+        startedAt && endedAt && endedAt > startedAt
+          ? Math.floor((endedAt - startedAt) / 1000)
+          : null;
+
+      return {
+        ...current,
+        endValue: value,
+        durationMinutesValue: durationSeconds
+          ? formatDurationMinutesInput(durationSeconds)
+          : current.durationMinutesValue,
+        error: "",
+      };
+    });
+  };
+
+  const updateTaskTimeEntryDurationValue = (value: string) => {
+    if (!/^\d*(?:\.\d{0,2})?$/.test(value)) {
+      return;
+    }
+
+    setTaskTimeEntryEdit((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const startedAt = parseDateTimeLocalInput(current.startValue);
+      const durationSeconds = parseDurationMinutesToSeconds(value);
+
+      return {
+        ...current,
+        durationMinutesValue: value,
+        endValue:
+          startedAt && durationSeconds
+            ? formatDateTimeLocalInput(startedAt + durationSeconds * 1000)
+            : current.endValue,
+        error: "",
+      };
+    });
+  };
+
+  const saveTaskTimeEntryEdit = (event?: FormEvent<HTMLFormElement>) => {
+    event?.preventDefault();
+
+    if (!taskTimeEntryEdit) {
+      return;
+    }
+
+    const item = allPlans.find((planItem) => planItem.id === taskTimeEntryEdit.itemId);
+
+    if (!item) {
+      setTaskTimeEntryEdit((current) =>
+        current ? { ...current, error: "没有找到对应任务" } : current,
+      );
+      return;
+    }
+
+    const startedAt = parseDateTimeLocalInput(taskTimeEntryEdit.startValue);
+    const typedDurationSeconds = parseDurationMinutesToSeconds(
+      taskTimeEntryEdit.durationMinutesValue,
+    );
+
+    if (!startedAt) {
+      setTaskTimeEntryEdit((current) =>
+        current ? { ...current, error: "请输入有效的开始时间" } : current,
+      );
+      return;
+    }
+
+    if (typedDurationSeconds === null) {
+      setTaskTimeEntryEdit((current) =>
+        current ? { ...current, error: "实际用时请输入大于 0 的数字" } : current,
+      );
+      return;
+    }
+
+    const parsedEndedAt = parseDateTimeLocalInput(taskTimeEntryEdit.endValue);
+    const endedAt = typedDurationSeconds
+      ? startedAt + typedDurationSeconds * 1000
+      : parsedEndedAt;
+
+    if (!endedAt) {
+      setTaskTimeEntryEdit((current) =>
+        current ? { ...current, error: "请输入有效的结束时间" } : current,
+      );
+      return;
+    }
+
+    if (endedAt <= startedAt) {
+      setTaskTimeEntryEdit((current) =>
+        current ? { ...current, error: "结束时间需要晚于开始时间" } : current,
+      );
+      return;
+    }
+
+    const durationSeconds = Math.max(1, Math.floor((endedAt - startedAt) / 1000));
+    const date = getTimestampDateValue(startedAt);
+    const now = Date.now();
+    const existingEntry = taskTimeEntryEdit.entryId
+      ? getTaskTimeEntries(item).find((entry) => entry.id === taskTimeEntryEdit.entryId) ?? null
+      : null;
+
+    if (taskTimeEntryEdit.mode === "edit" && !existingEntry) {
+      setTaskTimeEntryEdit((current) =>
+        current ? { ...current, error: "没有找到这段计时记录" } : current,
+      );
+      return;
+    }
+
+    const shouldClearForwardTimerState = Boolean(existingEntry && !existingEntry.endedAt);
+    const nextEntry: TaskTimeEntry = {
+      id: taskTimeEntryEdit.entryId ?? createId(),
+      date,
+      startedAt,
+      endedAt,
+      durationSeconds,
+    };
+
+    setTimerTick(now);
+    setPlansByDate((currentBook) => {
+      const nextBook = Object.entries(currentBook).reduce<PlanBook>((book, [dateKey, items]) => {
+        book[dateKey] = items.map((currentItem) => {
+          if (currentItem.id !== taskTimeEntryEdit.itemId) {
+            return currentItem;
+          }
+
+          const currentEntries = getTaskTimeEntries(currentItem);
+          const timeEntries =
+            taskTimeEntryEdit.mode === "create"
+              ? [...currentEntries, nextEntry]
+              : currentEntries.map((entry) =>
+                  entry.id === taskTimeEntryEdit.entryId ? nextEntry : entry,
+                );
+          const sortedTimeEntries = [...timeEntries].sort(
+            (left, right) => left.startedAt - right.startedAt,
+          );
+          const entryDates = new Set(sortedTimeEntries.map((entry) => entry.date));
+          const timerResetAtByDate = Object.entries(
+            currentItem.timerResetAtByDate ?? {},
+          ).reduce<Record<string, number>>((result, [entryDate, resetAt]) => {
+            if (entryDates.has(entryDate)) {
+              result[entryDate] = resetAt;
+            }
+
+            return result;
+          }, {});
+
+          return {
+            ...currentItem,
+            timeEntries: sortedTimeEntries,
+            timerResetAtByDate,
+            timerEndedDates: (currentItem.timerEndedDates ?? []).filter((entryDate) =>
+              entryDates.has(entryDate),
+            ),
+            updatedAt: now,
+          };
+        });
+
+        return book;
+      }, {});
+
+      return normalizePlanBook(nextBook);
+    });
+
+    if (shouldClearForwardTimerState) {
+      setTaskTimersByTaskId((currentTimers) => {
+        const timer = currentTimers[taskTimeEntryEdit.itemId];
+
+        if (!timer) {
+          return currentTimers;
+        }
+
+        const nextTimers = { ...currentTimers };
+
+        if (!timer.countdownHasStarted && !timer.countdownIsRunning) {
+          delete nextTimers[taskTimeEntryEdit.itemId];
+          return nextTimers;
+        }
+
+        nextTimers[taskTimeEntryEdit.itemId] = {
+          ...timer,
+          elapsedSeconds: 0,
+          forwardHasStarted: false,
+          isRunning: false,
+          startedAt: null,
+        };
+
+        return nextTimers;
+      });
+    }
+
+    setTaskTimeEntryEdit(null);
+    showTimerNotice(
+      taskTimeEntryEdit.mode === "create"
+        ? `已补录“${item.title}”的一段计时`
+        : `已更新“${item.title}”的计时分段`,
     );
   };
 
@@ -11298,6 +11655,9 @@ function App() {
 
       return nextTimers;
     });
+    setTaskTimeEntryEdit((current) =>
+      current?.itemId === itemId && current.entryId === entryId ? null : current,
+    );
     showTimerNotice(`已删除“${item.title}”第 ${entryIndex + 1} 段计时`);
   };
 
@@ -14081,7 +14441,7 @@ function App() {
                 className="fixed inset-0 z-[9999] flex items-center justify-center overflow-y-auto bg-[#2d2433]/45 px-4 py-5 backdrop-blur-sm"
                 exit={{ opacity: 0 }}
                 initial={{ opacity: 0 }}
-                onClick={() => setTaskTimeDetailTarget(null)}
+                onClick={closeTaskTimeDetails}
               >
                 <motion.div
                   animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -14110,6 +14470,13 @@ function App() {
                       </div>
                       <div className="flex shrink-0 flex-wrap gap-2">
                         <button
+                          className="rounded-full bg-sky-600 px-3 py-2 text-xs font-black text-white shadow-sm shadow-sky-100 transition hover:bg-sky-700"
+                          type="button"
+                          onClick={startCreateTaskTimeEntry}
+                        >
+                          补录分段
+                        </button>
+                        <button
                           className="rounded-full bg-emerald-50 px-3 py-2 text-xs font-black text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
                           disabled={taskTimeDetailEntries.length === 0}
                           type="button"
@@ -14120,12 +14487,87 @@ function App() {
                         <button
                           className="rounded-full bg-slate-100 px-3 py-2 text-xs font-black text-[#6d5d75] transition hover:bg-slate-200"
                           type="button"
-                          onClick={() => setTaskTimeDetailTarget(null)}
+                          onClick={closeTaskTimeDetails}
                         >
                           关闭
                         </button>
                       </div>
                     </div>
+
+                    {taskTimeEntryEdit?.itemId === taskTimeDetailItem.id ? (
+                      <form
+                        className="mb-4 rounded-[1.15rem] border border-sky-100 bg-sky-50/70 p-3"
+                        onSubmit={saveTaskTimeEntryEdit}
+                      >
+                        <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                          <p className="text-sm font-black text-sky-800">
+                            {taskTimeEntryEdit.mode === "create" ? "补录分段" : "编辑分段"}
+                          </p>
+                          <p className="text-xs font-black text-[#8b7b91]">
+                            {formatDashboardDuration(
+                              Math.max(
+                                0,
+                                (parseDateTimeLocalInput(taskTimeEntryEdit.endValue) ?? 0) -
+                                  (parseDateTimeLocalInput(taskTimeEntryEdit.startValue) ?? 0),
+                              ) / 1000,
+                            )}
+                          </p>
+                        </div>
+                        <div className="grid gap-3 md:grid-cols-[1fr_1fr_9rem_auto] md:items-end">
+                          <label className="min-w-0 text-xs font-black text-[#6f5d78]">
+                            <span className="mb-1 block">开始时间</span>
+                            <input
+                              className="w-full rounded-xl border border-white bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition focus:border-sky-300 focus:ring-4 focus:ring-sky-100"
+                              type="datetime-local"
+                              value={taskTimeEntryEdit.startValue}
+                              onChange={(event) => updateTaskTimeEntryStartValue(event.target.value)}
+                            />
+                          </label>
+                          <label className="min-w-0 text-xs font-black text-[#6f5d78]">
+                            <span className="mb-1 block">结束时间</span>
+                            <input
+                              className="w-full rounded-xl border border-white bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition focus:border-sky-300 focus:ring-4 focus:ring-sky-100"
+                              type="datetime-local"
+                              value={taskTimeEntryEdit.endValue}
+                              onChange={(event) => updateTaskTimeEntryEndValue(event.target.value)}
+                            />
+                          </label>
+                          <label className="min-w-0 text-xs font-black text-[#6f5d78]">
+                            <span className="mb-1 block">实际用时(分钟)</span>
+                            <input
+                              className="w-full rounded-xl border border-white bg-white px-3 py-2 text-sm font-bold text-[#46394f] outline-none transition focus:border-sky-300 focus:ring-4 focus:ring-sky-100"
+                              inputMode="decimal"
+                              placeholder="分钟"
+                              type="text"
+                              value={taskTimeEntryEdit.durationMinutesValue}
+                              onChange={(event) =>
+                                updateTaskTimeEntryDurationValue(event.target.value)
+                              }
+                            />
+                          </label>
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              className="rounded-full bg-sky-600 px-3 py-2 text-xs font-black text-white shadow-sm shadow-sky-100 transition hover:bg-sky-700"
+                              type="submit"
+                            >
+                              保存
+                            </button>
+                            <button
+                              className="rounded-full bg-white px-3 py-2 text-xs font-black text-[#6d5d75] transition hover:bg-slate-50"
+                              type="button"
+                              onClick={cancelTaskTimeEntryEdit}
+                            >
+                              取消
+                            </button>
+                          </div>
+                        </div>
+                        {taskTimeEntryEdit.error ? (
+                          <p className="mt-2 text-xs font-bold text-rose-600">
+                            {taskTimeEntryEdit.error}
+                          </p>
+                        ) : null}
+                      </form>
+                    ) : null}
 
                     {taskTimeDetailEntries.length > 0 ? (
                       <div className="overflow-x-auto rounded-[1.15rem] border border-sky-100">
@@ -14183,19 +14625,32 @@ function App() {
                                         </span>
                                       </td>
                                       <td className="whitespace-nowrap px-3 py-2">
-                                        <button
-                                          className="rounded-full bg-rose-50 px-2.5 py-1 text-xs font-black text-rose-700 transition hover:bg-rose-100 focus:outline-none focus:ring-4 focus:ring-rose-100"
-                                          type="button"
-                                          onClick={() =>
-                                            deleteTaskTimeEntry(
-                                              taskTimeDetailItem.id,
-                                              entry.date,
-                                              entry.id,
-                                            )
-                                          }
-                                        >
-                                          删除本段
-                                        </button>
+                                        <div className="flex flex-nowrap items-center gap-1.5">
+                                          {!isRunning ? (
+                                            <button
+                                              className="rounded-full bg-sky-50 px-2.5 py-1 text-xs font-black text-sky-700 transition hover:bg-sky-100 focus:outline-none focus:ring-4 focus:ring-sky-100"
+                                              type="button"
+                                              onClick={() => startTaskTimeEntryEdit(entry)}
+                                            >
+                                              校正本段
+                                            </button>
+                                          ) : null}
+                                          {!isRunning ? (
+                                            <button
+                                              className="rounded-full bg-rose-50 px-2.5 py-1 text-xs font-black text-rose-700 transition hover:bg-rose-100 focus:outline-none focus:ring-4 focus:ring-rose-100"
+                                              type="button"
+                                              onClick={() =>
+                                                deleteTaskTimeEntry(
+                                                  taskTimeDetailItem.id,
+                                                  entry.date,
+                                                  entry.id,
+                                                )
+                                              }
+                                            >
+                                              删除本段
+                                            </button>
+                                          ) : null}
+                                        </div>
                                       </td>
                                     </tr>
                                   );
@@ -14207,7 +14662,7 @@ function App() {
                       </div>
                     ) : (
                       <div className="rounded-[1.15rem] border border-dashed border-sky-200 bg-sky-50/60 px-4 py-8 text-center text-sm font-black text-[#8b7b91]">
-                        当天还没有分段计时记录
+                        暂无分段计时记录
                       </div>
                     )}
                   </section>
@@ -16180,16 +16635,16 @@ function App() {
                                   </button>
                                 ) : null}
                               </div>
-                              {allTaskTimeEntries.length > 0 ? (
-                                <button
-                                  aria-label={`查看${item.title}的全部计时明细`}
-                                  className="inline-flex min-h-7 shrink-0 items-center rounded-full border border-sky-100 bg-white/85 px-1 py-0.5 text-[11px] font-black leading-5 text-sky-700 transition hover:bg-sky-50 focus:outline-none focus:ring-4 focus:ring-sky-100"
-                                  type="button"
-                                  onClick={() => openTaskTimeDetails(item.id, selectedDate)}
-                                >
-                                  {allTaskTimeEntries.length} 段
-                                </button>
-                              ) : null}
+                              <button
+                                aria-label={`查看或补录${item.title}的计时明细`}
+                                className="inline-flex min-h-7 shrink-0 items-center rounded-full border border-sky-100 bg-white/85 px-1 py-0.5 text-[11px] font-black leading-5 text-sky-700 transition hover:bg-sky-50 focus:outline-none focus:ring-4 focus:ring-sky-100"
+                                type="button"
+                                onClick={() => openTaskTimeDetails(item.id, selectedDate)}
+                              >
+                                {allTaskTimeEntries.length > 0
+                                  ? `${allTaskTimeEntries.length} 段`
+                                  : "补录分段"}
+                              </button>
                               <div className="inline-flex shrink-0 flex-wrap items-center gap-1">
                                 {!item.completed ? (
                                   <button
