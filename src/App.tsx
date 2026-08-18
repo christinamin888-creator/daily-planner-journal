@@ -312,6 +312,7 @@ type TaskTimeEntry = {
 type PlanItem = {
   id: string;
   date: string;
+  createdDate: string;
   title: string;
   category: Category;
   note: string;
@@ -324,6 +325,8 @@ type PlanItem = {
   timerEndedDates: string[];
   sortOrder?: number;
   createdAt: number;
+  completedAt?: number;
+  completionRecordedAt?: number;
   updatedAt?: number;
 };
 
@@ -417,7 +420,8 @@ type CloudPayload = {
 };
 
 type AuthMode = "sign-in" | "sign-up" | "forgot" | "update-password";
-type WorkspaceTab = "tasks" | "projects" | "time" | "export";
+type WorkspaceTab = "tasks" | "backlog" | "projects" | "time" | "export";
+type TaskArchiveFilter = "pending" | "completed";
 type TodayWorkspaceSectionId = "longProjects" | TaskPriority;
 type TodayWorkspaceCollapsedState = Record<TodayWorkspaceSectionId, boolean>;
 
@@ -427,6 +431,7 @@ const DEFAULT_TODAY_WORKSPACE_COLLAPSED_STATE: TodayWorkspaceCollapsedState = {
   medium: true,
   low: true,
 };
+const TASK_ARCHIVE_PAGE_SIZE = 10;
 
 const WORKSPACE_TABS: Array<{
   id: WorkspaceTab;
@@ -437,6 +442,11 @@ const WORKSPACE_TABS: Array<{
     id: "tasks",
     label: "今日任务",
     toneClass: "border-emerald-100 bg-emerald-50 text-emerald-700 shadow-sm shadow-emerald-100/70",
+  },
+  {
+    id: "backlog",
+    label: "逾期归档",
+    toneClass: "border-rose-100 bg-rose-50 text-rose-700 shadow-sm shadow-rose-100/70",
   },
   {
     id: "projects",
@@ -547,6 +557,14 @@ type TaskTimeEntryEdit = {
   startValue: string;
   endValue: string;
   durationMinutesValue: string;
+  error: string;
+};
+type HistoricalTaskCompletionMode = "same-day" | "later";
+type HistoricalTaskCompletionDraft = {
+  itemId: string;
+  mode: HistoricalTaskCompletionMode;
+  completedAtValue: string;
+  actualMinutesValue: string;
   error: string;
 };
 type TaskRescheduleEdit = {
@@ -3450,6 +3468,8 @@ function hasPlans(planBook: PlanBook): boolean {
 function getItemTime(item: PlanItem): number {
   return Math.max(
     item.updatedAt ?? item.createdAt ?? 0,
+    item.completedAt ?? 0,
+    item.completionRecordedAt ?? 0,
     ...item.timeEntries.map((entry) => entry.endedAt ?? entry.startedAt),
   );
 }
@@ -3495,6 +3515,10 @@ function normalizePlanItem(
   const createdAt = normalizeTimestamp(value.createdAt) ?? normalizeTimestamp(value.updatedAt) ?? Date.now();
   const updatedAt = normalizeTimestamp(value.updatedAt) ?? createdAt;
   const date = normalizeDateInputString(value.date, fallbackDate);
+  const createdDate = normalizeDateInputString(value.createdDate, date);
+  const completedAt = normalizeTimestamp(value.completedAt);
+  const completionRecordedAt =
+    normalizeTimestamp(value.completionRecordedAt) ?? completedAt;
   const title = normalizeText(value.title, "未命名计划");
   const category = normalizeText(value.category, "其他") || "其他";
   const timeEntries = Array.isArray(value.timeEntries)
@@ -3535,6 +3559,7 @@ function normalizePlanItem(
   return {
     id: normalizeText(value.id) || createId(),
     date,
+    createdDate,
     title: title || "未命名计划",
     category,
     note: normalizeText(value.note),
@@ -3547,6 +3572,8 @@ function normalizePlanItem(
     timerEndedDates,
     sortOrder: normalizeSortOrder(value.sortOrder, fallbackIndex),
     createdAt,
+    ...(value.completed === true && completedAt ? { completedAt } : {}),
+    ...(value.completed === true && completionRecordedAt ? { completionRecordedAt } : {}),
     updatedAt,
   };
 }
@@ -5414,6 +5441,125 @@ function getPlanDateTime(dateValue: string): number {
   return Number.isFinite(time) ? time : 0;
 }
 
+function compareDateValues(leftDate: string, rightDate: string): number {
+  return getPlanDateTime(leftDate) - getPlanDateTime(rightDate);
+}
+
+function getCalendarDayDifference(startDate: string, endDate: string): number {
+  const difference = getPlanDateTime(endDate) - getPlanDateTime(startDate);
+
+  if (!Number.isFinite(difference)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.floor(difference / 86400000));
+}
+
+function getTaskCreatedDateValue(item: PlanItem): string {
+  return normalizeDateInputString(item.createdDate, item.date);
+}
+
+function getTaskCompletedDateValue(item: PlanItem): string | null {
+  if (!item.completed || !item.completedAt) {
+    return null;
+  }
+
+  return getTimestampDateValue(item.completedAt);
+}
+
+function getTaskCompletionRecordedDateValue(item: PlanItem): string | null {
+  if (!item.completed || !item.completionRecordedAt) {
+    return null;
+  }
+
+  return getTimestampDateValue(item.completionRecordedAt);
+}
+
+function isTaskCompletedByDate(item: PlanItem, dateValue: string): boolean {
+  if (!item.completed) {
+    return false;
+  }
+
+  const completedDate = getTaskCompletedDateValue(item);
+
+  return !completedDate || compareDateValues(completedDate, dateValue) <= 0;
+}
+
+function getTaskActualTimeForDate(
+  item: PlanItem,
+  dateValue: string,
+  now = Date.now(),
+): { actualSeconds: number; manualSeconds: number; timerSeconds: number } {
+  const timerSecondsForDate = getTaskTimeSecondsForDate(item, dateValue, now);
+  const totalTimerSeconds = getTaskTimeTotalSeconds(item, now);
+  const manualActualSeconds = (item.actualMinutes ?? 0) * 60;
+
+  if (manualActualSeconds <= 0) {
+    return {
+      actualSeconds: timerSecondsForDate,
+      manualSeconds: 0,
+      timerSeconds: timerSecondsForDate,
+    };
+  }
+
+  const completedDate = getTaskCompletedDateValue(item);
+  const manualAccountingDate = completedDate ?? item.date;
+
+  if (totalTimerSeconds <= 0) {
+    const manualSeconds = dateValue === manualAccountingDate ? manualActualSeconds : 0;
+
+    return {
+      actualSeconds: manualSeconds,
+      manualSeconds,
+      timerSeconds: 0,
+    };
+  }
+
+  if (manualActualSeconds >= totalTimerSeconds) {
+    const manualSeconds =
+      dateValue === manualAccountingDate ? manualActualSeconds - totalTimerSeconds : 0;
+
+    return {
+      actualSeconds: timerSecondsForDate + manualSeconds,
+      manualSeconds,
+      timerSeconds: timerSecondsForDate,
+    };
+  }
+
+  const adjustedTimerSeconds = Math.round(
+    timerSecondsForDate * (manualActualSeconds / totalTimerSeconds),
+  );
+
+  return {
+    actualSeconds: adjustedTimerSeconds,
+    manualSeconds: 0,
+    timerSeconds: adjustedTimerSeconds,
+  };
+}
+
+function isTaskCompletedAfterDate(item: PlanItem, dateValue: string): boolean {
+  const completedDate = getTaskCompletedDateValue(item);
+
+  return Boolean(item.completed && completedDate && compareDateValues(completedDate, dateValue) > 0);
+}
+
+function isTaskOverdueByDate(item: PlanItem, referenceDate: string): boolean {
+  return !isTaskCompletedByDate(item, referenceDate) && compareDateValues(item.date, referenceDate) < 0;
+}
+
+function isTaskArchivedInLifecycle(item: PlanItem, referenceDate: string): boolean {
+  const completedDate = getTaskCompletedDateValue(item);
+
+  return (
+    isTaskOverdueByDate(item, referenceDate) ||
+    Boolean(
+      completedDate &&
+        compareDateValues(item.date, completedDate) < 0 &&
+        compareDateValues(completedDate, referenceDate) <= 0,
+    )
+  );
+}
+
 function getPlanSearchSummary(note: string | undefined): string {
   const normalizedNote = (note ?? "").trim().replace(/\s+/g, " ");
   if (normalizedNote.length <= 42) {
@@ -6418,7 +6564,11 @@ function getMedicalDailyWordFontSize(word: string, meaning: string) {
 }
 
 function getPrimaryPinkStickerSet(plans: PlanItem[], selectedDate: string, count = 6) {
-  const seed = getStickerSeed(`${selectedDate}|${plans.map((item) => `${item.title}-${item.category}-${item.completed}`).join("|")}`);
+  const seed = getStickerSeed(
+    `${selectedDate}|${plans
+      .map((item) => `${item.title}-${item.category}-${isTaskCompletedByDate(item, selectedDate)}`)
+      .join("|")}`,
+  );
 
   return primaryPinkStickerPool
     .map((src, index) => ({
@@ -6432,7 +6582,11 @@ function getPrimaryPinkStickerSet(plans: PlanItem[], selectedDate: string, count
 
 function getExportAudienceStickerSet(template: ExportTemplate, plans: PlanItem[], selectedDate: string, count = 5) {
   const stickerPool = (exportAudienceStickerPools[template.audience] ?? exportAudienceStickerPools["简约通用版"] ?? primaryPinkStickerPool).filter(Boolean);
-  const seed = getStickerSeed(`${template.id}|${selectedDate}|${plans.map((item) => `${item.title}-${item.completed}`).join("|")}`);
+  const seed = getStickerSeed(
+    `${template.id}|${selectedDate}|${plans
+      .map((item) => `${item.title}-${isTaskCompletedByDate(item, selectedDate)}`)
+      .join("|")}`,
+  );
   const shuffledStickers = stickerPool
     .map((src, index) => ({
       order: getStickerSeed(`${seed}-${index}`),
@@ -7366,7 +7520,8 @@ function ExportPrimaryPinkTemplate({
                 }}
               >
                 {displayPlans.map((item, index) => {
-                  const cardAccent = item.completed ? "#72b893" : index % 2 === 0 ? "#e9659d" : "#a47be5";
+                  const isCompletedForSelectedDate = isTaskCompletedByDate(item, selectedDate);
+                  const cardAccent = isCompletedForSelectedDate ? "#72b893" : index % 2 === 0 ? "#e9659d" : "#a47be5";
                   const noteVisible = showNotes && item.note.trim();
                   const durationText = [
                     item.targetMinutes ? `目标 ${formatMinutes(item.targetMinutes)}` : "",
@@ -7378,8 +7533,8 @@ function ExportPrimaryPinkTemplate({
                   return (
                     <article
                       key={item.id}
-	                      style={{
-                        background: item.completed
+		                      style={{
+                        background: isCompletedForSelectedDate
                           ? "linear-gradient(135deg, rgba(255,255,255,0.92), rgba(231,248,238,0.92))"
                           : "linear-gradient(135deg, rgba(255,255,255,0.98), rgba(255,248,251,0.94))",
                         borderRadius: denseTaskGrid ? "22px" : "26px",
@@ -7404,7 +7559,7 @@ function ExportPrimaryPinkTemplate({
 	                        className="export-task-line"
 	                        style={{
 	                          alignItems: "flex-start",
-	                          color: item.completed ? "#806d7b" : "#3f3146",
+		                          color: isCompletedForSelectedDate ? "#806d7b" : "#3f3146",
 	                          display: "flex",
 	                          fontSize: `${taskTitleSize}px`,
 	                          fontWeight: 800,
@@ -7424,7 +7579,7 @@ function ExportPrimaryPinkTemplate({
 	                          aria-hidden="true"
 	                          className="export-task-status"
 	                          style={{
-	                            color: item.completed ? cardAccent : "#d76c9d",
+		                            color: isCompletedForSelectedDate ? cardAccent : "#d76c9d",
 	                            display: "inline-block",
 	                            flex: "0 0 auto",
 	                            fontWeight: 800,
@@ -7434,7 +7589,7 @@ function ExportPrimaryPinkTemplate({
 	                            width: taskStatusWidth,
 	                          }}
 	                        >
-	                          {item.completed ? "☑" : "☐"}
+		                          {isCompletedForSelectedDate ? "☑" : "☐"}
 	                        </span>
 	                        <span
 	                          className="export-task-text"
@@ -8138,6 +8293,7 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
               }}
             >
               {displayPlans.map((item, index) => {
+                const isCompletedForSelectedDate = isTaskCompletedByDate(item, selectedDate);
                 const noteVisible = density.showNotes && item.note.trim();
                 const cardAccent = index % 2 === 0 ? template.accent : template.accent2;
                 const durationText = [
@@ -8150,14 +8306,14 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
                 return (
 	                    <article
 	                      key={item.id}
-	                      style={{
-	                        background: item.completed
-	                        ? `linear-gradient(135deg, rgba(255,255,255,0.94), ${template.accentSoft})`
-	                        : "linear-gradient(135deg, rgba(255,255,255,0.98), rgba(255,255,255,0.94))",
-	                      border: `2px solid ${item.completed ? template.accentSoft : template.border}`,
+		                      style={{
+		                        background: isCompletedForSelectedDate
+                        ? `linear-gradient(135deg, rgba(255,255,255,0.94), ${template.accentSoft})`
+                        : "linear-gradient(135deg, rgba(255,255,255,0.98), rgba(255,255,255,0.94))",
+		                      border: `2px solid ${isCompletedForSelectedDate ? template.accentSoft : template.border}`,
 	                      borderRadius: isPlayful ? "24px" : "15px",
 	                      boxSizing: "border-box",
-	                      boxShadow: item.completed
+		                      boxShadow: isCompletedForSelectedDate
 	                        ? "0 10px 24px rgba(116, 74, 103, 0.08)"
 	                        : "0 14px 30px rgba(116, 74, 103, 0.12)",
 	                      display: "flex",
@@ -8214,8 +8370,8 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
                     <div
                       style={{
                         alignItems: "center",
-                        background: item.completed ? cardAccent : "#ffffff",
-                        border: `3px solid ${item.completed ? cardAccent : template.checkbox}`,
+	                        background: isCompletedForSelectedDate ? cardAccent : "#ffffff",
+	                        border: `3px solid ${isCompletedForSelectedDate ? cardAccent : template.checkbox}`,
                         borderRadius: isPlayful ? "9px" : "6px",
                         color: "#ffffff",
                         display: "none",
@@ -8229,7 +8385,7 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
                         zIndex: 1,
                       }}
                     >
-                      {item.completed ? "✓" : ""}
+	                      {isCompletedForSelectedDate ? "✓" : ""}
                     </div>
 
                     <div
@@ -8246,7 +8402,7 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
                         className="export-task-line"
                         style={{
                           alignItems: "flex-start",
-                          color: item.completed ? template.muted : template.ink,
+	                          color: isCompletedForSelectedDate ? template.muted : template.ink,
                           display: "flex",
                           gap: density.columns === 3 ? "8px" : "12px",
                           fontSize: `${density.taskTitleSize}px`,
@@ -8262,14 +8418,14 @@ function ExportJournalTemplate(props: ExportJournalTemplateProps) {
                           aria-hidden="true"
                           className="export-task-status"
                           style={{
-                            color: item.completed ? cardAccent : template.checkbox,
+	                            color: isCompletedForSelectedDate ? cardAccent : template.checkbox,
                             flex: "0 0 auto",
                             fontWeight: 800,
                             lineHeight: `${exportTaskTitleLineHeightPx}px`,
                             paddingTop: `${density.titlePaddingY}px`,
                           }}
                         >
-                          {item.completed ? "☑" : "☐"}
+	                          {isCompletedForSelectedDate ? "☑" : "☐"}
                         </span>
                         <span
                           className="export-task-text"
@@ -8954,6 +9110,8 @@ function App() {
     null,
   );
   const [taskTimeEntryEdit, setTaskTimeEntryEdit] = useState<TaskTimeEntryEdit | null>(null);
+  const [historicalTaskCompletion, setHistoricalTaskCompletion] =
+    useState<HistoricalTaskCompletionDraft | null>(null);
   const [ganttPreviewProjectId, setGanttPreviewProjectId] = useState<string | null>(null);
   const [ganttExportProjectId, setGanttExportProjectId] = useState<string | null>(null);
   const [ganttExportWidth, setGanttExportWidth] = useState<number>(1020);
@@ -8974,6 +9132,10 @@ function App() {
   const [planSearchQuery, setPlanSearchQuery] = useState<string>("");
   const [isPlanSearchOpen, setIsPlanSearchOpen] = useState<boolean>(false);
   const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<WorkspaceTab>("tasks");
+  const [taskArchiveFilter, setTaskArchiveFilter] =
+    useState<TaskArchiveFilter>("pending");
+  const [taskArchiveVisibleCount, setTaskArchiveVisibleCount] =
+    useState<number>(TASK_ARCHIVE_PAGE_SIZE);
   const [todayWorkspaceCollapsed, setTodayWorkspaceCollapsed] =
     useState<TodayWorkspaceCollapsedState>(() => DEFAULT_TODAY_WORKSPACE_COLLAPSED_STATE);
   const [isTaskFormOpen, setIsTaskFormOpen] = useState<boolean>(false);
@@ -9214,14 +9376,14 @@ function App() {
     () => new Set(plans.map((item) => item.id)),
     [plans],
   );
-  const timerOnlyPlansForSelectedDate = useMemo(
+  const carriedActualPlansForSelectedDate = useMemo(
     () =>
       allPlans.filter(
         (item) =>
           !selectedPlanIdSet.has(item.id) &&
-          getTaskTimeEntriesForDate(item, selectedDate).length > 0,
+          getTaskActualTimeForDate(item, selectedDate, timerTick).actualSeconds > 0,
       ),
-    [allPlans, selectedDate, selectedPlanIdSet],
+    [allPlans, selectedDate, selectedPlanIdSet, timerTick],
   );
   const selectedMoodEntries = useMemo(
     () => [...(moodBook[selectedDate] ?? [])].sort((left, right) => left.timestamp - right.timestamp),
@@ -9248,6 +9410,9 @@ function App() {
     taskTimeDetailTarget
       ? allPlans.find((item) => item.id === taskTimeDetailTarget.itemId) ?? null
       : null;
+  const historicalTaskCompletionItem = historicalTaskCompletion
+    ? allPlans.find((item) => item.id === historicalTaskCompletion.itemId) ?? null
+    : null;
   const taskTimeDetailEntries =
     taskTimeDetailItem
       ? [...getTaskTimeEntries(taskTimeDetailItem)].sort((left, right) => left.startedAt - right.startedAt)
@@ -9286,15 +9451,84 @@ function App() {
       })),
     [plans],
   );
-  const completedCount = plans.filter((item) => item.completed).length;
+  const taskLifecycleArchiveItems = useMemo(
+    () =>
+      allPlans
+        .filter((item) => isTaskArchivedInLifecycle(item, today))
+        .sort((left, right) => {
+          const leftOpen = !left.completed;
+          const rightOpen = !right.completed;
+
+          if (leftOpen !== rightOpen) {
+            return leftOpen ? -1 : 1;
+          }
+
+          const dateDifference = getPlanDateTime(left.date) - getPlanDateTime(right.date);
+
+          if (dateDifference !== 0) {
+            return dateDifference;
+          }
+
+          return getItemTime(right) - getItemTime(left);
+        }),
+    [allPlans, today],
+  );
+  const overdueTaskCount = taskLifecycleArchiveItems.filter((item) => !item.completed).length;
+  const lateCompletedTaskCount = taskLifecycleArchiveItems.length - overdueTaskCount;
+  const filteredTaskLifecycleArchiveItems = useMemo(
+    () =>
+      taskLifecycleArchiveItems
+        .filter((item) =>
+          taskArchiveFilter === "pending" ? !item.completed : item.completed,
+        )
+        .sort((left, right) => {
+          if (taskArchiveFilter === "pending") {
+            const taskDateDifference = getPlanDateTime(left.date) - getPlanDateTime(right.date);
+
+            return taskDateDifference || getItemTime(right) - getItemTime(left);
+          }
+
+          return (right.completedAt ?? 0) - (left.completedAt ?? 0) ||
+            getItemTime(right) - getItemTime(left);
+        }),
+    [taskArchiveFilter, taskLifecycleArchiveItems],
+  );
+  const visibleTaskLifecycleArchiveItems = filteredTaskLifecycleArchiveItems.slice(
+    0,
+    taskArchiveVisibleCount,
+  );
+  const completionRecordsForSelectedDate = useMemo(
+    () =>
+      allPlans
+        .filter(
+          (item) =>
+            item.completed &&
+            item.date !== selectedDate &&
+            getTaskCompletedDateValue(item) === selectedDate,
+        )
+        .sort((left, right) => (right.completedAt ?? 0) - (left.completedAt ?? 0)),
+    [allPlans, selectedDate],
+  );
+  const completedCount = plans.filter((item) => isTaskCompletedByDate(item, selectedDate)).length;
   const progress = plans.length > 0 ? Math.round((completedCount / plans.length) * 100) : 0;
   const isDailyComplexProjectsCollapsed = todayWorkspaceCollapsed.longProjects;
   const dailyTimeStats = useMemo<DailyTimeStats>(() => {
     const targetTotalMinutes = getTotalMinutes(plans, "targetMinutes");
-    const savedActualMinutes = getTotalMinutes(plans, "actualMinutes");
-    const completedPlans = plans.filter((item) => item.completed);
-    const unfinishedPlans = plans.filter((item) => !item.completed);
+    const completedPlans = plans.filter((item) => isTaskCompletedByDate(item, selectedDate));
+    const unfinishedPlans = plans.filter((item) => !isTaskCompletedByDate(item, selectedDate));
     const plannedTimePlans = plans.filter((item) => item.targetMinutes);
+    const taskActualTimeRecords = allPlans.map((item) => ({
+      item,
+      time: getTaskActualTimeForDate(item, selectedDate, timerTick),
+    }));
+    const savedActualMinutes = taskActualTimeRecords.reduce(
+      (totalMinutes, record) => totalMinutes + record.time.manualSeconds / 60,
+      0,
+    );
+    const taskActualSeconds = taskActualTimeRecords.reduce(
+      (totalSeconds, record) => totalSeconds + record.time.actualSeconds,
+      0,
+    );
     const projectActualSeconds = complexProjects.reduce(
       (totalSeconds, project) =>
         totalSeconds + getComplexProjectSecondsForDate(project, selectedDate, timerTick),
@@ -9310,31 +9544,17 @@ function App() {
         project.phases.filter((phase) => phase.timeEntries.some((entry) => !entry.endedAt)).length,
       0,
     );
-    const scheduledTimerSeconds = plans.reduce((totalSeconds, item) => {
-      if (item.actualMinutes) {
-        return totalSeconds;
-      }
-
-      return totalSeconds + getTaskTimeSecondsForDate(item, selectedDate, timerTick);
-    }, 0);
-    const carriedTimerSeconds = timerOnlyPlansForSelectedDate.reduce(
-      (totalSeconds, item) =>
-        totalSeconds + getTaskTimeSecondsForDate(item, selectedDate, timerTick),
+    const temporaryTimerSeconds = taskActualTimeRecords.reduce(
+      (totalSeconds, record) => totalSeconds + record.time.timerSeconds,
       0,
     );
-    const temporaryTimerSeconds = scheduledTimerSeconds + carriedTimerSeconds;
-    const liveActualSeconds = savedActualMinutes * 60 + temporaryTimerSeconds + projectActualSeconds;
+    const liveActualSeconds = taskActualSeconds + projectActualSeconds;
     const targetTotalSeconds = targetTotalMinutes * 60;
-    const comparableSavedActualMinutes = getTotalMinutes(plannedTimePlans, "actualMinutes");
-    const comparableTemporaryTimerSeconds = plannedTimePlans.reduce((totalSeconds, item) => {
-      if (item.actualMinutes) {
-        return totalSeconds;
-      }
-
-      return totalSeconds + getTaskTimeSecondsForDate(item, selectedDate, timerTick);
-    }, 0);
-    const comparableActualSeconds =
-      comparableSavedActualMinutes * 60 + comparableTemporaryTimerSeconds;
+    const comparableActualSeconds = plannedTimePlans.reduce(
+      (totalSeconds, item) =>
+        totalSeconds + getTaskActualTimeForDate(item, selectedDate, timerTick).actualSeconds,
+      0,
+    );
     const unplannedActualSeconds = Math.max(0, liveActualSeconds - comparableActualSeconds);
     const actualPercent =
       targetTotalSeconds > 0
@@ -9353,28 +9573,34 @@ function App() {
       differenceSeconds:
         targetTotalSeconds > 0 ? comparableActualSeconds - targetTotalSeconds : null,
       unplannedActualSeconds,
-      completedActualMinutes: getTotalMinutes(completedPlans, "actualMinutes"),
-      incompleteActualMinutes: getTotalMinutes(unfinishedPlans, "actualMinutes"),
+      completedActualMinutes: completedPlans.reduce(
+        (totalMinutes, item) =>
+          totalMinutes + getTaskActualTimeForDate(item, selectedDate, timerTick).actualSeconds / 60,
+        0,
+      ),
+      incompleteActualMinutes: unfinishedPlans.reduce(
+        (totalMinutes, item) =>
+          totalMinutes + getTaskActualTimeForDate(item, selectedDate, timerTick).actualSeconds / 60,
+        0,
+      ),
       unfinishedTargetMinutes: getTotalMinutes(unfinishedPlans, "targetMinutes"),
       missingTargetCount: plans.filter((item) => !item.targetMinutes).length,
-      missingActualCount: plans.filter((item) => !item.actualMinutes).length,
+      missingActualCount: plans.filter(
+        (item) => getTaskActualTimeForDate(item, selectedDate, timerTick).actualSeconds <= 0,
+      ).length,
       activeTimerCount:
-        plans.filter((item) =>
-          getTaskTimeEntriesForDate(item, selectedDate).some((entry) => !entry.endedAt),
-        ).length +
-        timerOnlyPlansForSelectedDate.filter((item) =>
+        allPlans.filter((item) =>
           getTaskTimeEntriesForDate(item, selectedDate).some((entry) => !entry.endedAt),
         ).length +
         projectActiveTimerCount,
-      trackedTimerCount:
-        plans.filter((item) => {
-          return !item.actualMinutes && getTaskTimeEntriesForDate(item, selectedDate).length > 0;
-        }).length + timerOnlyPlansForSelectedDate.length,
+      trackedTimerCount: taskActualTimeRecords.filter(
+        (record) => record.time.timerSeconds > 0,
+      ).length,
       completedCount: completedPlans.length,
       actualPercent,
       actualProgress: Math.min(100, actualPercent),
     };
-  }, [complexProjects, plans, selectedDate, timerOnlyPlansForSelectedDate, timerTick]);
+  }, [allPlans, complexProjects, plans, selectedDate, timerTick]);
 
   useEffect(() => {
     savePlanBook(plansByDate);
@@ -9707,6 +9933,21 @@ function App() {
       ...currentBook,
       [selectedDate]: updater(currentBook[selectedDate] ?? []),
     }));
+  };
+
+  const updatePlanItemAcrossBook = (
+    itemId: string,
+    updater: (currentItem: PlanItem) => PlanItem,
+  ) => {
+    setPlansByDate((currentBook) =>
+      Object.entries(currentBook).reduce<PlanBook>((nextBook, [date, items]) => {
+        nextBook[date] = items.map((item) =>
+          item.id === itemId ? updater(item) : item,
+        );
+
+        return nextBook;
+      }, {}),
+    );
   };
 
   const addMoodEntry = () => {
@@ -11044,6 +11285,7 @@ function App() {
     const nextPlan: PlanItem = {
       id: createId(),
       date: selectedDate,
+      createdDate: selectedDate,
       title,
       category: form.category,
       priority: form.priority,
@@ -11347,6 +11589,7 @@ function App() {
 
   const selectPlannerDate = (dateValue: string) => {
     setSelectedDate(dateValue);
+    setHistoricalTaskCompletion(null);
     resetForm();
     cancelTaskInlineEdit();
     cancelActualMinutesEdit();
@@ -11375,7 +11618,7 @@ function App() {
     cancelActualMinutesEdit();
   };
 
-  const handleTimerClick = (item: PlanItem) => {
+  const handleTimerClickForDate = (item: PlanItem, entryDate: string) => {
     if (item.completed) {
       return;
     }
@@ -11383,38 +11626,37 @@ function App() {
     clearTimerNotice();
 
     const now = Date.now();
+    const nextTimeEntryId = createId();
     setTimerTick(now);
 
-    updatePlansForSelectedDate((currentPlans) =>
-      currentPlans.map((currentItem) => {
-        if (currentItem.id !== item.id || currentItem.completed) {
-          return currentItem;
-        }
+    updatePlanItemAcrossBook(item.id, (currentItem) => {
+      if (currentItem.completed) {
+        return currentItem;
+      }
 
-        const timeEntries = getTaskTimeEntries(currentItem);
-        const hasRunningEntry = timeEntries.some((entry) => !entry.endedAt);
-        const stoppedEntries = stopRunningTaskTimeEntries(timeEntries, now);
+      const timeEntries = getTaskTimeEntries(currentItem);
+      const hasRunningEntry = timeEntries.some((entry) => !entry.endedAt);
+      const stoppedEntries = stopRunningTaskTimeEntries(timeEntries, now);
 
-        return {
-          ...currentItem,
-          timeEntries: hasRunningEntry
-            ? stoppedEntries
-            : [
-                ...stoppedEntries,
-                {
-                  id: createId(),
-                  date: selectedDate,
-                  startedAt: now,
-                  durationSeconds: 0,
-                },
-              ],
-          timerEndedDates: (currentItem.timerEndedDates ?? []).filter(
-            (date) => date !== selectedDate,
-          ),
-          updatedAt: now,
-        };
-      }),
-    );
+      return {
+        ...currentItem,
+        timeEntries: hasRunningEntry
+          ? stoppedEntries
+          : [
+              ...stoppedEntries,
+              {
+                id: nextTimeEntryId,
+                date: entryDate,
+                startedAt: now,
+                durationSeconds: 0,
+              },
+            ],
+        timerEndedDates: (currentItem.timerEndedDates ?? []).filter(
+          (date) => date !== entryDate,
+        ),
+        updatedAt: now,
+      };
+    });
 
     setTaskTimersByTaskId((currentTimers) => {
       const currentTimer = currentTimers[item.id];
@@ -11442,7 +11684,11 @@ function App() {
     });
   };
 
-  const endTaskTimer = (item: PlanItem) => {
+  const handleTimerClick = (item: PlanItem) => {
+    handleTimerClickForDate(item, selectedDate);
+  };
+
+  const endTaskTimerForDate = (item: PlanItem, entryDate: string) => {
     if (item.completed) {
       return;
     }
@@ -11451,33 +11697,27 @@ function App() {
 
     const now = Date.now();
     setTimerTick(now);
-    updatePlansForSelectedDate((currentPlans) =>
-      currentPlans.map((currentItem) => {
-        if (currentItem.id !== item.id) {
-          return currentItem;
-        }
+    updatePlanItemAcrossBook(item.id, (currentItem) => {
+      const stoppedEntries = stopRunningTaskTimeEntries(getTaskTimeEntries(currentItem), now);
+      const hasEntriesForEntryDate = stoppedEntries.some(
+        (entry) => entry.date === entryDate,
+      );
 
-        const stoppedEntries = stopRunningTaskTimeEntries(getTaskTimeEntries(currentItem), now);
-        const hasEntriesForSelectedDate = stoppedEntries.some(
-          (entry) => entry.date === selectedDate,
-        );
-
-        return {
-          ...currentItem,
-          timeEntries: stoppedEntries,
-          timerResetAtByDate: hasEntriesForSelectedDate
-            ? {
-                ...(currentItem.timerResetAtByDate ?? {}),
-                [selectedDate]: now,
-              }
-            : (currentItem.timerResetAtByDate ?? {}),
-          timerEndedDates: hasEntriesForSelectedDate
-            ? uniqueValues([...(currentItem.timerEndedDates ?? []), selectedDate])
-            : (currentItem.timerEndedDates ?? []),
-          updatedAt: now,
-        };
-      }),
-    );
+      return {
+        ...currentItem,
+        timeEntries: stoppedEntries,
+        timerResetAtByDate: hasEntriesForEntryDate
+          ? {
+              ...(currentItem.timerResetAtByDate ?? {}),
+              [entryDate]: now,
+            }
+          : (currentItem.timerResetAtByDate ?? {}),
+        timerEndedDates: hasEntriesForEntryDate
+          ? uniqueValues([...(currentItem.timerEndedDates ?? []), entryDate])
+          : (currentItem.timerEndedDates ?? []),
+        updatedAt: now,
+      };
+    });
     setTaskTimersByTaskId((currentTimers) => {
       if (!currentTimers[item.id]) {
         return currentTimers;
@@ -11488,6 +11728,10 @@ function App() {
       return nextTimers;
     });
     showTimerNotice(`已结束“${item.title}”计时，可重新开始`);
+  };
+
+  const endTaskTimer = (item: PlanItem) => {
+    endTaskTimerForDate(item, selectedDate);
   };
 
   const resetLatestTaskTimerEntryForSelectedDate = (item: PlanItem) => {
@@ -11780,14 +12024,302 @@ function App() {
     });
   };
 
+  const getSuggestedHistoricalCompletionAt = (
+    item: PlanItem,
+    mode: HistoricalTaskCompletionMode,
+  ): number => {
+    const matchingEndedTimes = getTaskTimeEntries(item)
+      .map((entry) => entry.endedAt)
+      .filter((endedAt): endedAt is number => {
+        if (!endedAt) {
+          return false;
+        }
+
+        const endedDate = getTimestampDateValue(endedAt);
+        return mode === "same-day"
+          ? endedDate === item.date
+          : compareDateValues(endedDate, item.date) > 0;
+      });
+
+    if (matchingEndedTimes.length > 0) {
+      return Math.max(...matchingEndedTimes);
+    }
+
+    return mode === "same-day"
+      ? createTimestampForDateAtCurrentTime(item.date)
+      : Date.now();
+  };
+
+  const openHistoricalTaskCompletion = (item: PlanItem) => {
+    if (item.completed && item.completedAt) {
+      const completedDate = getTimestampDateValue(item.completedAt);
+
+      setHistoricalTaskCompletion({
+        itemId: item.id,
+        mode: completedDate === item.date ? "same-day" : "later",
+        completedAtValue: formatDateTimeLocalInput(item.completedAt),
+        actualMinutesValue: item.actualMinutes ? String(item.actualMinutes) : "",
+        error: "",
+      });
+      return;
+    }
+
+    const latestEndedAt = getTaskTimeEntries(item).reduce(
+      (latestTimestamp, entry) => Math.max(latestTimestamp, entry.endedAt ?? 0),
+      0,
+    );
+    const latestEndedDate = latestEndedAt ? getTimestampDateValue(latestEndedAt) : null;
+    const suggestedMode: HistoricalTaskCompletionMode =
+      latestEndedDate === item.date ? "same-day" : "later";
+    const suggestedCompletedAt = latestEndedAt ||
+      getSuggestedHistoricalCompletionAt(item, suggestedMode);
+
+    setHistoricalTaskCompletion({
+      itemId: item.id,
+      mode: suggestedMode,
+      completedAtValue: formatDateTimeLocalInput(suggestedCompletedAt),
+      actualMinutesValue: item.actualMinutes ? String(item.actualMinutes) : "",
+      error: "",
+    });
+  };
+
+  const closeHistoricalTaskCompletion = () => {
+    setHistoricalTaskCompletion(null);
+  };
+
+  const updateHistoricalTaskCompletionMode = (mode: HistoricalTaskCompletionMode) => {
+    if (!historicalTaskCompletionItem) {
+      return;
+    }
+
+    setHistoricalTaskCompletion((current) =>
+      current
+        ? {
+            ...current,
+            mode,
+            completedAtValue: formatDateTimeLocalInput(
+              getSuggestedHistoricalCompletionAt(historicalTaskCompletionItem, mode),
+            ),
+            error: "",
+          }
+        : current,
+    );
+  };
+
+  const saveHistoricalTaskCompletion = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!historicalTaskCompletion || !historicalTaskCompletionItem) {
+      return;
+    }
+
+    const completedAt = parseDateTimeLocalInput(historicalTaskCompletion.completedAtValue);
+    const actualMinutes = parseOptionalMinutes(historicalTaskCompletion.actualMinutesValue);
+    const now = Date.now();
+
+    if (!completedAt) {
+      setHistoricalTaskCompletion((current) =>
+        current ? { ...current, error: "请选择真实的完成日期和时间" } : current,
+      );
+      return;
+    }
+
+    if (completedAt > now + 60000) {
+      setHistoricalTaskCompletion((current) =>
+        current ? { ...current, error: "完成时间不能晚于现在" } : current,
+      );
+      return;
+    }
+
+    const completedDate = getTimestampDateValue(completedAt);
+
+    if (
+      historicalTaskCompletion.mode === "same-day" &&
+      completedDate !== historicalTaskCompletionItem.date
+    ) {
+      setHistoricalTaskCompletion((current) =>
+        current
+          ? { ...current, error: "选择“当日已完成”时，完成日期必须是任务归属日" }
+          : current,
+      );
+      return;
+    }
+
+    if (
+      historicalTaskCompletion.mode === "later" &&
+      compareDateValues(completedDate, historicalTaskCompletionItem.date) <= 0
+    ) {
+      setHistoricalTaskCompletion((current) =>
+        current
+          ? { ...current, error: "选择“后来完成”时，完成日期必须晚于任务归属日" }
+          : current,
+      );
+      return;
+    }
+
+    if (actualMinutes === null) {
+      setHistoricalTaskCompletion((current) =>
+        current ? { ...current, error: "实际用时请输入正整数分钟，或留空" } : current,
+      );
+      return;
+    }
+
+    const itemId = historicalTaskCompletionItem.id;
+    const itemTitle = historicalTaskCompletionItem.title;
+    const isUpdatingCompletion = historicalTaskCompletionItem.completed;
+
+    clearTimerNotice();
+    setTimerTick(now);
+    setPlansByDate((currentBook) => {
+      const nextBook = Object.entries(currentBook).reduce<PlanBook>((book, [date, items]) => {
+        book[date] = items.map((currentItem) => {
+          if (currentItem.id !== itemId) {
+            return currentItem;
+          }
+
+          const timeEntries = stopRunningTaskTimeEntries(getTaskTimeEntries(currentItem), now);
+          const totalTaskTimeSeconds = getTaskTimeTotalSeconds(
+            { ...currentItem, timeEntries },
+            now,
+          );
+
+          return {
+            ...currentItem,
+            completed: true,
+            completedAt,
+            completionRecordedAt: currentItem.completionRecordedAt ?? now,
+            actualMinutes:
+              actualMinutes ??
+              currentItem.actualMinutes ??
+              (totalTaskTimeSeconds > 0
+                ? timerSecondsToActualMinutes(totalTaskTimeSeconds)
+                : undefined),
+            timeEntries,
+            updatedAt: now,
+          };
+        });
+
+        return book;
+      }, {});
+
+      return normalizePlanBook(nextBook);
+    });
+    setTaskTimersByTaskId((currentTimers) => {
+      if (!currentTimers[itemId]) {
+        return currentTimers;
+      }
+
+      const nextTimers = { ...currentTimers };
+      delete nextTimers[itemId];
+      return nextTimers;
+    });
+    setHistoricalTaskCompletion(null);
+    showTimerNotice(
+      isUpdatingCompletion
+        ? `已更新“${itemTitle}”的完成记录`
+        : historicalTaskCompletion.mode === "same-day"
+        ? `已补记“${itemTitle}”在任务当日完成`
+        : `已登记“${itemTitle}”于 ${formatDisplayDate(completedDate)} 完成`,
+    );
+  };
+
+  const undoHistoricalTaskCompletion = (itemId: string) => {
+    const item = allPlans.find((planItem) => planItem.id === itemId);
+
+    if (!item?.completed) {
+      return;
+    }
+
+    const shouldUndo = window.confirm(
+      `撤销“${item.title}”的完成记录？任务内容、实际用时和计时分段都会保留。`,
+    );
+
+    if (!shouldUndo) {
+      return;
+    }
+
+    const now = Date.now();
+
+    setPlansByDate((currentBook) => {
+      const nextBook = Object.entries(currentBook).reduce<PlanBook>((book, [date, items]) => {
+        book[date] = items.map((currentItem) =>
+          currentItem.id === itemId
+            ? {
+                ...currentItem,
+                completed: false,
+                completedAt: undefined,
+                completionRecordedAt: undefined,
+                updatedAt: now,
+              }
+            : currentItem,
+        );
+
+        return book;
+      }, {});
+
+      return normalizePlanBook(nextBook);
+    });
+    setHistoricalTaskCompletion(null);
+    showTimerNotice(`已撤销“${item.title}”的完成记录`);
+  };
+
+  const jumpToTaskDate = (item: PlanItem) => {
+    const targetDate = normalizeDateInputString(item.date, selectedDate);
+
+    setSelectedDate(targetDate);
+    setCalendarMonthDate(getMonthStartDateValue(targetDate));
+    setActiveWorkspaceTab("tasks");
+    setHistoricalTaskCompletion(null);
+    resetForm();
+    cancelTaskInlineEdit();
+    setActualEditId(null);
+    setActualMinutesDraft("");
+    setActualMinutesError("");
+    cancelTaskReschedule();
+    setHighlightedTaskId(item.id);
+
+    if (highlightedTaskTimer.current) {
+      window.clearTimeout(highlightedTaskTimer.current);
+    }
+
+    window.setTimeout(() => {
+      document
+        .getElementById(`task-${item.id}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 80);
+
+    highlightedTaskTimer.current = window.setTimeout(() => {
+      setHighlightedTaskId(null);
+      highlightedTaskTimer.current = null;
+    }, 1800);
+  };
+
+  const completeLifecycleTask = (itemId: string) => {
+    const item = allPlans.find((planItem) => planItem.id === itemId);
+
+    if (!item || item.completed) {
+      return;
+    }
+
+    openHistoricalTaskCompletion(item);
+  };
+
   const handleToggle = (id: string) => {
     const targetPlan = plans.find((item) => item.id === id);
+
+    if (targetPlan && compareDateValues(targetPlan.date, today) < 0) {
+      openHistoricalTaskCompletion(targetPlan);
+      return;
+    }
+
     const now = Date.now();
     const taskTimer = taskTimersByTaskId[id];
     const hasTimerForTask = Boolean(taskTimer);
 
     if (targetPlan && !targetPlan.completed) {
-      const nextCompletedCount = plans.filter((item) => item.completed || item.id === id).length;
+      const nextCompletedCount = plans.filter(
+        (item) => isTaskCompletedByDate(item, selectedDate) || item.id === id,
+      ).length;
       const nextCompletionFeedback = createCompletionFeedback({
         itemId: id,
         completedCount: nextCompletedCount,
@@ -11841,6 +12373,8 @@ function App() {
         return {
           ...item,
           completed: !item.completed,
+          completedAt: isCompleting ? now : undefined,
+          completionRecordedAt: isCompleting ? now : undefined,
           actualMinutes:
             isCompleting && selectedDateTimeSeconds > 0 && !item.actualMinutes
               ? timerSecondsToActualMinutes(selectedDateTimeSeconds)
@@ -12233,20 +12767,8 @@ function App() {
       className: timeDifferenceToneClass,
     },
   ];
-  const getLiveActualSecondsForPlan = (
-    item: PlanItem,
-    options: { timerOnly?: boolean } = {},
-  ) => {
-    const selectedDateTimerSeconds = getTaskTimeSecondsForDate(item, selectedDate, timerTick);
-
-    if (options.timerOnly) {
-      return selectedDateTimerSeconds;
-    }
-
-    const liveTimerSeconds = item.actualMinutes ? 0 : selectedDateTimerSeconds;
-
-    return (item.actualMinutes ?? 0) * 60 + liveTimerSeconds;
-  };
+  const getLiveActualSecondsForPlan = (item: PlanItem) =>
+    getTaskActualTimeForDate(item, selectedDate, timerTick).actualSeconds;
   const categoryTimeChartItems = (() => {
     const categoryMap = new Map<
       string,
@@ -12288,11 +12810,11 @@ function App() {
         getLiveActualSecondsForPlan(item),
       );
     });
-    timerOnlyPlansForSelectedDate.forEach((item) => {
+    carriedActualPlansForSelectedDate.forEach((item) => {
       addCategoryTime(
         item.category || "未分类",
         0,
-        getLiveActualSecondsForPlan(item, { timerOnly: true }),
+        getLiveActualSecondsForPlan(item),
       );
     });
 
@@ -12306,7 +12828,7 @@ function App() {
   })();
   const priorityTimeChartItems = PRIORITY_OPTIONS.map((priorityOption) => {
     const priorityPlans = plans.filter((item) => normalizePriority(item.priority) === priorityOption.id);
-    const priorityTimerOnlyPlans = timerOnlyPlansForSelectedDate.filter(
+    const priorityCarriedActualPlans = carriedActualPlansForSelectedDate.filter(
       (item) => normalizePriority(item.priority) === priorityOption.id,
     );
 
@@ -12316,12 +12838,11 @@ function App() {
           (totalSeconds, item) => totalSeconds + getLiveActualSecondsForPlan(item),
           0,
         ) +
-        priorityTimerOnlyPlans.reduce(
-          (totalSeconds, item) =>
-            totalSeconds + getLiveActualSecondsForPlan(item, { timerOnly: true }),
+        priorityCarriedActualPlans.reduce(
+          (totalSeconds, item) => totalSeconds + getLiveActualSecondsForPlan(item),
           0,
         ),
-      count: priorityPlans.length + priorityTimerOnlyPlans.length,
+      count: priorityPlans.length + priorityCarriedActualPlans.length,
       hint: priorityOption.hint,
       icon: priorityOption.icon,
       id: priorityOption.id,
@@ -12341,9 +12862,9 @@ function App() {
         title: item.title || "未命名计划",
       };
     }),
-    ...timerOnlyPlansForSelectedDate.map((item) => ({
-      actualSeconds: getLiveActualSecondsForPlan(item, { timerOnly: true }),
-      id: `${item.id}-${selectedDate}-timer`,
+    ...carriedActualPlansForSelectedDate.map((item) => ({
+      actualSeconds: getLiveActualSecondsForPlan(item),
+      id: `${item.id}-${selectedDate}-actual`,
       targetSeconds: 0,
       title: item.title || "未命名计划",
     })),
@@ -12445,8 +12966,8 @@ function App() {
     .filter((item) => item.totalSeconds > 0 || item.todaySessionCount > 0);
   const timeStatsSummaryParts = [
     plans.length > 0 ? `${plans.length} 项任务` : "",
-    timerOnlyPlansForSelectedDate.length > 0
-      ? `${timerOnlyPlansForSelectedDate.length} 项跨日计时`
+    carriedActualPlansForSelectedDate.length > 0
+      ? `${carriedActualPlansForSelectedDate.length} 项跨日用时`
       : "",
     complexProjectTimeItems.length > 0 ? `${complexProjectTimeItems.length} 个项目` : "",
   ].filter(Boolean);
@@ -13048,6 +13569,333 @@ function App() {
         </button>
       </div>
     </form>
+  );
+  const taskArchiveWorkspace = (
+    <section className="p-4 sm:p-6">
+      <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <p className="text-sm font-black text-rose-700">逾期归档</p>
+          <h2 className="mt-1 text-2xl font-black text-[#3f3349]">
+            {taskArchiveFilter === "pending" ? "待处理任务" : "后来完成记录"}
+          </h2>
+          <p className="mt-1 text-sm font-bold text-[#8b7b91]">
+            独立归档 · 更新至 {formatDisplayDateWithYear(today)} · 未完成 {overdueTaskCount} 项，已补完{" "}
+            {lateCompletedTaskCount} 项
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            aria-pressed={taskArchiveFilter === "pending"}
+            className={`min-w-[5.5rem] rounded-full px-3 py-1.5 text-xs font-black transition focus:outline-none focus:ring-4 focus:ring-rose-100 ${
+              taskArchiveFilter === "pending"
+                ? "bg-rose-600 text-white shadow-sm shadow-rose-200"
+                : "bg-rose-50 text-rose-700 hover:bg-rose-100"
+            }`}
+            type="button"
+            onClick={() => {
+              setTaskArchiveFilter("pending");
+              setTaskArchiveVisibleCount(TASK_ARCHIVE_PAGE_SIZE);
+            }}
+          >
+            待处理 {overdueTaskCount}
+          </button>
+          <button
+            aria-pressed={taskArchiveFilter === "completed"}
+            className={`min-w-[6.5rem] rounded-full px-3 py-1.5 text-xs font-black transition focus:outline-none focus:ring-4 focus:ring-emerald-100 ${
+              taskArchiveFilter === "completed"
+                ? "bg-emerald-600 text-white shadow-sm shadow-emerald-200"
+                : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+            }`}
+            type="button"
+            onClick={() => {
+              setTaskArchiveFilter("completed");
+              setTaskArchiveVisibleCount(TASK_ARCHIVE_PAGE_SIZE);
+            }}
+          >
+            后来完成 {lateCompletedTaskCount}
+          </button>
+        </div>
+      </div>
+
+      {filteredTaskLifecycleArchiveItems.length > 0 ? (
+        <div>
+          <div className="grid gap-3">
+          {visibleTaskLifecycleArchiveItems.map((item) => {
+            const style = getCategoryStyle(item.category, customCategories);
+            const priorityOption = getPriorityOption(item.priority);
+            const createdDate = getTaskCreatedDateValue(item);
+            const completedDate = getTaskCompletedDateValue(item);
+            const recordedDate = getTimestampDateValue(item.createdAt);
+            const completionRecordedDate = getTaskCompletionRecordedDateValue(item);
+            const isCompletedInArchive = item.completed;
+            const totalSeconds = getTaskTimeTotalSeconds(item, timerTick);
+            const timeEntryCount = getTaskTimeEntries(item).length;
+            const archiveTimerResetAt = (item.timerResetAtByDate ?? {})[today] ?? 0;
+            const archiveTodayTimeEntries = getTaskTimeEntriesForDate(item, today);
+            const archiveActiveTimeEntries = getTaskTimeEntriesForDateAfter(
+              item,
+              today,
+              archiveTimerResetAt,
+            );
+            const archiveActiveTimerSeconds = getTaskTimeSecondsForDateAfter(
+              item,
+              today,
+              archiveTimerResetAt,
+              timerTick,
+            );
+            const archiveHasForwardTiming =
+              archiveTodayTimeEntries.length > 0 ||
+              getTaskTimeSecondsForDate(item, today, timerTick) > 0;
+            const archiveHasActiveForwardTiming =
+              archiveActiveTimeEntries.length > 0 || archiveActiveTimerSeconds > 0;
+            const archiveIsTimerRunning = Boolean(getRunningTaskTimeEntry(item));
+            const archiveIsTimerEnded = Boolean(
+              archiveHasForwardTiming &&
+                !archiveIsTimerRunning &&
+                !archiveHasActiveForwardTiming &&
+                archiveTimerResetAt > 0,
+            );
+            const archiveIsTimerPaused = Boolean(
+              archiveHasActiveForwardTiming &&
+                !archiveIsTimerRunning &&
+                !archiveIsTimerEnded,
+            );
+            const archiveTimerButtonLabel = archiveIsTimerRunning
+              ? "暂停计时"
+              : archiveIsTimerPaused
+                ? "继续计时"
+                : "开始计时";
+            const overdueDays = isCompletedInArchive && completedDate
+              ? getCalendarDayDifference(item.date, completedDate)
+              : getCalendarDayDifference(item.date, today);
+            const lifecycleDays = isCompletedInArchive && completedDate
+              ? getCalendarDayDifference(createdDate, completedDate)
+              : getCalendarDayDifference(createdDate, today);
+
+            return (
+              <article
+                className={`rounded-[1.25rem] border p-4 shadow-sm transition ${
+                  isCompletedInArchive
+                    ? "border-emerald-100 bg-emerald-50/55 shadow-emerald-100/50"
+                    : "border-rose-100 bg-rose-50/55 shadow-rose-100/50"
+                }`}
+                key={item.id}
+              >
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="min-w-0 flex-1">
+                    <div className="mb-2 flex flex-wrap items-center gap-1.5 text-xs font-black">
+                      {isCompletedInArchive ? (
+                        <button
+                          className="rounded-full bg-emerald-100 px-2.5 py-1 text-emerald-800 transition hover:bg-emerald-200 focus:outline-none focus:ring-4 focus:ring-emerald-100"
+                          title="点击编辑完成记录"
+                          type="button"
+                          onClick={() => openHistoricalTaskCompletion(item)}
+                        >
+                          已归档完成
+                        </button>
+                      ) : (
+                        <span className="rounded-full bg-rose-100 px-2.5 py-1 text-rose-800">
+                          逾期未完成
+                        </span>
+                      )}
+                      <span className={`rounded-full px-2.5 py-1 ${style.bg} ${style.accent}`}>
+                        {style.emoji} {item.category}
+                      </span>
+                      <span className="rounded-full bg-white/80 px-2.5 py-1 text-[#6f5d78]">
+                        {priorityOption.icon} {priorityOption.name}
+                      </span>
+                    </div>
+                    <h3 className="break-words text-lg font-black text-[#3f3349]">
+                      {item.title}
+                    </h3>
+                    {item.note ? (
+                      <p className="mt-1 whitespace-pre-wrap break-words text-sm font-bold leading-5 text-[#74667d]">
+                        {item.note}
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="flex shrink-0 flex-col gap-2 lg:max-w-[32rem] lg:items-end">
+                    <div className="flex flex-wrap gap-2 lg:justify-end">
+                      {!item.completed ? (
+                        <div
+                          className={`inline-flex min-h-8 flex-nowrap items-center gap-1 rounded-full border px-1.5 py-1 text-xs font-black tabular-nums ${
+                            archiveIsTimerRunning
+                              ? "border-sky-200 bg-sky-50 text-sky-800"
+                              : archiveIsTimerPaused
+                                ? "border-violet-200 bg-violet-50 text-violet-800"
+                                : "border-white bg-white/85 text-[#6c5e75]"
+                          }`}
+                        >
+                          <span className="whitespace-nowrap">
+                            ⏱ {formatTimerSeconds(archiveActiveTimerSeconds)}
+                          </span>
+                          <button
+                            className={`rounded-full px-2 py-0.5 text-[11px] font-black leading-5 transition focus:outline-none focus:ring-4 ${
+                              archiveIsTimerRunning
+                                ? "bg-sky-500 text-white hover:bg-sky-600 focus:ring-sky-100"
+                                : archiveIsTimerPaused
+                                  ? "bg-violet-500 text-white hover:bg-violet-600 focus:ring-violet-100"
+                                  : "bg-pink-100 text-pink-700 hover:bg-pink-200 focus:ring-pink-100"
+                            }`}
+                            type="button"
+                            onClick={() => handleTimerClickForDate(item, today)}
+                          >
+                            {archiveTimerButtonLabel}
+                          </button>
+                          {archiveHasActiveForwardTiming && !archiveIsTimerEnded ? (
+                            <button
+                              aria-label={`结束${item.title}今天的计时分段`}
+                              className="rounded-full bg-white px-2 py-0.5 text-[11px] font-black leading-5 text-rose-600 transition hover:bg-rose-50 focus:outline-none focus:ring-4 focus:ring-rose-100"
+                              type="button"
+                              onClick={() => endTaskTimerForDate(item, today)}
+                            >
+                              结束本段
+                            </button>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      {!item.completed ? (
+                        <button
+                          className="rounded-full bg-emerald-500 px-3 py-1.5 text-xs font-black text-white shadow-sm shadow-emerald-100 transition hover:bg-emerald-600 focus:outline-none focus:ring-4 focus:ring-emerald-100"
+                          type="button"
+                          onClick={() => completeLifecycleTask(item.id)}
+                        >
+                          登记完成
+                        </button>
+                      ) : null}
+                      <button
+                        className="rounded-full bg-white px-3 py-1.5 text-xs font-black text-sky-700 shadow-sm transition hover:bg-sky-50 focus:outline-none focus:ring-4 focus:ring-sky-100"
+                        type="button"
+                        onClick={() =>
+                          openTaskTimeDetails(
+                            item.id,
+                            isCompletedInArchive ? completedDate ?? item.date : today,
+                          )
+                        }
+                      >
+                        分段明细
+                      </button>
+                      <button
+                        className="rounded-full bg-white px-3 py-1.5 text-xs font-black text-[#6f5d78] shadow-sm transition hover:bg-white/90 focus:outline-none focus:ring-4 focus:ring-white/70"
+                        type="button"
+                        onClick={() => jumpToTaskDate(item)}
+                      >
+                        回到任务日
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap gap-2 text-xs font-black text-[#7b6c84] lg:justify-end">
+                      <span className="rounded-full bg-white/70 px-2.5 py-1">
+                        生命周期 {lifecycleDays} 天
+                      </span>
+                      {item.targetMinutes ? (
+                        <span className="rounded-full bg-white/70 px-2.5 py-1">
+                          目标 {formatDashboardMinutes(item.targetMinutes)}
+                        </span>
+                      ) : null}
+                      {item.actualMinutes ? (
+                        <span className="rounded-full bg-white/70 px-2.5 py-1">
+                          手动实际 {formatDashboardMinutes(item.actualMinutes)}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+                  <div className="rounded-[0.95rem] bg-white/75 px-3 py-2">
+                    <p className="text-[11px] font-black text-[#8b7b91]">最初归属</p>
+                    <p className="mt-1 text-sm font-black text-[#46394f]">
+                      {formatDisplayDate(createdDate)}
+                    </p>
+                  </div>
+                  <div className="rounded-[0.95rem] bg-white/75 px-3 py-2">
+                    <p className="text-[11px] font-black text-[#8b7b91]">任务日期</p>
+                    <p className="mt-1 text-sm font-black text-[#46394f]">
+                      {formatDisplayDate(item.date)}
+                    </p>
+                  </div>
+                  <div className="rounded-[0.95rem] bg-white/75 px-3 py-2">
+                    <p className="text-[11px] font-black text-[#8b7b91]">系统录入</p>
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                      <p className="text-sm font-black text-[#46394f]">
+                        {formatDisplayDate(recordedDate)}
+                      </p>
+                      {compareDateValues(recordedDate, item.date) > 0 ? (
+                        <span className="rounded-full bg-sky-50 px-1.5 py-0.5 text-[10px] font-black leading-none text-sky-700">
+                          历史补录
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="rounded-[0.95rem] bg-white/75 px-3 py-2">
+                    <p className="text-[11px] font-black text-[#8b7b91]">完成历史</p>
+                    <p className="mt-1 text-sm font-black text-[#46394f]">
+                      {isCompletedInArchive && completedDate
+                        ? formatDisplayDate(completedDate)
+                        : `逾期 ${overdueDays} 天`}
+                    </p>
+                    {isCompletedInArchive &&
+                    completionRecordedDate &&
+                    completionRecordedDate !== completedDate ? (
+                      <p className="mt-0.5 text-[10px] font-black text-amber-700">
+                        {formatDisplayDate(completionRecordedDate)} 登记
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="rounded-[0.95rem] bg-white/75 px-3 py-2">
+                    <p className="text-[11px] font-black text-[#8b7b91]">累计用时</p>
+                    <button
+                      className="mt-1 text-left text-sm font-black text-sky-700 transition hover:text-sky-800"
+                      type="button"
+                      onClick={() =>
+                        openTaskTimeDetails(
+                          item.id,
+                          isCompletedInArchive ? completedDate ?? item.date : today,
+                        )
+                      }
+                    >
+                      {formatDashboardDuration(totalSeconds)} · {timeEntryCount} 段
+                    </button>
+                  </div>
+                </div>
+
+              </article>
+            );
+          })}
+          </div>
+          {visibleTaskLifecycleArchiveItems.length < filteredTaskLifecycleArchiveItems.length ? (
+            <div className="mt-4 flex justify-center">
+              <button
+                className="rounded-full border border-[#ded2e8] bg-white px-4 py-2 text-sm font-black text-[#6f5d78] shadow-sm transition hover:bg-[#f8f2ff] focus:outline-none focus:ring-4 focus:ring-violet-100"
+                type="button"
+                onClick={() =>
+                  setTaskArchiveVisibleCount(
+                    (currentCount) => currentCount + TASK_ARCHIVE_PAGE_SIZE,
+                  )
+                }
+              >
+                加载更多 · 还有{" "}
+                {filteredTaskLifecycleArchiveItems.length -
+                  visibleTaskLifecycleArchiveItems.length} 项
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <div className="rounded-[1.25rem] border border-dashed border-emerald-200 bg-emerald-50/60 px-4 py-10 text-center">
+          <p className="text-base font-black text-emerald-700">
+            {taskArchiveFilter === "pending"
+              ? "当前没有待处理任务"
+              : "暂无后来完成记录"}
+          </p>
+          <p className="mt-1 text-sm font-bold text-[#8b7b91]">
+            {taskArchiveFilter === "pending"
+              ? "任务清爽，没有遗留。"
+              : "后续补完的逾期任务会归档在这里。"}
+          </p>
+        </div>
+      )}
+    </section>
   );
   const complexProjectWorkspace = (
     <section className="p-4 sm:p-6">
@@ -14409,6 +15257,194 @@ function App() {
 
         {createPortal(
           <AnimatePresence>
+            {historicalTaskCompletion && historicalTaskCompletionItem ? (
+              <motion.div
+                animate={{ opacity: 1 }}
+                className="fixed inset-0 z-[9999] flex items-center justify-center overflow-y-auto bg-[#2d2433]/45 px-4 py-5 backdrop-blur-sm"
+                exit={{ opacity: 0 }}
+                initial={{ opacity: 0 }}
+                onClick={closeHistoricalTaskCompletion}
+              >
+                <motion.div
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  className="w-full max-w-xl"
+                  exit={{ opacity: 0, scale: 0.98, y: 8 }}
+                  initial={{ opacity: 0, scale: 0.98, y: 8 }}
+                  transition={{ duration: 0.18 }}
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <form
+                    className="max-h-[calc(100vh-2.5rem)] overflow-y-auto rounded-[1.5rem] border border-white/80 bg-white p-4 shadow-2xl shadow-amber-200/40 sm:p-5"
+                    onSubmit={saveHistoricalTaskCompletion}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-black text-amber-700">
+                          {historicalTaskCompletionItem.completed
+                            ? "修改完成记录"
+                            : "登记完成情况"}
+                        </p>
+                        <h2 className="mt-1 break-words text-xl font-black text-[#3f3349]">
+                          {historicalTaskCompletionItem.title}
+                        </h2>
+                      </div>
+                      <button
+                        className="shrink-0 rounded-full bg-slate-100 px-3 py-1.5 text-xs font-black text-[#6d5d75] transition hover:bg-slate-200 focus:outline-none focus:ring-4 focus:ring-slate-100"
+                        type="button"
+                        onClick={closeHistoricalTaskCompletion}
+                      >
+                        关闭
+                      </button>
+                    </div>
+
+                    <div className="mt-3 flex flex-wrap gap-2 text-xs font-black">
+                      <span className="rounded-full bg-rose-50 px-2.5 py-1 text-rose-700">
+                        任务归属 {formatDisplayDate(historicalTaskCompletionItem.date)}
+                      </span>
+                      <span className="rounded-full bg-sky-50 px-2.5 py-1 text-sky-700">
+                        系统录入 {formatDateTime(historicalTaskCompletionItem.createdAt)}
+                      </span>
+                    </div>
+
+                    <div className="mt-5 grid grid-cols-2 gap-2 rounded-[1rem] bg-[#f7f3fa] p-1.5">
+                      <button
+                        className={`min-h-12 rounded-[0.8rem] px-3 py-2 text-sm font-black transition focus:outline-none focus:ring-4 focus:ring-emerald-100 ${
+                          historicalTaskCompletion.mode === "same-day"
+                            ? "bg-white text-emerald-700 shadow-sm"
+                            : "text-[#7b6c84] hover:bg-white/65"
+                        }`}
+                        type="button"
+                        onClick={() => updateHistoricalTaskCompletionMode("same-day")}
+                      >
+                        当日已完成
+                      </button>
+                      <button
+                        className={`min-h-12 rounded-[0.8rem] px-3 py-2 text-sm font-black transition focus:outline-none focus:ring-4 focus:ring-amber-100 ${
+                          historicalTaskCompletion.mode === "later"
+                            ? "bg-white text-amber-800 shadow-sm"
+                            : "text-[#7b6c84] hover:bg-white/65"
+                        }`}
+                        type="button"
+                        onClick={() => updateHistoricalTaskCompletionMode("later")}
+                      >
+                        后来才完成
+                      </button>
+                    </div>
+
+                    <p className="mt-2 text-sm font-bold leading-6 text-[#7b6c84]">
+                      {historicalTaskCompletion.mode === "same-day"
+                        ? "任务当天其实已经完成，这次只是补记，不会算作逾期任务。"
+                        : "任务当天没有完成，请登记后来真正完成的时间。"}
+                    </p>
+
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                      <label className="min-w-0 text-xs font-black text-[#6f5d78]">
+                        <span className="mb-1.5 block">实际完成时间</span>
+                        <input
+                          className="w-full rounded-xl border border-[#e7dfea] bg-white px-3 py-2.5 text-sm font-bold text-[#46394f] outline-none transition focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                          max={
+                            historicalTaskCompletion.mode === "same-day"
+                              ? `${historicalTaskCompletionItem.date}T23:59`
+                              : formatDateTimeLocalInput(Date.now())
+                          }
+                          min={
+                            historicalTaskCompletion.mode === "same-day"
+                              ? `${historicalTaskCompletionItem.date}T00:00`
+                              : `${addDaysToDateValue(historicalTaskCompletionItem.date, 1)}T00:00`
+                          }
+                          type="datetime-local"
+                          value={historicalTaskCompletion.completedAtValue}
+                          onChange={(event) =>
+                            setHistoricalTaskCompletion((current) =>
+                              current
+                                ? {
+                                    ...current,
+                                    completedAtValue: event.target.value,
+                                    error: "",
+                                  }
+                                : current,
+                            )
+                          }
+                        />
+                      </label>
+                      <label className="min-w-0 text-xs font-black text-[#6f5d78]">
+                        <span className="mb-1.5 block">实际用时（分钟）</span>
+                        <input
+                          className="w-full rounded-xl border border-[#e7dfea] bg-white px-3 py-2.5 text-sm font-bold text-[#46394f] outline-none transition placeholder:text-[#b8aabd] focus:border-amber-300 focus:ring-4 focus:ring-amber-100"
+                          inputMode="numeric"
+                          min="1"
+                          placeholder="可留空，已有计时会自动汇总"
+                          type="number"
+                          value={historicalTaskCompletion.actualMinutesValue}
+                          onChange={(event) =>
+                            setHistoricalTaskCompletion((current) =>
+                              current
+                                ? {
+                                    ...current,
+                                    actualMinutesValue: event.target.value,
+                                    error: "",
+                                  }
+                                : current,
+                            )
+                          }
+                        />
+                      </label>
+                    </div>
+
+                    {getTaskTimeEntries(historicalTaskCompletionItem).length > 0 ? (
+                      <p className="mt-3 rounded-xl bg-sky-50 px-3 py-2 text-xs font-bold text-sky-700">
+                        已有 {getTaskTimeEntries(historicalTaskCompletionItem).length} 段计时，系统已根据最后一段计时预填完成时间。
+                      </p>
+                    ) : null}
+
+                    {historicalTaskCompletion.error ? (
+                      <p className="mt-3 text-sm font-bold text-rose-600">
+                        {historicalTaskCompletion.error}
+                      </p>
+                    ) : null}
+
+                    <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        {historicalTaskCompletionItem.completed ? (
+                          <button
+                            className="rounded-full bg-rose-50 px-4 py-2 text-sm font-black text-rose-700 transition hover:bg-rose-100 focus:outline-none focus:ring-4 focus:ring-rose-100"
+                            type="button"
+                            onClick={() =>
+                              undoHistoricalTaskCompletion(historicalTaskCompletionItem.id)
+                            }
+                          >
+                            撤销完成
+                          </button>
+                        ) : null}
+                      </div>
+                      <div className="flex flex-wrap justify-end gap-2">
+                        <button
+                          className="rounded-full bg-slate-100 px-4 py-2 text-sm font-black text-[#6d5d75] transition hover:bg-slate-200 focus:outline-none focus:ring-4 focus:ring-slate-100"
+                          type="button"
+                          onClick={closeHistoricalTaskCompletion}
+                        >
+                          取消
+                        </button>
+                        <button
+                          className="rounded-full bg-emerald-500 px-4 py-2 text-sm font-black text-white shadow-sm shadow-emerald-100 transition hover:bg-emerald-600 focus:outline-none focus:ring-4 focus:ring-emerald-100"
+                          type="submit"
+                        >
+                          {historicalTaskCompletionItem.completed
+                            ? "保存修改"
+                            : "保存完成记录"}
+                        </button>
+                      </div>
+                    </div>
+                  </form>
+                </motion.div>
+              </motion.div>
+            ) : null}
+          </AnimatePresence>,
+          document.body,
+        )}
+
+        {createPortal(
+          <AnimatePresence>
             {isMoodPanelOpen ? (
               <motion.div
                 animate={{ opacity: 1 }}
@@ -14789,7 +15825,7 @@ function App() {
         <section className="space-y-0">
           <nav className="px-4 py-2">
             <div className="overflow-x-auto">
-              <div className="grid min-w-max grid-flow-col gap-2 lg:min-w-0 lg:grid-flow-row lg:grid-cols-4">
+              <div className="grid min-w-max grid-flow-col gap-2 lg:min-w-0 lg:grid-flow-row lg:grid-cols-5">
                 {WORKSPACE_TABS.map((tab) => {
                   const isActiveTab = activeWorkspaceTab === tab.id;
 
@@ -15960,6 +16996,73 @@ function App() {
 	                </section>
               ) : null}
 
+              {completionRecordsForSelectedDate.length > 0 ? (
+                <section className="mb-3 border-y border-emerald-100 bg-emerald-50/65 px-3 py-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-xs font-black text-emerald-700">完成记录</p>
+                      <p className="mt-0.5 text-xs font-bold text-[#7b6c84]">
+                        当天实际完成的历史任务 {completionRecordsForSelectedDate.length} 项
+                      </p>
+                    </div>
+                    <span className="rounded-full bg-white px-2.5 py-1 text-xs font-black text-emerald-700 shadow-sm">
+                      完成事件
+                    </span>
+                  </div>
+                  <div className="mt-2 grid gap-2 lg:grid-cols-2">
+                    {completionRecordsForSelectedDate.map((item) => {
+                      const style = getCategoryStyle(item.category, customCategories);
+                      const completionRecordedDate = getTaskCompletionRecordedDateValue(item);
+
+                      return (
+                        <article
+                          className="flex min-w-0 flex-col gap-2 rounded-[1rem] border border-emerald-100 bg-white/85 px-3 py-2.5 shadow-sm sm:flex-row sm:items-center sm:justify-between"
+                          key={item.id}
+                        >
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-black">
+                              <button
+                                className="rounded-full bg-emerald-100 px-2 py-0.5 text-emerald-800 transition hover:bg-emerald-200 focus:outline-none focus:ring-4 focus:ring-emerald-100"
+                                title="点击编辑完成记录"
+                                type="button"
+                                onClick={() => openHistoricalTaskCompletion(item)}
+                              >
+                                已完成
+                              </button>
+                              <span className={`rounded-full px-2 py-0.5 ${style.bg} ${style.accent}`}>
+                                {style.emoji} {item.category}
+                              </span>
+                            </div>
+                            <h3 className="mt-1.5 break-words text-sm font-black text-[#3f3349]">
+                              {item.title}
+                            </h3>
+                            <p className="mt-1 text-xs font-bold text-[#7b6c84]">
+                              来自 {formatDisplayDate(item.date)} · 完成于{" "}
+                              {item.completedAt ? formatDateTime(item.completedAt) : "当天"}
+                              {completionRecordedDate && completionRecordedDate !== selectedDate
+                                ? ` · ${formatDisplayDate(completionRecordedDate)} 登记`
+                                : ""}
+                            </p>
+                          </div>
+                          <div
+                            className="flex shrink-0 flex-wrap gap-1.5 self-start sm:self-auto"
+                            data-export-ignore="true"
+                          >
+                            <button
+                              className="rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-black text-emerald-700 transition hover:bg-emerald-100 focus:outline-none focus:ring-4 focus:ring-emerald-100"
+                              type="button"
+                              onClick={() => jumpToTaskDate(item)}
+                            >
+                              查看原任务
+                            </button>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                </section>
+              ) : null}
+
               <AnimatePresence>
                 {timerNotice ? (
                   <motion.div
@@ -15991,9 +17094,9 @@ function App() {
 	                      taskDropTarget.itemId === null;
 	                    const isPrioritySectionCollapsed =
 	                      todayWorkspaceCollapsed[prioritySection.id];
-	                    const priorityCompletedCount = prioritySection.plans.filter(
-	                      (item) => item.completed,
-	                    ).length;
+                    const priorityCompletedCount = prioritySection.plans.filter((item) =>
+                      isTaskCompletedByDate(item, selectedDate),
+                    ).length;
 
 	                    return (
                       <section
@@ -16058,18 +17161,25 @@ function App() {
 	                              </span>
 	                            ) : (
 	                              <span className="flex flex-wrap items-center gap-2">
-	                                {prioritySection.plans.slice(0, 4).map((item) => (
-	                                  <span
-	                                    className={`inline-flex max-w-full items-center truncate rounded-full border border-white/80 bg-white/80 px-2.5 py-1 text-xs font-black text-[#6f5d78] shadow-sm ${
-	                                      item.completed ? "opacity-60 line-through" : ""
-	                                    }`}
-	                                    key={item.id}
-	                                    title={item.title}
-	                                  >
-	                                    {item.completed ? "✓ " : ""}
-	                                    {item.title}
-	                                  </span>
-	                                ))}
+                                {prioritySection.plans.slice(0, 4).map((item) => {
+                                  const isCompletedForSelectedDate = isTaskCompletedByDate(
+                                    item,
+                                    selectedDate,
+                                  );
+
+                                  return (
+                                    <span
+                                      className={`inline-flex max-w-full items-center truncate rounded-full border border-white/80 bg-white/80 px-2.5 py-1 text-xs font-black text-[#6f5d78] shadow-sm ${
+                                        isCompletedForSelectedDate ? "opacity-60 line-through" : ""
+                                      }`}
+                                      key={item.id}
+                                      title={item.title}
+                                    >
+                                      {isCompletedForSelectedDate ? "✓ " : ""}
+                                      {item.title}
+                                    </span>
+                                  );
+                                })}
 	                                {prioritySection.plans.length > 4 ? (
 	                                  <span className={`inline-flex rounded-full border border-white/80 px-2.5 py-1 text-xs font-black shadow-sm ${prioritySection.badgeClass}`}>
 	                                    +{prioritySection.plans.length - 4} 项
@@ -16169,12 +17279,30 @@ function App() {
                       : addDaysToDateValue(selectedDate, 1);
                     const isCardInputEditing =
                       Boolean(activeInlineField) || isActualEditing || isTaskRescheduling;
+                    const taskCompletedDate = getTaskCompletedDateValue(item);
+                    const taskCompletionRecordedDate =
+                      getTaskCompletionRecordedDateValue(item);
+                    const taskRecordedDate = getTimestampDateValue(item.createdAt);
+                    const isCompletedForSelectedDate = isTaskCompletedByDate(item, selectedDate);
+                    const isCompletedAfterSelectedDate = isTaskCompletedAfterDate(
+                      item,
+                      selectedDate,
+                    );
+                    const isTaskDateInPast = compareDateValues(item.date, today) < 0;
+                    const isPastDateIncomplete =
+                      isTaskDateInPast && !isCompletedForSelectedDate;
+                    const wasTaskBackfilled = compareDateValues(taskRecordedDate, item.date) > 0;
+                    const wasCompletionBackfilled = Boolean(
+                      taskCompletedDate &&
+                        taskCompletionRecordedDate &&
+                        compareDateValues(taskCompletionRecordedDate, taskCompletedDate) > 0,
+                    );
 
                     return (
                       <motion.article
                         layout
                         animate={{
-                          opacity: item.completed ? 0.72 : 1,
+                          opacity: isCompletedForSelectedDate ? 0.72 : 1,
                           y: 0,
                           scale:
                             completionFeedback?.itemId === item.id
@@ -16182,7 +17310,7 @@ function App() {
                               : 1,
                         }}
                         className={`relative overflow-hidden rounded-[1.35rem] border-2 border-dashed p-2.5 shadow-sm transition ${priorityOption.cardBg} ${priorityOption.cardBorder} ${
-                          item.completed ? "" : "hover:-translate-y-1"
+                          isCompletedForSelectedDate ? "" : "hover:-translate-y-1"
                         } ${
                           highlightedTaskId === item.id
                             ? "ring-4 ring-amber-200 ring-offset-2 ring-offset-white"
@@ -16230,16 +17358,18 @@ function App() {
                         </AnimatePresence>
                         <button
                           className={`absolute right-2.5 top-2.5 z-20 flex min-h-7 min-w-[4.4rem] items-center justify-center gap-1 whitespace-nowrap rounded-full px-2 py-1 text-xs font-black transition ${
-                            item.completed
+                            isCompletedForSelectedDate
                               ? "bg-white text-[#7f7188]"
-                              : "bg-[#ff8fbc] text-white shadow-sm shadow-pink-200"
+                              : isCompletedAfterSelectedDate
+                                ? "bg-amber-50 text-amber-800 shadow-sm shadow-amber-100"
+                                : "bg-[#ff8fbc] text-white shadow-sm shadow-pink-200"
                           }`}
                           data-export-ignore="true"
                           type="button"
                           onClick={() => handleToggle(item.id)}
                         >
                           <AnimatePresence initial={false}>
-                            {item.completed ? (
+                            {isCompletedForSelectedDate ? (
                               <motion.span
                                 aria-hidden="true"
                                 className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-[#a7dfbe] text-[9px] text-white"
@@ -16252,7 +17382,13 @@ function App() {
                               </motion.span>
                             ) : null}
                           </AnimatePresence>
-                          {item.completed ? "已完成" : "完成"}
+                          {isCompletedForSelectedDate
+                            ? "已完成"
+                            : isCompletedAfterSelectedDate
+                              ? "后来完成"
+                              : isTaskDateInPast
+                                ? "登记完成"
+                                : "完成"}
                         </button>
                         <div className="relative flex gap-2">
                           <div className="flex w-14 shrink-0 flex-col items-center gap-1.5">
@@ -16344,7 +17480,9 @@ function App() {
                               ) : (
                                 <h3
                                   className={`min-w-0 flex-1 break-words text-lg font-black text-[#41354b] ${
-                                    item.completed ? "line-through decoration-2 opacity-60" : ""
+                                    isCompletedForSelectedDate
+                                      ? "line-through decoration-2 opacity-60"
+                                      : ""
                                   }`}
                                   onDoubleClick={() => startTaskInlineEdit(item, "title")}
                                 >
@@ -16409,11 +17547,34 @@ function App() {
                             ) : item.note ? (
                               <p
                                 className={`mt-1 whitespace-pre-wrap break-words text-sm leading-5 text-[#74667d] ${
-                                  item.completed ? "opacity-60" : ""
+                                  isCompletedForSelectedDate ? "opacity-60" : ""
                                 }`}
                                 onDoubleClick={() => startTaskInlineEdit(item, "note")}
                               >
                                 {item.note}
+                              </p>
+                            ) : null}
+                            {isCompletedAfterSelectedDate && taskCompletedDate ? (
+                              <p className="mt-1 w-fit rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-black text-amber-800">
+                                当日未完成 · {formatDisplayDate(taskCompletedDate)} 完成
+                                {taskCompletionRecordedDate &&
+                                taskCompletionRecordedDate !== taskCompletedDate
+                                  ? ` · ${formatDisplayDate(taskCompletionRecordedDate)} 登记`
+                                  : ""}
+                              </p>
+                            ) : isCompletedForSelectedDate &&
+                              taskCompletedDate === item.date &&
+                              wasCompletionBackfilled &&
+                              taskCompletionRecordedDate ? (
+                              <p className="mt-1 w-fit rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-black text-emerald-700">
+                                当日完成 · {formatDisplayDate(taskCompletionRecordedDate)} 补记
+                              </p>
+                            ) : isPastDateIncomplete ? (
+                              <p className="mt-1 w-fit rounded-full bg-rose-50 px-2.5 py-1 text-[11px] font-black text-rose-700">
+                                当日未完成 · 当前逾期 {getCalendarDayDifference(item.date, today)} 天
+                                {wasTaskBackfilled
+                                  ? ` · ${formatDisplayDate(taskRecordedDate)} 补录`
+                                  : ""}
                               </p>
                             ) : null}
                           </div>
@@ -16594,7 +17755,7 @@ function App() {
                                     : isTimerPaused
                                       ? "border-violet-200 bg-violet-50 text-violet-800"
                                       : "border-white/80 bg-white/80 text-[#6c5e75]"
-                                } ${item.completed ? "opacity-60" : ""}`}
+                                } ${isCompletedForSelectedDate ? "opacity-60" : ""}`}
                               >
                                 <span className="whitespace-nowrap tabular-nums">
                                   ⏱ {formatTimerSeconds(timerDisplaySeconds)}
@@ -16730,7 +17891,7 @@ function App() {
                                 </button>
                               </form>
                             ) : null}
-                            <div className={`flex max-w-full flex-nowrap items-center gap-0.5 overflow-visible pl-3 ${item.completed ? "opacity-60" : ""}`}>
+                            <div className={`flex max-w-full flex-nowrap items-center gap-0.5 overflow-visible pl-3 ${isCompletedForSelectedDate ? "opacity-60" : ""}`}>
                               {COUNTDOWN_OPTIONS.map((option) => {
                                 const optionSeconds = option.minutes * 60;
                                 const isActiveCountdown = activeCountdownSeconds === optionSeconds;
@@ -16801,6 +17962,7 @@ function App() {
               )}
             </div>
           </section>
+          {activeWorkspaceTab === "backlog" ? taskArchiveWorkspace : null}
           {activeWorkspaceTab === "projects" ? complexProjectWorkspace : null}
           {activeWorkspaceTab === "time" ? timeStatsWorkspace : null}
           {activeWorkspaceTab === "export" ? exportWorkspace : null}
