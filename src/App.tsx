@@ -11460,6 +11460,47 @@ function App() {
     });
   };
 
+  const deleteArchivedTask = (item: PlanItem) => {
+    const shouldDelete = window.confirm(
+      `确定删除“${item.title}”吗？\n\n这会同时删除 ${formatDisplayDate(
+        item.date,
+      )} 的原任务记录、全部计时分段和逾期归档记录，且无法恢复。`,
+    );
+
+    if (!shouldDelete) {
+      return;
+    }
+
+    setPlansByDate((currentBook) =>
+      Object.entries(currentBook).reduce<PlanBook>((nextBook, [date, items]) => {
+        const remainingItems = items.filter((currentItem) => currentItem.id !== item.id);
+
+        if (remainingItems.length > 0) {
+          nextBook[date] = remainingItems;
+        }
+
+        return nextBook;
+      }, {}),
+    );
+    setDeletedItemIds((current) => uniqueValues([...current, item.id]));
+    setTaskTimersByTaskId((currentTimers) => {
+      if (!currentTimers[item.id]) {
+        return currentTimers;
+      }
+
+      const nextTimers = { ...currentTimers };
+      delete nextTimers[item.id];
+      return nextTimers;
+    });
+    setTaskTimeDetailTarget((currentTarget) =>
+      currentTarget?.itemId === item.id ? null : currentTarget,
+    );
+    setHistoricalTaskCompletion((currentCompletion) =>
+      currentCompletion?.itemId === item.id ? null : currentCompletion,
+    );
+    showTimerNotice(`已删除“${item.title}”及其历史记录`);
+  };
+
   const startActualMinutesEdit = (item: PlanItem) => {
     cancelTaskInlineEdit();
     cancelTaskReschedule();
@@ -13782,6 +13823,17 @@ function App() {
                       >
                         回到任务日
                       </button>
+                      {!item.completed ? (
+                        <button
+                          aria-label={`删除逾期任务${item.title}`}
+                          className="rounded-full bg-white px-3 py-1.5 text-xs font-black text-rose-600 shadow-sm transition hover:bg-rose-50 focus:outline-none focus:ring-4 focus:ring-rose-100"
+                          title="删除原任务及全部历史记录"
+                          type="button"
+                          onClick={() => deleteArchivedTask(item)}
+                        >
+                          删除
+                        </button>
+                      ) : null}
                     </div>
                     <div className="flex flex-wrap gap-2 text-xs font-black text-[#7b6c84] lg:justify-end">
                       <span className="rounded-full bg-white/70 px-2.5 py-1">
