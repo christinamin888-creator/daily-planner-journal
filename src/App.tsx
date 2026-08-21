@@ -2,9 +2,19 @@ import { DragEvent, FormEvent, Fragment, useCallback, useEffect, useMemo, useRef
 import type { ReactNode } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
+import DOMPurify from "dompurify";
 import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
+import { AlignmentType, Document, Packer, Paragraph, TextRun, UnderlineType } from "docx";
 import pptxgen from "pptxgenjs";
+import ReflectionEditor from "./components/ReflectionEditor";
+import {
+  decryptReflectionData,
+  encryptReflectionData,
+  encryptWordBlob,
+  isReflectionVault,
+} from "./lib/reflectionSecurity";
+import type { ReflectionVault } from "./lib/reflectionSecurity";
 import {
   getCurrentSession,
   getDailyPlannerUserData,
@@ -44,6 +54,14 @@ const DELETED_ITEM_IDS_KEY = "daily-planner-journal-deleted-v1";
 const CUSTOM_CATEGORIES_KEY = "daily-planner-journal-custom-categories-v1";
 const COMPLEX_PROJECTS_KEY = "daily-planner-journal-complex-projects-v1";
 const MOOD_BOOK_KEY = "daily-planner-journal-moods-v1";
+const REFLECTION_BOOK_KEY = "daily-planner-journal-reflections-v1";
+const REFLECTION_VAULT_KEY = "daily-planner-journal-reflection-vault-v1";
+const REFLECTION_PROMPTS = [
+  "一、今日做得好的地方",
+  "二、今日值得改进的地方",
+  "三、明天准备如何调整",
+] as const;
+const REFLECTION_PROMPT_SET = new Set<string>(REFLECTION_PROMPTS);
 const USER_PROFILE_KEY = "daily-planner-journal-user-profile-v1";
 const SYNC_DEBOUNCE_MS = 800;
 const COUNTDOWN_OPTIONS = [
@@ -376,6 +394,15 @@ type MoodEntry = {
   updatedAt?: number;
 };
 type MoodBook = Record<string, MoodEntry[]>;
+type ReflectionEntry = {
+  date: string;
+  title: string;
+  content: string;
+  contentHtml: string;
+  createdAt: number;
+  updatedAt: number;
+};
+type ReflectionBook = Record<string, ReflectionEntry>;
 type PlanSearchResult = {
   key: string;
   date: string;
@@ -416,11 +443,15 @@ type CloudPayload = {
   customCategories: CustomCategory[];
   complexProjects: ComplexProject[];
   moodBook: MoodBook;
+  reflectionBook: ReflectionBook;
+  reflectionVault: ReflectionVault | null;
   userProfile: UserProfile;
 };
 
 type AuthMode = "sign-in" | "sign-up" | "forgot" | "update-password";
 type WorkspaceTab = "tasks" | "backlog" | "projects" | "time" | "export";
+type MoodPanelMode = "mood" | "reflection";
+type ReflectionSecurityAction = "change" | "export" | "protect" | "setup" | null;
 type TaskArchiveFilter = "pending" | "completed";
 type TodayWorkspaceSectionId = "longProjects" | TaskPriority;
 type TodayWorkspaceCollapsedState = Record<TodayWorkspaceSectionId, boolean>;
@@ -1917,6 +1948,223 @@ function downloadBlob(blob: Blob, fileName: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 800);
 }
 
+type ReflectionDocxRunStyle = {
+  bold?: boolean;
+  characterSpacing?: number;
+  color?: string;
+  font?: string;
+  italics?: boolean;
+  shading?: { fill: string };
+  size?: number;
+  strike?: boolean;
+  subScript?: boolean;
+  superScript?: boolean;
+  underline?: { type: (typeof UnderlineType)[keyof typeof UnderlineType] };
+};
+
+function getReflectionDocxColor(value: string): string | undefined {
+  const hexMatch = value.trim().match(/^#([0-9a-f]{6})$/i);
+
+  if (hexMatch) {
+    return hexMatch[1].toUpperCase();
+  }
+
+  const rgbMatch = value.match(/rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)/i);
+
+  if (!rgbMatch) {
+    return undefined;
+  }
+
+  return rgbMatch
+    .slice(1)
+    .map((channel) => Math.max(0, Math.min(255, Number(channel))).toString(16).padStart(2, "0"))
+    .join("")
+    .toUpperCase();
+}
+
+function getReflectionDocxBackgroundColor(value: string): string | undefined {
+  const directColor = getReflectionDocxColor(value);
+  if (directColor) {
+    return directColor;
+  }
+
+  const rgbaMatch = value.match(
+    /rgba\(\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d*(?:\.\d+)?)\s*\)/i,
+  );
+  if (!rgbaMatch) {
+    return undefined;
+  }
+
+  const opacity = Math.max(0, Math.min(1, Number(rgbaMatch[4])));
+  return rgbaMatch
+    .slice(1, 4)
+    .map((channel) => {
+      const blendedChannel = Number(channel) * opacity + 255 * (1 - opacity);
+      return Math.max(0, Math.min(255, Math.round(blendedChannel)))
+        .toString(16)
+        .padStart(2, "0");
+    })
+    .join("")
+    .toUpperCase();
+}
+
+function getReflectionDocxRuns(
+  node: Node,
+  inheritedStyle: ReflectionDocxRunStyle = {},
+): TextRun[] {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return node.textContent
+      ? [new TextRun({ ...inheritedStyle, text: node.textContent })]
+      : [];
+  }
+
+  if (!(node instanceof HTMLElement)) {
+    return [];
+  }
+
+  const tagName = node.tagName.toLowerCase();
+
+  if (tagName === "br") {
+    return [new TextRun({ ...inheritedStyle, break: 1, text: "" })];
+  }
+
+  if (tagName === "ul" || tagName === "ol") {
+    return [];
+  }
+
+  const nextStyle: ReflectionDocxRunStyle = { ...inheritedStyle };
+
+  if (tagName === "strong" || tagName === "b") {
+    nextStyle.bold = true;
+  }
+  if (tagName === "em" || tagName === "i") {
+    nextStyle.italics = true;
+  }
+  if (tagName === "u") {
+    nextStyle.underline = { type: UnderlineType.SINGLE };
+  }
+  if (tagName === "s" || tagName === "strike") {
+    nextStyle.strike = true;
+  }
+  if (tagName === "sup") {
+    nextStyle.superScript = true;
+    nextStyle.subScript = false;
+  }
+  if (tagName === "sub") {
+    nextStyle.subScript = true;
+    nextStyle.superScript = false;
+  }
+
+  const color = getReflectionDocxColor(node.style.color);
+  const backgroundColor = getReflectionDocxBackgroundColor(node.style.backgroundColor);
+  const fontSize = Number.parseFloat(node.style.fontSize);
+  const fontFamily = node.style.fontFamily.split(",")[0]?.replaceAll(/["']/g, "").trim();
+  const letterSpacing = Number.parseFloat(node.style.letterSpacing);
+
+  if (color) {
+    nextStyle.color = color;
+  }
+  if (Number.isFinite(fontSize) && fontSize > 0) {
+    nextStyle.size = Math.round(fontSize * 1.5);
+  }
+  if (fontFamily) {
+    nextStyle.font = fontFamily;
+  }
+  if (backgroundColor) {
+    nextStyle.shading = { fill: backgroundColor };
+  }
+  if (Number.isFinite(letterSpacing)) {
+    nextStyle.characterSpacing = Math.round(letterSpacing * 15);
+  }
+
+  return Array.from(node.childNodes).flatMap((childNode) =>
+    getReflectionDocxRuns(childNode, nextStyle),
+  );
+}
+
+function reflectionHtmlToDocxParagraphs(html: string): Paragraph[] {
+  const parsedDocument = new DOMParser().parseFromString(
+    sanitizeReflectionHtml(html),
+    "text/html",
+  );
+  const paragraphs: Paragraph[] = [];
+
+  const appendParagraph = (
+    element: HTMLElement,
+    prefix = "",
+    inheritedStyle: ReflectionDocxRunStyle = {},
+  ) => {
+    if (REFLECTION_PROMPT_SET.has(element.textContent?.trim() ?? "")) {
+      return;
+    }
+
+    const tagName = element.tagName.toLowerCase();
+    const headingSize = tagName === "h1" ? 32 : tagName === "h2" ? 28 : tagName === "h3" ? 24 : undefined;
+    const runs = getReflectionDocxRuns(element, {
+      ...inheritedStyle,
+      bold: headingSize ? true : inheritedStyle.bold,
+      font: inheritedStyle.font ?? "Microsoft YaHei",
+      size: inheritedStyle.size ?? headingSize ?? 22,
+    });
+    const lineHeight = Number.parseFloat(element.style.lineHeight);
+    const marginBottom = Number.parseFloat(element.style.marginBottom);
+    const indentLevel = Math.max(0, Number(element.dataset.indentLevel) || 0);
+    const alignment =
+      element.style.textAlign === "center"
+        ? AlignmentType.CENTER
+        : element.style.textAlign === "right"
+          ? AlignmentType.RIGHT
+          : element.style.textAlign === "justify"
+            ? AlignmentType.JUSTIFIED
+            : AlignmentType.LEFT;
+
+    if (prefix) {
+      runs.unshift(new TextRun({ ...inheritedStyle, bold: false, font: "Microsoft YaHei", size: 22, text: prefix }));
+    }
+
+    paragraphs.push(
+      new Paragraph({
+        alignment,
+        children: runs.length > 0 ? runs : [new TextRun({ text: " " })],
+        indent:
+          tagName === "blockquote"
+            ? { left: 360 }
+            : indentLevel > 0
+              ? { left: Math.round(indentLevel * 360) }
+              : undefined,
+        spacing: {
+          after: Number.isFinite(marginBottom) ? Math.round(marginBottom * 15) : 100,
+          line: Number.isFinite(lineHeight) ? Math.round(lineHeight * 240) : 360,
+        },
+      }),
+    );
+  };
+
+  Array.from(parsedDocument.body.children).forEach((child) => {
+    if (!(child instanceof HTMLElement)) {
+      return;
+    }
+
+    const tagName = child.tagName.toLowerCase();
+
+    if (tagName === "ul" || tagName === "ol") {
+      Array.from(child.children).forEach((listItem, index) => {
+        if (listItem instanceof HTMLElement) {
+          const listContent = listItem.querySelector<HTMLElement>(":scope > p") ?? listItem;
+          appendParagraph(listContent, tagName === "ol" ? `${index + 1}. ` : "• ");
+        }
+      });
+      return;
+    }
+
+    appendParagraph(child, "", tagName === "blockquote" ? { italics: true } : {});
+  });
+
+  return paragraphs.length > 0
+    ? paragraphs
+    : [new Paragraph({ children: [new TextRun({ font: "Microsoft YaHei", size: 22, text: " " })] })];
+}
+
 const CRC32_TABLE = (() => {
   const table = new Uint32Array(256);
 
@@ -3094,6 +3342,61 @@ function saveMoodBook(moodBook: MoodBook) {
   }
 }
 
+function loadReflectionBook(): ReflectionBook {
+  try {
+    const rawData = window.localStorage.getItem(REFLECTION_BOOK_KEY);
+    return normalizeReflectionBook(rawData ? JSON.parse(rawData) : {});
+  } catch {
+    return {};
+  }
+}
+
+function saveReflectionBook(reflectionBook: ReflectionBook) {
+  try {
+    window.localStorage.setItem(REFLECTION_BOOK_KEY, JSON.stringify(reflectionBook));
+  } catch {
+    // localStorage may be unavailable in private or restricted browser modes.
+  }
+}
+
+function loadReflectionVault(): ReflectionVault | null {
+  try {
+    const rawData = window.localStorage.getItem(REFLECTION_VAULT_KEY);
+    const parsedData = rawData ? JSON.parse(rawData) : null;
+
+    return isReflectionVault(parsedData) ? parsedData : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveReflectionVault(vault: ReflectionVault | null) {
+  try {
+    if (vault) {
+      window.localStorage.setItem(REFLECTION_VAULT_KEY, JSON.stringify(vault));
+      return;
+    }
+
+    window.localStorage.removeItem(REFLECTION_VAULT_KEY);
+  } catch {
+    // localStorage may be unavailable in private or restricted browser modes.
+  }
+}
+
+function mergeReflectionVaults(
+  localVault: ReflectionVault | null,
+  cloudVault: ReflectionVault | null,
+): ReflectionVault | null {
+  if (!localVault) {
+    return cloudVault;
+  }
+  if (!cloudVault) {
+    return localVault;
+  }
+
+  return cloudVault.updatedAt > localVault.updatedAt ? cloudVault : localVault;
+}
+
 function createDefaultUserProfile(): UserProfile {
   return {
     avatarId: DEFAULT_AVATAR_ID,
@@ -3231,6 +3534,224 @@ function normalizeMoodBook(value: unknown): MoodBook {
 
     if (normalizedEntries.length > 0) {
       result[fallbackDate] = normalizedEntries;
+    }
+
+    return result;
+  }, {});
+}
+
+function escapeReflectionText(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function plainTextToReflectionHtml(value: string): string {
+  if (!value) {
+    return "<p></p>";
+  }
+
+  return value
+    .split("\n")
+    .map((line) => `<p>${line ? escapeReflectionText(line) : "<br>"}</p>`)
+    .join("");
+}
+
+function sanitizeReflectionHtml(value: unknown, fallbackContent = ""): string {
+  const html = typeof value === "string" && value.trim()
+    ? value
+    : plainTextToReflectionHtml(fallbackContent);
+
+  return DOMPurify.sanitize(html, {
+    ALLOWED_ATTR: ["style"],
+    ALLOWED_TAGS: [
+      "blockquote",
+      "br",
+      "code",
+      "em",
+      "h1",
+      "h2",
+      "h3",
+      "hr",
+      "li",
+      "ol",
+      "p",
+      "pre",
+      "s",
+      "span",
+      "strong",
+      "u",
+      "ul",
+    ],
+  });
+}
+
+function looksLikeReflectionHtml(value: string): boolean {
+  return /<\/?(?:blockquote|br|code|em|h[1-3]|hr|li|ol|p|pre|s|span|strong|u|ul)(?:\s|>)/i.test(
+    value,
+  );
+}
+
+function reflectionHtmlToPlainContent(html: string): string {
+  const parsedDocument = new DOMParser().parseFromString(
+    sanitizeReflectionHtml(html),
+    "text/html",
+  );
+
+  const getNodeText = (node: Node): string => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return node.textContent ?? "";
+    }
+    if (!(node instanceof HTMLElement)) {
+      return "";
+    }
+    if (node.tagName.toLowerCase() === "br") {
+      return "\n";
+    }
+
+    return Array.from(node.childNodes).map(getNodeText).join("");
+  };
+
+  return Array.from(parsedDocument.body.children)
+    .flatMap((element) =>
+      element.tagName.toLowerCase() === "ul" || element.tagName.toLowerCase() === "ol"
+        ? Array.from(element.children).map(getNodeText)
+        : [getNodeText(element)],
+    )
+    .join("\n")
+    .replaceAll("\u00a0", " ")
+    .slice(0, 20000);
+}
+
+function normalizeReflectionEntry(value: unknown, fallbackDate: string): ReflectionEntry | null {
+  if (!isPlainObject(value)) {
+    return null;
+  }
+
+  const date = normalizeDateInputString(value.date, fallbackDate);
+  const updatedAt = normalizeTimestamp(value.updatedAt) ?? Date.now();
+  const createdAt = normalizeTimestamp(value.createdAt) ?? updatedAt;
+  const rawContent = typeof value.content === "string" ? value.content : "";
+  const rawContentHtml = typeof value.contentHtml === "string" ? value.contentHtml : "";
+  const hasSwappedRichTextFields =
+    looksLikeReflectionHtml(rawContent) && !looksLikeReflectionHtml(rawContentHtml);
+  const content = hasSwappedRichTextFields
+    ? (rawContentHtml || reflectionHtmlToPlainContent(rawContent)).slice(0, 20000)
+    : rawContent.slice(0, 20000);
+  const contentHtml = hasSwappedRichTextFields
+    ? sanitizeReflectionHtml(rawContent, content)
+    : sanitizeReflectionHtml(rawContentHtml, content);
+
+  return {
+    date,
+    title: typeof value.title === "string" ? value.title.slice(0, 120) : "",
+    content,
+    contentHtml,
+    createdAt,
+    updatedAt,
+  };
+}
+
+function normalizeReflectionBook(value: unknown): ReflectionBook {
+  if (!isPlainObject(value)) {
+    return {};
+  }
+
+  return Object.entries(value).reduce<ReflectionBook>((result, [date, entry]) => {
+    const fallbackDate = normalizeDateInputString(date, formatDateInput(new Date()));
+    const normalizedEntry = normalizeReflectionEntry(entry, fallbackDate);
+
+    if (normalizedEntry) {
+      result[fallbackDate] = normalizedEntry;
+    }
+
+    return result;
+  }, {});
+}
+
+function getReflectionProtectedDates(vault: ReflectionVault | null): string[] | null {
+  if (!vault) {
+    return [];
+  }
+
+  if (!Array.isArray(vault.protectedDates)) {
+    return null;
+  }
+
+  return Array.from(
+    new Set(vault.protectedDates.filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date))),
+  ).sort();
+}
+
+function withReflectionProtectedDates(
+  vault: ReflectionVault,
+  protectedDates: string[],
+): ReflectionVault {
+  return {
+    ...vault,
+    protectedDates: Array.from(new Set(protectedDates)).sort(),
+  };
+}
+
+function isReflectionDateProtected(
+  vault: ReflectionVault | null,
+  date: string,
+): boolean {
+  const protectedDates = getReflectionProtectedDates(vault);
+
+  return Boolean(vault && (protectedDates === null || protectedDates.includes(date)));
+}
+
+function getProtectedReflectionBook(
+  reflectionBook: ReflectionBook,
+  vault: ReflectionVault | null,
+): ReflectionBook {
+  if (!vault) {
+    return {};
+  }
+
+  const normalizedBook = normalizeReflectionBook(reflectionBook);
+  const protectedDates = getReflectionProtectedDates(vault);
+
+  if (protectedDates === null) {
+    return normalizedBook;
+  }
+
+  return protectedDates.reduce<ReflectionBook>((result, date) => {
+    const entry = normalizedBook[date];
+
+    if (entry) {
+      result[date] = entry;
+    }
+
+    return result;
+  }, {});
+}
+
+function getPublicReflectionBook(
+  reflectionBook: ReflectionBook,
+  vault: ReflectionVault | null,
+): ReflectionBook {
+  const normalizedBook = normalizeReflectionBook(reflectionBook);
+
+  if (!vault) {
+    return normalizedBook;
+  }
+
+  const protectedDates = getReflectionProtectedDates(vault);
+
+  if (protectedDates === null) {
+    return {};
+  }
+
+  const protectedDateSet = new Set(protectedDates);
+
+  return Object.entries(normalizedBook).reduce<ReflectionBook>((result, [date, entry]) => {
+    if (!protectedDateSet.has(date)) {
+      result[date] = entry;
     }
 
     return result;
@@ -3748,6 +4269,8 @@ function normalizePayload(payload: unknown): CloudPayload {
       "customCategories" in payload ||
       "complexProjects" in payload ||
       "moodBook" in payload ||
+      "reflectionBook" in payload ||
+      "reflectionVault" in payload ||
       "userProfile" in payload)
   ) {
     const cloudPayload = payload as Partial<CloudPayload>;
@@ -3762,6 +4285,10 @@ function normalizePayload(payload: unknown): CloudPayload {
         normalizeComplexProjectBook(cloudPayload.complexProjects),
       ),
       moodBook: normalizeMoodBook(cloudPayload.moodBook),
+      reflectionBook: normalizeReflectionBook(cloudPayload.reflectionBook),
+      reflectionVault: isReflectionVault(cloudPayload.reflectionVault)
+        ? cloudPayload.reflectionVault
+        : null,
       userProfile: normalizeUserProfile(cloudPayload.userProfile),
     };
   }
@@ -3772,6 +4299,8 @@ function normalizePayload(payload: unknown): CloudPayload {
     customCategories: [],
     complexProjects: [],
     moodBook: {},
+    reflectionBook: {},
+    reflectionVault: null,
     userProfile: createDefaultUserProfile(),
   };
 }
@@ -3881,6 +4410,38 @@ function mergeMoodBooks(localMoodBook: MoodBook, cloudMoodBook: MoodBook): MoodB
   return normalizeMoodBook(merged);
 }
 
+function mergeReflectionBooks(
+  localReflectionBook: ReflectionBook,
+  cloudReflectionBook: ReflectionBook,
+): ReflectionBook {
+  const dates = new Set([
+    ...Object.keys(localReflectionBook),
+    ...Object.keys(cloudReflectionBook),
+  ]);
+  const merged: ReflectionBook = {};
+
+  dates.forEach((date) => {
+    const localEntry = localReflectionBook[date];
+    const cloudEntry = cloudReflectionBook[date];
+
+    if (!localEntry) {
+      if (cloudEntry) {
+        merged[date] = cloudEntry;
+      }
+      return;
+    }
+
+    if (!cloudEntry || localEntry.updatedAt >= cloudEntry.updatedAt) {
+      merged[date] = localEntry;
+      return;
+    }
+
+    merged[date] = cloudEntry;
+  });
+
+  return normalizeReflectionBook(merged);
+}
+
 function mergeUserProfiles(localUserProfile: UserProfile, cloudUserProfile: UserProfile): UserProfile {
   return cloudUserProfile.updatedAt > localUserProfile.updatedAt ? cloudUserProfile : localUserProfile;
 }
@@ -3911,6 +4472,8 @@ function createCloudPayload(
   customCategories: CustomCategory[],
   complexProjectBook: ComplexProjectBook = {},
   moodBook: MoodBook = {},
+  reflectionBook: ReflectionBook = {},
+  reflectionVault: ReflectionVault | null = null,
   userProfile: UserProfile = createDefaultUserProfile(),
 ): CloudPayload {
   return {
@@ -3919,6 +4482,8 @@ function createCloudPayload(
     customCategories: normalizeCustomCategories(customCategories),
     complexProjects: getComplexProjectsForPayload(complexProjectBook),
     moodBook: normalizeMoodBook(moodBook),
+    reflectionBook: getPublicReflectionBook(reflectionBook, reflectionVault),
+    reflectionVault,
     userProfile: normalizeUserProfile(userProfile),
   };
 }
@@ -8586,9 +9151,10 @@ type WeatherWidgetProps = {
 };
 
 type MoodWidgetProps = {
-  entryCount: number;
+  hasReflection: boolean;
   latestEntry: MoodEntry | null;
-  onOpen: () => void;
+  onOpenMood: () => void;
+  onOpenReflection: () => void;
 };
 
 type MoodTimelineCardProps = {
@@ -8626,28 +9192,42 @@ function WeatherWidget({ onRefresh, weatherState }: WeatherWidgetProps) {
   );
 }
 
-function MoodWidget({ entryCount, latestEntry, onOpen }: MoodWidgetProps) {
+function MoodWidget({
+  hasReflection,
+  latestEntry,
+  onOpenMood,
+  onOpenReflection,
+}: MoodWidgetProps) {
   const moodOption = latestEntry ? getMoodOption(latestEntry.moodId) : null;
 
   return (
-    <button
-      id="mood-open-button"
-      className="flex min-h-[3.8rem] w-full items-center gap-2 rounded-2xl border border-pink-100 bg-pink-50/75 px-3 py-2 text-left shadow-sm outline-none transition hover:bg-pink-100/75 focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
-      type="button"
-      onClick={onOpen}
-    >
-      <span aria-hidden="true" className="shrink-0 text-xl leading-none">
-        {moodOption?.icon ?? "💗"}
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm font-black text-pink-700">
-          {moodOption ? moodOption.label : "当日心情"}
+    <div className="flex min-h-[3.8rem] w-full items-center gap-1 rounded-2xl border border-pink-100 bg-pink-50/75 py-1.5 pl-1 pr-1.5 shadow-sm">
+      <button
+        aria-label={moodOption ? `当日心情：${moodOption.label}` : "记录当日心情"}
+        id="mood-open-button"
+        className="inline-flex h-10 w-8 shrink-0 items-center justify-center rounded-xl outline-none transition hover:bg-pink-100/75 focus:ring-4 focus:ring-pink-100"
+        title={moodOption ? `当日心情：${moodOption.label}` : "记录当日心情"}
+        type="button"
+        onClick={onOpenMood}
+      >
+        <span aria-hidden="true" className="text-xl leading-none">
+          {moodOption?.icon ?? "💗"}
         </span>
-        <span className="mt-0.5 block truncate text-[11px] font-bold text-pink-700/80">
-          {entryCount > 0 ? `${entryCount} 次记录` : "记录此刻"}
-        </span>
-      </span>
-    </button>
+      </button>
+      <button
+        aria-label="打开吾日三省吾身"
+        className={`inline-flex min-w-0 flex-1 items-center justify-center gap-1 whitespace-nowrap rounded-xl border px-1.5 py-2 text-[11px] font-black leading-tight outline-none transition focus:ring-4 focus:ring-violet-100 ${
+          hasReflection
+            ? "border-violet-200 bg-violet-100 text-violet-700 hover:bg-violet-200"
+            : "border-transparent bg-transparent text-[#765f82] hover:bg-pink-100/70"
+        }`}
+        type="button"
+        onClick={onOpenReflection}
+      >
+        <span aria-hidden="true" className="text-xl leading-none">🧘</span>
+        <span>吾日三省吾身</span>
+      </button>
+    </div>
   );
 }
 
@@ -9089,6 +9669,12 @@ function App() {
     loadComplexProjectBook(),
   );
   const [moodBook, setMoodBook] = useState<MoodBook>(() => loadMoodBook());
+  const [reflectionVault, setReflectionVault] = useState<ReflectionVault | null>(() =>
+    loadReflectionVault(),
+  );
+  const [reflectionBook, setReflectionBook] = useState<ReflectionBook>(() =>
+    loadReflectionBook(),
+  );
   const [userProfile, setUserProfile] = useState<UserProfile>(() => loadUserProfile());
   const [complexProjectForm, setComplexProjectForm] = useState<ComplexProjectForm>(() =>
     createEmptyComplexProjectForm(selectedDate),
@@ -9183,26 +9769,48 @@ function App() {
   const [isAuthChecking, setIsAuthChecking] = useState<boolean>(() => isSupabaseConfigured);
   const [isCloudSaving, setIsCloudSaving] = useState<boolean>(false);
   const [isMoodPanelOpen, setIsMoodPanelOpen] = useState<boolean>(false);
+  const [moodPanelMode, setMoodPanelMode] = useState<MoodPanelMode>("mood");
   const [moodDraftId, setMoodDraftId] = useState<MoodId>(DEFAULT_MOOD_ID);
   const [moodNoteDraft, setMoodNoteDraft] = useState<string>("");
   const [moodStatus, setMoodStatus] = useState<string>("");
   const [isMoodExporting, setIsMoodExporting] = useState<boolean>(false);
+  const [isReflectionExporting, setIsReflectionExporting] = useState<boolean>(false);
+  const [reflectionStatus, setReflectionStatus] = useState<string>("");
+  const [isReflectionUnlocked, setIsReflectionUnlocked] = useState<boolean>(
+    () => !reflectionVault,
+  );
+  const [reflectionSecurityAction, setReflectionSecurityAction] =
+    useState<ReflectionSecurityAction>(null);
+  const [reflectionSecurityForm, setReflectionSecurityForm] = useState({
+    confirmPassword: "",
+    currentPassword: "",
+    newPassword: "",
+  });
+  const [reflectionSecurityStatus, setReflectionSecurityStatus] = useState<string>("");
+  const [isReflectionSecurityBusy, setIsReflectionSecurityBusy] = useState<boolean>(false);
+  const [reflectionClearVersion, setReflectionClearVersion] = useState<number>(0);
   const journalRef = useRef<HTMLDivElement | null>(null);
   const exportRef = useRef<HTMLDivElement | null>(null);
   const ganttExportRef = useRef<HTMLDivElement | null>(null);
   const timeStatsRef = useRef<HTMLElement | null>(null);
   const moodTimelineRef = useRef<HTMLDivElement | null>(null);
+  const moodBackdropPointerStartedOutside = useRef<boolean>(false);
   const feedbackTimer = useRef<number | null>(null);
   const complexProjectFeedbackTimer = useRef<number | null>(null);
   const timerNoticeTimer = useRef<number | null>(null);
   const highlightedTaskTimer = useRef<number | null>(null);
   const cloudTimer = useRef<number | null>(null);
+  const reflectionEncryptionSequence = useRef<number>(0);
+  const reflectionLockInProgress = useRef<boolean>(false);
+  const reflectionVaultKey = useRef<CryptoKey | null>(null);
   const weatherPermissionDenied = useRef<boolean>(false);
   const skipInlineBlurSave = useRef<boolean>(false);
   const cloudReady = useRef<boolean>(false);
   const latestPlanBook = useRef<PlanBook>(plansByDate);
   const latestComplexProjectBook = useRef<ComplexProjectBook>(complexProjectBook);
   const latestMoodBook = useRef<MoodBook>(moodBook);
+  const latestReflectionBook = useRef<ReflectionBook>(reflectionBook);
+  const latestReflectionVault = useRef<ReflectionVault | null>(reflectionVault);
   const latestUserProfile = useRef<UserProfile>(userProfile);
   const latestDeletedItemIds = useRef<string[]>(deletedItemIds);
   const latestCustomCategories = useRef<CustomCategory[]>(customCategories);
@@ -9390,6 +9998,11 @@ function App() {
     [moodBook, selectedDate],
   );
   const latestMoodEntry = selectedMoodEntries[selectedMoodEntries.length - 1] ?? null;
+  const selectedReflection = reflectionBook[selectedDate] ?? null;
+  const selectedReflectionIsProtected = isReflectionDateProtected(
+    reflectionVault,
+    selectedDate,
+  );
   const phaseTimeDetailProject = phaseTimeDetailTarget
     ? complexProjectBook[phaseTimeDetailTarget.projectId] ?? null
     : null;
@@ -9618,6 +10231,58 @@ function App() {
   }, [moodBook]);
 
   useEffect(() => {
+    latestReflectionBook.current = reflectionBook;
+    saveReflectionBook(getPublicReflectionBook(reflectionBook, reflectionVault));
+  }, [reflectionBook, reflectionVault]);
+
+  useEffect(() => {
+    latestReflectionVault.current = reflectionVault;
+    saveReflectionVault(reflectionVault);
+  }, [reflectionVault]);
+
+  useEffect(() => {
+    if (!reflectionVault || !isReflectionUnlocked || !reflectionVaultKey.current) {
+      return;
+    }
+
+    const protectedDates = getReflectionProtectedDates(reflectionVault);
+
+    if (protectedDates === null) {
+      return;
+    }
+
+    const key = reflectionVaultKey.current;
+    const sequence = ++reflectionEncryptionSequence.current;
+    const protectedBook = getProtectedReflectionBook(reflectionBook, reflectionVault);
+
+    void encryptReflectionData(protectedBook, {
+      iterations: reflectionVault.iterations,
+      key,
+      salt: reflectionVault.salt,
+    })
+      .then(({ vault }) => {
+        if (sequence !== reflectionEncryptionSequence.current) {
+          return;
+        }
+
+        const nextVault = withReflectionProtectedDates(vault, protectedDates);
+        latestReflectionVault.current = nextVault;
+        setReflectionVault(nextVault);
+      })
+      .catch(() => {
+        if (sequence === reflectionEncryptionSequence.current) {
+          setReflectionStatus("加密保存失败，请稍后重试");
+        }
+      });
+  }, [
+    isReflectionUnlocked,
+    reflectionBook,
+    reflectionVault?.iterations,
+    reflectionVault?.protectedDates?.join("|"),
+    reflectionVault?.salt,
+  ]);
+
+  useEffect(() => {
     saveUserProfile(userProfile);
     latestUserProfile.current = userProfile;
   }, [userProfile]);
@@ -9843,6 +10508,12 @@ function App() {
           latestComplexProjectBook.current,
         );
         const localMoodBook = normalizeMoodBook(latestMoodBook.current);
+        const localReflectionBook = normalizeReflectionBook(latestReflectionBook.current);
+        const localReflectionVault = latestReflectionVault.current;
+        const localPublicReflectionBook = getPublicReflectionBook(
+          localReflectionBook,
+          localReflectionVault,
+        );
         const localUserProfile = normalizeUserProfile(latestUserProfile.current);
         const nextDeletedItemIds = uniqueValues([
           ...latestDeletedItemIds.current,
@@ -9862,6 +10533,14 @@ function App() {
           nextDeletedItemIds,
         );
         const mergedMoodBook = mergeMoodBooks(localMoodBook, cloudPayload.moodBook);
+        const mergedReflectionVault = mergeReflectionVaults(
+          localReflectionVault,
+          cloudPayload.reflectionVault,
+        );
+        const mergedReflectionBook = getPublicReflectionBook(
+          mergeReflectionBooks(localPublicReflectionBook, cloudPayload.reflectionBook),
+          mergedReflectionVault,
+        );
         const mergedUserProfile = mergeUserProfiles(localUserProfile, cloudPayload.userProfile);
 
         if (isCancelled) {
@@ -9872,6 +10551,16 @@ function App() {
         setCustomCategories(nextCustomCategories);
         setComplexProjectBook(mergedComplexProjectBook);
         setMoodBook(mergedMoodBook);
+        if (mergedReflectionVault) {
+          reflectionVaultKey.current = null;
+          latestReflectionBook.current = mergedReflectionBook;
+          latestReflectionVault.current = mergedReflectionVault;
+          setReflectionVault(mergedReflectionVault);
+          setReflectionBook(mergedReflectionBook);
+          setIsReflectionUnlocked(false);
+        } else {
+          setReflectionBook(mergedReflectionBook);
+        }
         setUserProfile(mergedUserProfile);
         setPlansByDate(mergedPlanBook);
         await upsertDailyPlannerUserData({
@@ -9882,6 +10571,8 @@ function App() {
             nextCustomCategories,
             mergedComplexProjectBook,
             mergedMoodBook,
+            mergedReflectionBook,
+            mergedReflectionVault,
             mergedUserProfile,
           ),
         });
@@ -9926,7 +10617,17 @@ function App() {
         window.clearTimeout(cloudTimer.current);
       }
     };
-  }, [currentUserId, complexProjectBook, customCategories, deletedItemIds, moodBook, plansByDate, userProfile]);
+  }, [
+    currentUserId,
+    complexProjectBook,
+    customCategories,
+    deletedItemIds,
+    moodBook,
+    plansByDate,
+    reflectionBook,
+    reflectionVault,
+    userProfile,
+  ]);
 
   const updatePlansForSelectedDate = (updater: (current: PlanItem[]) => PlanItem[]) => {
     setPlansByDate((currentBook) => ({
@@ -9949,6 +10650,562 @@ function App() {
       }, {}),
     );
   };
+
+  const updateReflectionContent = (content: string, contentHtml: string) => {
+    const nextContent = content.slice(0, 20000);
+    const nextContentHtml = sanitizeReflectionHtml(contentHtml, nextContent);
+    const now = Date.now();
+
+    setReflectionBook((currentBook) => {
+      const currentEntry = currentBook[selectedDate];
+      const nextBook = {
+        ...currentBook,
+        [selectedDate]: {
+          date: selectedDate,
+          title: currentEntry?.title ?? "",
+          content: nextContent,
+          contentHtml: nextContentHtml,
+          createdAt: currentEntry?.createdAt ?? now,
+          updatedAt: now,
+        },
+      };
+
+      latestReflectionBook.current = nextBook;
+      return nextBook;
+    });
+    setReflectionStatus(nextContent.trim() ? "已自动保存" : "内容已清空并保存");
+  };
+
+  const updateReflectionTitle = (title: string) => {
+    const nextTitle = title.slice(0, 120);
+    const now = Date.now();
+
+    setReflectionBook((currentBook) => {
+      const currentEntry = currentBook[selectedDate];
+      const currentContent = currentEntry?.content ?? "";
+      const nextBook = {
+        ...currentBook,
+        [selectedDate]: {
+          date: selectedDate,
+          title: nextTitle,
+          content: currentContent,
+          contentHtml:
+            currentEntry?.contentHtml ?? plainTextToReflectionHtml(currentContent),
+          createdAt: currentEntry?.createdAt ?? now,
+          updatedAt: now,
+        },
+      };
+
+      latestReflectionBook.current = nextBook;
+      return nextBook;
+    });
+    setReflectionStatus(nextTitle.trim() ? "标题已自动保存" : "标题已清空并保存");
+  };
+
+  const clearReflection = () => {
+    if (selectedReflection?.content.trim() && !window.confirm("清空这一天的反思日志？")) {
+      return;
+    }
+
+    setReflectionClearVersion((current) => current + 1);
+  };
+
+  const resetReflectionSecurityForm = () => {
+    setReflectionSecurityForm({
+      confirmPassword: "",
+      currentPassword: "",
+      newPassword: "",
+    });
+    setReflectionSecurityStatus("");
+  };
+
+  const openReflectionSecurityAction = (action: Exclude<ReflectionSecurityAction, null>) => {
+    resetReflectionSecurityForm();
+    setReflectionSecurityAction(action);
+  };
+
+  const lockReflection = useCallback(() => {
+    const currentVault = latestReflectionVault.current;
+
+    if (!currentVault || reflectionLockInProgress.current) {
+      return;
+    }
+
+    const key = reflectionVaultKey.current;
+    const currentBook = latestReflectionBook.current;
+    const publicBook = getPublicReflectionBook(currentBook, currentVault);
+    const sequence = ++reflectionEncryptionSequence.current;
+
+    reflectionVaultKey.current = null;
+    setIsReflectionUnlocked(false);
+    setReflectionSecurityAction(null);
+    setReflectionSecurityForm({
+      confirmPassword: "",
+      currentPassword: "",
+      newPassword: "",
+    });
+    setReflectionSecurityStatus("");
+    setReflectionStatus("");
+
+    if (!key) {
+      latestReflectionBook.current = publicBook;
+      setReflectionBook(publicBook);
+      return;
+    }
+
+    const protectedDates =
+      getReflectionProtectedDates(currentVault) ?? Object.keys(currentBook);
+    const protectedBook = getProtectedReflectionBook(currentBook, currentVault);
+
+    reflectionLockInProgress.current = true;
+    setIsReflectionSecurityBusy(true);
+    void encryptReflectionData(protectedBook, {
+      iterations: currentVault.iterations,
+      key,
+      salt: currentVault.salt,
+    })
+      .then(({ vault }) => {
+        if (sequence !== reflectionEncryptionSequence.current) {
+          return;
+        }
+
+        const nextVault = withReflectionProtectedDates(vault, protectedDates);
+        latestReflectionVault.current = nextVault;
+        latestReflectionBook.current = publicBook;
+        saveReflectionBook(publicBook);
+        setReflectionVault(nextVault);
+        setReflectionBook(publicBook);
+      })
+      .catch(() => {
+        if (sequence !== reflectionEncryptionSequence.current) {
+          return;
+        }
+
+        reflectionVaultKey.current = key;
+        setIsReflectionUnlocked(true);
+        setReflectionStatus("上锁前的加密保存失败，日志仍保持解锁以避免内容丢失");
+      })
+      .finally(() => {
+        reflectionLockInProgress.current = false;
+        setIsReflectionSecurityBusy(false);
+      });
+  }, []);
+
+  const unlockReflection = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!reflectionVault || !reflectionSecurityForm.currentPassword) {
+      setReflectionSecurityStatus("请输入隐私密码");
+      return;
+    }
+
+    setIsReflectionSecurityBusy(true);
+    setReflectionSecurityStatus("正在解锁...");
+
+    try {
+      const { key, value } = await decryptReflectionData<ReflectionBook>(
+        reflectionVault,
+        reflectionSecurityForm.currentPassword,
+      );
+
+      const privateBook = normalizeReflectionBook(value);
+      const publicBook = getPublicReflectionBook(
+        latestReflectionBook.current,
+        reflectionVault,
+      );
+      const unlockedBook = normalizeReflectionBook({
+        ...publicBook,
+        ...privateBook,
+      });
+      const existingProtectedDates = getReflectionProtectedDates(reflectionVault);
+
+      if (existingProtectedDates === null) {
+        const migratedProtectedDates = Object.keys(privateBook);
+        const { vault } = await encryptReflectionData(privateBook, {
+          iterations: reflectionVault.iterations,
+          key,
+          salt: reflectionVault.salt,
+        });
+        const migratedVault = withReflectionProtectedDates(vault, migratedProtectedDates);
+        latestReflectionVault.current = migratedVault;
+        setReflectionVault(migratedVault);
+      }
+
+      reflectionVaultKey.current = key;
+      latestReflectionBook.current = unlockedBook;
+      setReflectionBook(unlockedBook);
+      setIsReflectionUnlocked(true);
+      resetReflectionSecurityForm();
+      setReflectionStatus("私密日志已解锁，闲置 5 分钟后会自动上锁");
+    } catch {
+      setReflectionSecurityStatus("密码不正确，请重新输入");
+    } finally {
+      setIsReflectionSecurityBusy(false);
+    }
+  };
+
+  const exportReflectionDocx = async (password?: string) => {
+    setIsReflectionExporting(true);
+    setReflectionStatus(password ? "正在生成加密 Word 文档..." : "正在生成 Word 文档...");
+
+    try {
+      const weatherSnapshot =
+        weatherState.data &&
+        formatDateInput(new Date(weatherState.data.updatedAt)) === selectedDate
+          ? weatherState.data
+          : null;
+      const weatherCondition = weatherSnapshot
+        ? getWeatherCondition(weatherSnapshot.weatherCode)
+        : null;
+      const reflectionDateWeatherText = weatherSnapshot && weatherCondition
+        ? `${formatDisplayDateWithYear(selectedDate)} · ${weatherCondition.icon} ${weatherCondition.text} · ${formatWeatherTemperature(weatherSnapshot.temperature)}`
+        : formatDisplayDateWithYear(selectedDate);
+      const contentParagraphs = selectedReflection?.content.trim()
+        ? reflectionHtmlToDocxParagraphs(selectedReflection.contentHtml)
+        : [
+            new Paragraph({
+              children: [
+                new TextRun({
+                  font: "Microsoft YaHei",
+                  size: 22,
+                  text: "（当日未填写反思）",
+                }),
+              ],
+            }),
+          ];
+      const doc = new Document({
+        creator: "今日计划手帐",
+        title: `吾日三省吾身 - ${selectedDate}`,
+        sections: [
+          {
+            children: [
+              new Paragraph({
+                alignment: AlignmentType.CENTER,
+                children: [new TextRun({ bold: true, font: "Microsoft YaHei", size: 38, text: "吾日三省吾身" })],
+                spacing: { after: 120 },
+              }),
+              new Paragraph({
+                alignment: AlignmentType.CENTER,
+                children: [new TextRun({ color: "75667F", font: "Microsoft YaHei", size: 22, text: reflectionDateWeatherText })],
+                spacing: { after: selectedReflection?.title.trim() ? 160 : 360 },
+              }),
+              ...(selectedReflection?.title.trim()
+                ? [
+                    new Paragraph({
+                      alignment: AlignmentType.CENTER,
+                      children: [
+                        new TextRun({
+                          bold: true,
+                          font: "Microsoft YaHei",
+                          size: 30,
+                          text: selectedReflection.title.trim(),
+                        }),
+                      ],
+                      spacing: { after: 360 },
+                    }),
+                  ]
+                : []),
+              ...contentParagraphs,
+            ],
+          },
+        ],
+      });
+      const plainBlob = await Packer.toBlob(doc);
+      const blob = password ? await encryptWordBlob(plainBlob, password) : plainBlob;
+
+      downloadBlob(blob, `吾日三省-${selectedDate}.docx`);
+      setReflectionStatus(
+        password
+          ? "加密 Word 文档已生成，打开时需要输入隐私密码"
+          : "Word 文档已生成",
+      );
+    } catch (error) {
+      setReflectionStatus(error instanceof Error ? error.message : "Word 文档导出失败");
+    } finally {
+      setIsReflectionExporting(false);
+    }
+  };
+
+  const protectSelectedReflection = async () => {
+    if (!selectedReflection?.title.trim() && !selectedReflection?.content.trim()) {
+      setReflectionStatus("请先写下日志内容，再保护本篇");
+      return;
+    }
+
+    const currentVault = latestReflectionVault.current;
+    const key = reflectionVaultKey.current;
+
+    if (!currentVault) {
+      openReflectionSecurityAction("setup");
+      return;
+    }
+
+    if (!key || !isReflectionUnlocked) {
+      openReflectionSecurityAction("protect");
+      return;
+    }
+
+    setIsReflectionSecurityBusy(true);
+    setReflectionStatus("正在保护本篇...");
+
+    try {
+      const currentBook = latestReflectionBook.current;
+      const protectedDates = getReflectionProtectedDates(currentVault) ?? Object.keys(currentBook);
+      const nextProtectedDates = Array.from(new Set([...protectedDates, selectedDate]));
+      const nextVaultMetadata = withReflectionProtectedDates(
+        currentVault,
+        nextProtectedDates,
+      );
+      const protectedBook = getProtectedReflectionBook(currentBook, nextVaultMetadata);
+      const { vault } = await encryptReflectionData(protectedBook, {
+        iterations: currentVault.iterations,
+        key,
+        salt: currentVault.salt,
+      });
+      const nextVault = withReflectionProtectedDates(vault, nextProtectedDates);
+
+      reflectionEncryptionSequence.current += 1;
+      latestReflectionVault.current = nextVault;
+      setReflectionVault(nextVault);
+      setReflectionStatus("本篇已加密保护");
+    } catch {
+      setReflectionStatus("保护本篇失败，请稍后重试");
+    } finally {
+      setIsReflectionSecurityBusy(false);
+    }
+  };
+
+  const unprotectSelectedReflection = async () => {
+    const currentVault = latestReflectionVault.current;
+    const key = reflectionVaultKey.current;
+
+    if (!currentVault || !key || !isReflectionUnlocked) {
+      return;
+    }
+
+    if (!window.confirm("解除本篇保护后，这篇日志将像普通日志一样直接打开。继续吗？")) {
+      return;
+    }
+
+    setIsReflectionSecurityBusy(true);
+    setReflectionStatus("正在解除本篇保护...");
+
+    try {
+      const currentBook = latestReflectionBook.current;
+      const protectedDates = getReflectionProtectedDates(currentVault) ?? Object.keys(currentBook);
+      const nextProtectedDates = protectedDates.filter((date) => date !== selectedDate);
+
+      reflectionEncryptionSequence.current += 1;
+
+      if (nextProtectedDates.length === 0) {
+        reflectionVaultKey.current = null;
+        latestReflectionVault.current = null;
+        saveReflectionBook(currentBook);
+        setReflectionVault(null);
+        setIsReflectionUnlocked(true);
+        setReflectionStatus("本篇已解除保护，目前没有加密日志");
+        return;
+      }
+
+      const nextVaultMetadata = withReflectionProtectedDates(
+        currentVault,
+        nextProtectedDates,
+      );
+      const protectedBook = getProtectedReflectionBook(currentBook, nextVaultMetadata);
+      const { vault } = await encryptReflectionData(protectedBook, {
+        iterations: currentVault.iterations,
+        key,
+        salt: currentVault.salt,
+      });
+      const nextVault = withReflectionProtectedDates(vault, nextProtectedDates);
+
+      latestReflectionVault.current = nextVault;
+      setReflectionVault(nextVault);
+      setReflectionStatus("本篇已解除保护");
+    } catch {
+      setReflectionStatus("解除保护失败，请稍后重试");
+    } finally {
+      setIsReflectionSecurityBusy(false);
+    }
+  };
+
+  const submitReflectionSecurityAction = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!reflectionSecurityAction) {
+      return;
+    }
+
+    setIsReflectionSecurityBusy(true);
+    setReflectionSecurityStatus("");
+
+    try {
+      if (reflectionSecurityAction === "setup") {
+        const password = reflectionSecurityForm.newPassword;
+
+        if (password.length < 8) {
+          setReflectionSecurityStatus("隐私密码至少需要 8 位");
+          return;
+        }
+        if (password !== reflectionSecurityForm.confirmPassword) {
+          setReflectionSecurityStatus("两次输入的密码不一致");
+          return;
+        }
+
+        const currentEntry = latestReflectionBook.current[selectedDate];
+
+        if (!currentEntry?.title.trim() && !currentEntry?.content.trim()) {
+          setReflectionSecurityStatus("请先写下日志内容，再保护本篇");
+          return;
+        }
+
+        const protectedBook = currentEntry ? { [selectedDate]: currentEntry } : {};
+        const { key, vault } = await encryptReflectionData(protectedBook, { password });
+        const nextVault = withReflectionProtectedDates(vault, [selectedDate]);
+        reflectionEncryptionSequence.current += 1;
+        reflectionVaultKey.current = key;
+        latestReflectionVault.current = nextVault;
+        setReflectionVault(nextVault);
+        setIsReflectionUnlocked(true);
+        setReflectionSecurityAction(null);
+        resetReflectionSecurityForm();
+        setReflectionStatus("本篇已加密保护");
+        return;
+      }
+
+      if (!reflectionVault || !reflectionSecurityForm.currentPassword) {
+        setReflectionSecurityStatus("请输入当前隐私密码");
+        return;
+      }
+
+      const verified = await decryptReflectionData<ReflectionBook>(
+        reflectionVault,
+        reflectionSecurityForm.currentPassword,
+      );
+      const verifiedPrivateBook = normalizeReflectionBook(verified.value);
+
+      if (reflectionSecurityAction === "export") {
+        await exportReflectionDocx(reflectionSecurityForm.currentPassword);
+        setReflectionSecurityAction(null);
+        resetReflectionSecurityForm();
+        return;
+      }
+
+      const publicBook = getPublicReflectionBook(
+        latestReflectionBook.current,
+        reflectionVault,
+      );
+      const currentBook = normalizeReflectionBook({
+        ...publicBook,
+        ...verifiedPrivateBook,
+      });
+      const protectedDates =
+        getReflectionProtectedDates(reflectionVault) ?? Object.keys(verifiedPrivateBook);
+
+      if (reflectionSecurityAction === "protect") {
+        const currentEntry = currentBook[selectedDate];
+
+        if (!currentEntry?.title.trim() && !currentEntry?.content.trim()) {
+          setReflectionSecurityStatus("请先写下日志内容，再保护本篇");
+          return;
+        }
+
+        const nextProtectedDates = Array.from(new Set([...protectedDates, selectedDate]));
+        const nextVaultMetadata = withReflectionProtectedDates(
+          reflectionVault,
+          nextProtectedDates,
+        );
+        const protectedBook = getProtectedReflectionBook(currentBook, nextVaultMetadata);
+        const { vault } = await encryptReflectionData(protectedBook, {
+          iterations: reflectionVault.iterations,
+          key: verified.key,
+          salt: reflectionVault.salt,
+        });
+        const nextVault = withReflectionProtectedDates(vault, nextProtectedDates);
+
+        reflectionEncryptionSequence.current += 1;
+        reflectionVaultKey.current = verified.key;
+        latestReflectionBook.current = currentBook;
+        latestReflectionVault.current = nextVault;
+        setReflectionBook(currentBook);
+        setReflectionVault(nextVault);
+        setIsReflectionUnlocked(true);
+        setReflectionSecurityAction(null);
+        resetReflectionSecurityForm();
+        setReflectionStatus("本篇已加密保护");
+        return;
+      }
+
+      const newPassword = reflectionSecurityForm.newPassword;
+
+      if (newPassword.length < 8) {
+        setReflectionSecurityStatus("新密码至少需要 8 位");
+        return;
+      }
+      if (newPassword !== reflectionSecurityForm.confirmPassword) {
+        setReflectionSecurityStatus("两次输入的新密码不一致");
+        return;
+      }
+
+      const nextVaultMetadata = withReflectionProtectedDates(
+        reflectionVault,
+        protectedDates,
+      );
+      const protectedBook = getProtectedReflectionBook(currentBook, nextVaultMetadata);
+      const { key, vault } = await encryptReflectionData(protectedBook, {
+        password: newPassword,
+      });
+      const nextVault = withReflectionProtectedDates(vault, protectedDates);
+
+      reflectionEncryptionSequence.current += 1;
+      reflectionVaultKey.current = key;
+      latestReflectionBook.current = currentBook;
+      latestReflectionVault.current = nextVault;
+      setReflectionBook(currentBook);
+      setReflectionVault(nextVault);
+      setReflectionSecurityAction(null);
+      resetReflectionSecurityForm();
+      setReflectionStatus("隐私密码已更新，私密日志已重新加密");
+    } catch {
+      setReflectionSecurityStatus("当前密码不正确，请重新输入");
+    } finally {
+      setIsReflectionSecurityBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (
+      !isMoodPanelOpen ||
+      moodPanelMode !== "reflection" ||
+      !reflectionVault ||
+      !isReflectionUnlocked
+    ) {
+      return;
+    }
+
+    let timeoutId = 0;
+    const scheduleLock = () => {
+      window.clearTimeout(timeoutId);
+      timeoutId = window.setTimeout(lockReflection, 5 * 60 * 1000);
+    };
+    const lockWhenHidden = () => {
+      if (document.visibilityState === "hidden") {
+        lockReflection();
+      }
+    };
+
+    scheduleLock();
+    window.addEventListener("keydown", scheduleLock);
+    window.addEventListener("pointerdown", scheduleLock);
+    document.addEventListener("visibilitychange", lockWhenHidden);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+      window.removeEventListener("keydown", scheduleLock);
+      window.removeEventListener("pointerdown", scheduleLock);
+      document.removeEventListener("visibilitychange", lockWhenHidden);
+    };
+  }, [isMoodPanelOpen, isReflectionUnlocked, lockReflection, moodPanelMode, reflectionVault]);
 
   const addMoodEntry = () => {
     const timestamp = createTimestampForDateAtCurrentTime(selectedDate);
@@ -11034,6 +12291,28 @@ function App() {
         nextDeletedItemIds,
       );
       const mergedMoodBook = mergeMoodBooks(latestMoodBook.current, cloudPayload.moodBook);
+      const localReflectionVault = latestReflectionVault.current;
+      const localPublicReflectionBook = getPublicReflectionBook(
+        latestReflectionBook.current,
+        localReflectionVault,
+      );
+      const mergedReflectionVault = mergeReflectionVaults(
+        localReflectionVault,
+        cloudPayload.reflectionVault,
+      );
+      const mergedPublicReflectionBook = getPublicReflectionBook(
+        mergeReflectionBooks(localPublicReflectionBook, cloudPayload.reflectionBook),
+        mergedReflectionVault,
+      );
+      const cloudReflectionVaultWins = Boolean(
+        mergedReflectionVault &&
+          (!localReflectionVault ||
+            mergedReflectionVault.updatedAt > localReflectionVault.updatedAt),
+      );
+      const mergedReflectionBook =
+        localReflectionVault && reflectionVaultKey.current && !cloudReflectionVaultWins
+          ? mergeReflectionBooks(latestReflectionBook.current, mergedPublicReflectionBook)
+          : mergedPublicReflectionBook;
       const mergedUserProfile = mergeUserProfiles(
         latestUserProfile.current,
         cloudPayload.userProfile,
@@ -11059,6 +12338,18 @@ function App() {
       if (JSON.stringify(mergedMoodBook) !== JSON.stringify(latestMoodBook.current)) {
         setMoodBook(mergedMoodBook);
       }
+      if (
+        cloudReflectionVaultWins && mergedReflectionVault
+      ) {
+        reflectionVaultKey.current = null;
+        latestReflectionBook.current = mergedPublicReflectionBook;
+        latestReflectionVault.current = mergedReflectionVault;
+        setReflectionVault(mergedReflectionVault);
+        setReflectionBook(mergedPublicReflectionBook);
+        setIsReflectionUnlocked(false);
+      } else if (JSON.stringify(mergedReflectionBook) !== JSON.stringify(latestReflectionBook.current)) {
+        setReflectionBook(mergedReflectionBook);
+      }
       if (JSON.stringify(mergedUserProfile) !== JSON.stringify(latestUserProfile.current)) {
         setUserProfile(mergedUserProfile);
       }
@@ -11071,6 +12362,8 @@ function App() {
           nextCustomCategories,
           mergedComplexProjectBook,
           mergedMoodBook,
+          mergedReflectionBook,
+          mergedReflectionVault,
           mergedUserProfile,
         ),
       });
@@ -13332,122 +14625,456 @@ function App() {
       </section>
     </main>
   );
+  const reflectionLockedPanel = (
+    <section className="mx-auto max-w-lg py-8 sm:py-12">
+      <div className="border-y border-violet-100 bg-violet-50/60 px-4 py-7 text-center sm:px-8">
+        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-violet-100 text-2xl" aria-hidden="true">
+          🔒
+        </div>
+        <h3 className="mt-4 text-xl font-black text-[#46394f]">本篇反思日志已上锁</h3>
+        <p className="mt-2 text-sm font-bold leading-6 text-[#85758d]">
+          输入独立隐私密码后，才能查看、编辑和导出这一篇日志。
+        </p>
+        <form className="mx-auto mt-5 max-w-sm space-y-3 text-left" onSubmit={unlockReflection}>
+          <label className="block text-xs font-black text-[#6f5d78]" htmlFor="reflection-unlock-password">
+            隐私密码
+            <input
+              autoComplete="current-password"
+              autoFocus
+              className="mt-1.5 w-full rounded-xl border border-violet-100 bg-white px-3 py-2.5 text-sm font-bold text-[#46394f] outline-none transition focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+              id="reflection-unlock-password"
+              type="password"
+              value={reflectionSecurityForm.currentPassword}
+              onChange={(event) =>
+                setReflectionSecurityForm((current) => ({
+                  ...current,
+                  currentPassword: event.target.value,
+                }))
+              }
+            />
+          </label>
+          {reflectionSecurityStatus ? (
+            <p className="text-xs font-black text-rose-600">{reflectionSecurityStatus}</p>
+          ) : null}
+          <button
+            className="w-full rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-black text-white transition hover:bg-violet-700 disabled:opacity-50"
+            disabled={isReflectionSecurityBusy || !reflectionSecurityForm.currentPassword}
+            type="submit"
+          >
+            {reflectionLockInProgress.current
+              ? "正在安全上锁..."
+              : isReflectionSecurityBusy
+                ? "正在解锁..."
+                : "解锁日志"}
+          </button>
+        </form>
+        <p className="mt-4 text-xs font-bold leading-5 text-[#9a8da1]">
+          隐私密码不会上传为明文，也无法通过账号登录密码找回。
+        </p>
+      </div>
+    </section>
+  );
+  const reflectionSecurityPanel = reflectionSecurityAction ? (
+    <section className="mx-auto max-w-lg py-5 sm:py-8">
+      <div className="border-y border-violet-100 bg-violet-50/60 px-4 py-6 sm:px-7">
+        <h3 className="text-lg font-black text-[#46394f]">
+          {reflectionSecurityAction === "setup"
+            ? "为本篇设置隐私密码"
+            : reflectionSecurityAction === "change"
+              ? "修改反思日志隐私密码"
+              : reflectionSecurityAction === "protect"
+                ? "保护这篇日志"
+                : "导出加密 Word 文档"}
+        </h3>
+        <p className="mt-2 text-xs font-bold leading-5 text-[#85758d]">
+          {reflectionSecurityAction === "setup"
+            ? "只加密保护当前这一篇；其他普通日志仍可直接打开。"
+            : reflectionSecurityAction === "change"
+              ? "验证当前密码后，所有受保护日志会使用新密码重新加密。"
+              : reflectionSecurityAction === "protect"
+                ? "请输入现有隐私密码，将当前这一篇加入保护。"
+                : "请输入隐私密码。生成的 Word 文档在 Word 或 WPS 中打开时会要求输入该密码。"}
+        </p>
+        <form className="mt-5 space-y-3" onSubmit={submitReflectionSecurityAction}>
+          {reflectionSecurityAction !== "setup" ? (
+            <label className="block text-xs font-black text-[#6f5d78]" htmlFor="reflection-current-password">
+              当前隐私密码
+              <input
+                autoComplete="current-password"
+                autoFocus
+                className="mt-1.5 w-full rounded-xl border border-violet-100 bg-white px-3 py-2.5 text-sm font-bold text-[#46394f] outline-none transition focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                id="reflection-current-password"
+                type="password"
+                value={reflectionSecurityForm.currentPassword}
+                onChange={(event) =>
+                  setReflectionSecurityForm((current) => ({
+                    ...current,
+                    currentPassword: event.target.value,
+                  }))
+                }
+              />
+            </label>
+          ) : null}
+          {reflectionSecurityAction === "setup" || reflectionSecurityAction === "change" ? (
+            <>
+              <label className="block text-xs font-black text-[#6f5d78]" htmlFor="reflection-new-password">
+                {reflectionSecurityAction === "setup" ? "隐私密码" : "新隐私密码"}
+                <input
+                  autoComplete="new-password"
+                  autoFocus={reflectionSecurityAction === "setup"}
+                  className="mt-1.5 w-full rounded-xl border border-violet-100 bg-white px-3 py-2.5 text-sm font-bold text-[#46394f] outline-none transition focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                  id="reflection-new-password"
+                  minLength={8}
+                  placeholder="至少 8 位"
+                  type="password"
+                  value={reflectionSecurityForm.newPassword}
+                  onChange={(event) =>
+                    setReflectionSecurityForm((current) => ({
+                      ...current,
+                      newPassword: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+              <label className="block text-xs font-black text-[#6f5d78]" htmlFor="reflection-confirm-password">
+                再次输入
+                <input
+                  autoComplete="new-password"
+                  className="mt-1.5 w-full rounded-xl border border-violet-100 bg-white px-3 py-2.5 text-sm font-bold text-[#46394f] outline-none transition focus:border-violet-300 focus:ring-4 focus:ring-violet-100"
+                  id="reflection-confirm-password"
+                  minLength={8}
+                  type="password"
+                  value={reflectionSecurityForm.confirmPassword}
+                  onChange={(event) =>
+                    setReflectionSecurityForm((current) => ({
+                      ...current,
+                      confirmPassword: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+            </>
+          ) : null}
+          {reflectionSecurityStatus ? (
+            <p className="text-xs font-black text-rose-600">{reflectionSecurityStatus}</p>
+          ) : null}
+          <div className="flex flex-wrap justify-end gap-2 pt-2">
+            <button
+              className="rounded-xl bg-white px-4 py-2 text-sm font-black text-[#6f5d78] shadow-sm transition hover:bg-slate-50"
+              type="button"
+              onClick={() => {
+                setReflectionSecurityAction(null);
+                resetReflectionSecurityForm();
+              }}
+            >
+              取消
+            </button>
+            <button
+              className="rounded-xl bg-violet-600 px-4 py-2 text-sm font-black text-white transition hover:bg-violet-700 disabled:opacity-50"
+              disabled={isReflectionSecurityBusy || isReflectionExporting}
+              type="submit"
+            >
+              {isReflectionSecurityBusy || isReflectionExporting
+                ? "处理中..."
+                : reflectionSecurityAction === "setup"
+                  ? "保护本篇"
+                  : reflectionSecurityAction === "change"
+                    ? "确认修改"
+                    : reflectionSecurityAction === "protect"
+                      ? "保护本篇"
+                      : "生成加密 Word"}
+            </button>
+          </div>
+        </form>
+        {reflectionSecurityAction === "setup" ? (
+          <p className="mt-4 border-t border-violet-100 pt-3 text-xs font-bold leading-5 text-[#9a8da1]">
+            请妥善保存密码。为保证隐私，系统无法查看或找回这枚密码。
+          </p>
+        ) : null}
+      </div>
+    </section>
+  ) : null;
   const moodPanel = (
     <section className="max-h-[calc(100vh-2.5rem)] overflow-y-auto rounded-[1.5rem] border border-white/80 bg-white p-4 shadow-2xl shadow-pink-200/40 sm:p-5">
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
-          <p className="text-sm font-black text-pink-600">当日心情</p>
+          <p className="text-sm font-black text-pink-600">心情与反思</p>
           <h2 className="mt-1 text-xl font-black text-[#3f3349]">
             {formatDisplayDateWithYear(selectedDate)}
           </h2>
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
-          <button
-            id="mood-export-timeline"
-            className="rounded-full bg-pink-50 px-3 py-1.5 text-xs font-black text-pink-700 transition hover:bg-pink-100 disabled:opacity-50"
-            disabled={isMoodExporting}
-            type="button"
-            onClick={exportMoodTimelinePng}
-          >
-            {isMoodExporting ? "导出中..." : "导出轨迹图"}
-          </button>
+          {moodPanelMode === "mood" ? (
+            <button
+              id="mood-export-timeline"
+              className="rounded-full bg-pink-50 px-3 py-1.5 text-xs font-black text-pink-700 transition hover:bg-pink-100 disabled:opacity-50"
+              disabled={isMoodExporting}
+              type="button"
+              onClick={exportMoodTimelinePng}
+            >
+              {isMoodExporting ? "导出中..." : "导出轨迹图"}
+            </button>
+          ) : null}
           <button
             className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-black text-[#6d5d75] transition hover:bg-slate-200 focus:outline-none focus:ring-4 focus:ring-slate-100"
             type="button"
-            onClick={() => setIsMoodPanelOpen(false)}
+            onClick={() => {
+              lockReflection();
+              setIsMoodPanelOpen(false);
+            }}
           >
             关闭
           </button>
         </div>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.3fr)]">
-        <section className="rounded-[1.35rem] border border-pink-100 bg-pink-50/70 p-3">
-          <p className="mb-2 text-sm font-black text-pink-700">记录此刻</p>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-            {MOOD_OPTIONS.map((option) => {
-              const isSelected = moodDraftId === option.id;
-
-              return (
-                <button
-                  className={`flex min-h-16 flex-col items-center justify-center gap-1 rounded-2xl border px-2 py-2 text-center text-xs font-black transition ${
-                    isSelected
-                      ? `${option.toneClass} ring-2 ring-pink-200`
-                      : "border-white bg-white/80 text-[#6f5d78] hover:bg-white"
-                  }`}
-                  key={option.id}
-                  type="button"
-                  onClick={() => setMoodDraftId(option.id)}
-                >
-                  <span className="text-xl leading-none">{option.icon}</span>
-                  <span>{option.label}</span>
-                </button>
-              );
-            })}
-          </div>
-          <label className="mt-3 block text-xs font-black text-[#6f5d78]" htmlFor="mood-note">
-            备注
-            <textarea
-              className="mt-1.5 min-h-20 w-full resize-none rounded-2xl border border-pink-100 bg-white px-3 py-2 text-sm font-bold leading-5 text-[#46394f] outline-none transition placeholder:text-[#b8aabd] focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
-              id="mood-note"
-              maxLength={180}
-              placeholder="可选"
-              value={moodNoteDraft}
-              onChange={(event) => setMoodNoteDraft(event.target.value)}
-            />
-          </label>
-          <button
-            id="mood-save-entry"
-            className="mt-3 w-full rounded-2xl bg-[#ff8fbc] px-4 py-2.5 text-sm font-black text-white shadow-sm shadow-pink-100 transition hover:bg-[#ff79ad]"
-            type="button"
-            onClick={addMoodEntry}
-          >
-            记录此刻
-          </button>
-          {moodStatus ? (
-            <p className="mt-2 rounded-2xl bg-white/80 px-3 py-2 text-xs font-black text-pink-700">
-              {moodStatus}
-            </p>
-          ) : null}
-        </section>
-
-        <div className="min-w-0" ref={moodTimelineRef}>
-          <MoodTimelineCard entries={selectedMoodEntries} selectedDate={selectedDate} />
-        </div>
+      <div className="mb-4 grid grid-cols-2 gap-1 rounded-2xl bg-[#f8f3fa] p-1" role="tablist">
+        <button
+          aria-selected={moodPanelMode === "mood"}
+          className={`rounded-xl px-3 py-2 text-sm font-black transition ${
+            moodPanelMode === "mood"
+              ? "bg-white text-pink-700 shadow-sm"
+              : "text-[#7a6b84] hover:bg-white/70"
+          }`}
+          role="tab"
+          type="button"
+          onClick={() => {
+            lockReflection();
+            setMoodPanelMode("mood");
+          }}
+        >
+          心情记录
+        </button>
+        <button
+          aria-selected={moodPanelMode === "reflection"}
+          className={`rounded-xl px-3 py-2 text-sm font-black transition ${
+            moodPanelMode === "reflection"
+              ? "bg-white text-violet-700 shadow-sm"
+              : "text-[#7a6b84] hover:bg-white/70"
+          }`}
+          role="tab"
+          type="button"
+          onClick={() => setMoodPanelMode("reflection")}
+        >
+          吾日三省吾身
+        </button>
       </div>
 
-      <section className="mt-4 rounded-[1.35rem] border border-slate-100 bg-[#fbf7fc] p-3">
-        <div className="mb-2 flex items-center justify-between gap-2">
-          <p className="text-sm font-black text-[#6f5d78]">记录明细</p>
-          <span className="rounded-full bg-white px-3 py-1 text-xs font-black text-[#7b6c84]">
-            {selectedMoodEntries.length} 条
-          </span>
-        </div>
-        {selectedMoodEntries.length > 0 ? (
-          <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
-            {[...selectedMoodEntries].reverse().map((entry) => {
-              const option = getMoodOption(entry.moodId);
+      {moodPanelMode === "mood" ? (
+        <>
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.3fr)]">
+            <section className="rounded-[1.35rem] border border-pink-100 bg-pink-50/70 p-3">
+              <p className="mb-2 text-sm font-black text-pink-700">记录此刻</p>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                {MOOD_OPTIONS.map((option) => {
+                  const isSelected = moodDraftId === option.id;
 
-              return (
-                <div
-                  className="flex flex-wrap items-center gap-2 rounded-2xl bg-white/85 px-3 py-2 text-xs font-black text-[#6f5d78]"
-                  key={entry.id}
+                  return (
+                    <button
+                      className={`flex min-h-16 flex-col items-center justify-center gap-1 rounded-2xl border px-2 py-2 text-center text-xs font-black transition ${
+                        isSelected
+                          ? `${option.toneClass} ring-2 ring-pink-200`
+                          : "border-white bg-white/80 text-[#6f5d78] hover:bg-white"
+                      }`}
+                      key={option.id}
+                      type="button"
+                      onClick={() => setMoodDraftId(option.id)}
+                    >
+                      <span className="text-xl leading-none">{option.icon}</span>
+                      <span>{option.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <label className="mt-3 block text-xs font-black text-[#6f5d78]" htmlFor="mood-note">
+                备注
+                <textarea
+                  className="mt-1.5 min-h-20 w-full resize-none rounded-2xl border border-pink-100 bg-white px-3 py-2 text-sm font-bold leading-5 text-[#46394f] outline-none transition placeholder:text-[#b8aabd] focus:border-pink-300 focus:ring-4 focus:ring-pink-100"
+                  id="mood-note"
+                  maxLength={180}
+                  placeholder="可选"
+                  value={moodNoteDraft}
+                  onChange={(event) => setMoodNoteDraft(event.target.value)}
+                />
+              </label>
+              <button
+                id="mood-save-entry"
+                className="mt-3 w-full rounded-2xl bg-[#ff8fbc] px-4 py-2.5 text-sm font-black text-white shadow-sm shadow-pink-100 transition hover:bg-[#ff79ad]"
+                type="button"
+                onClick={addMoodEntry}
+              >
+                记录此刻
+              </button>
+              {moodStatus ? (
+                <p className="mt-2 rounded-2xl bg-white/80 px-3 py-2 text-xs font-black text-pink-700">
+                  {moodStatus}
+                </p>
+              ) : null}
+            </section>
+
+            <div className="min-w-0" ref={moodTimelineRef}>
+              <MoodTimelineCard entries={selectedMoodEntries} selectedDate={selectedDate} />
+            </div>
+          </div>
+
+          <section className="mt-4 rounded-[1.35rem] border border-slate-100 bg-[#fbf7fc] p-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <p className="text-sm font-black text-[#6f5d78]">记录明细</p>
+              <span className="rounded-full bg-white px-3 py-1 text-xs font-black text-[#7b6c84]">
+                {selectedMoodEntries.length} 条
+              </span>
+            </div>
+            {selectedMoodEntries.length > 0 ? (
+              <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
+                {[...selectedMoodEntries].reverse().map((entry) => {
+                  const option = getMoodOption(entry.moodId);
+
+                  return (
+                    <div
+                      className="flex flex-wrap items-center gap-2 rounded-2xl bg-white/85 px-3 py-2 text-xs font-black text-[#6f5d78]"
+                      key={entry.id}
+                    >
+                      <span className={`rounded-full border px-2.5 py-1 ${option.toneClass}`}>
+                        {option.icon} {option.label}
+                      </span>
+                      <span>{formatClockTime(entry.timestamp)}</span>
+                      {entry.note ? <span className="min-w-0 flex-1 break-words">{entry.note}</span> : null}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="rounded-2xl bg-white/75 px-4 py-4 text-center text-sm font-black text-[#8b7b91]">
+                今天还没有心情记录
+              </div>
+            )}
+          </section>
+        </>
+      ) : selectedReflectionIsProtected && !isReflectionUnlocked ? (
+        reflectionLockedPanel
+      ) : reflectionSecurityAction ? (
+        reflectionSecurityPanel
+      ) : (
+        <div className="space-y-4">
+          <section className="flex flex-col gap-3 border-y border-violet-100 bg-[#fbf9ff] px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
+              <p className="text-sm font-black text-violet-700">
+                {selectedReflectionIsProtected ? "本篇已加密保护" : "本篇未上锁"}
+              </p>
+              {selectedReflectionIsProtected ? (
+                <p className="mt-1 text-xs font-bold text-[#85758d]">
+                  只有输入隐私密码才能再次查看；导出的 Word 也会要求密码。
+                </p>
+              ) : null}
+            </div>
+            <div className="flex shrink-0 flex-wrap gap-2">
+              {selectedReflectionIsProtected ? (
+                <>
+                  <button
+                    className="rounded-xl bg-violet-50 px-3 py-2 text-xs font-black text-violet-700 transition hover:bg-violet-100"
+                    type="button"
+                    onClick={() => openReflectionSecurityAction("change")}
+                  >
+                    修改密码
+                  </button>
+                  <button
+                    className="rounded-xl bg-white px-3 py-2 text-xs font-black text-violet-700 shadow-sm transition hover:bg-violet-50 disabled:opacity-50"
+                    disabled={isReflectionSecurityBusy}
+                    type="button"
+                    onClick={() => void unprotectSelectedReflection()}
+                  >
+                    解除本篇保护
+                  </button>
+                  <button
+                    className="rounded-xl bg-violet-600 px-3 py-2 text-xs font-black text-white transition hover:bg-violet-700"
+                    type="button"
+                    onClick={lockReflection}
+                  >
+                    立即上锁
+                  </button>
+                </>
+              ) : (
+                <button
+                  className="rounded-xl bg-violet-600 px-3 py-2 text-xs font-black text-white transition hover:bg-violet-700"
+                  disabled={
+                    isReflectionSecurityBusy ||
+                    (!selectedReflection?.title.trim() && !selectedReflection?.content.trim())
+                  }
+                  type="button"
+                  onClick={() => void protectSelectedReflection()}
                 >
-                  <span className={`rounded-full border px-2.5 py-1 ${option.toneClass}`}>
-                    {option.icon} {option.label}
-                  </span>
-                  <span>{formatClockTime(entry.timestamp)}</span>
-                  {entry.note ? <span className="min-w-0 flex-1 break-words">{entry.note}</span> : null}
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <div className="rounded-2xl bg-white/75 px-4 py-4 text-center text-sm font-black text-[#8b7b91]">
-            今天还没有心情记录
-          </div>
-        )}
-      </section>
+                  保护本篇
+                </button>
+              )}
+            </div>
+          </section>
+          <section>
+            <div className="mb-2 flex min-w-0 items-center gap-2">
+              <label
+                className="flex min-w-0 flex-1 items-center gap-3 rounded-[1.1rem] border border-violet-100 bg-[#fbf9ff] px-3 py-2 focus-within:border-violet-300 focus-within:ring-4 focus-within:ring-violet-100"
+                htmlFor="daily-reflection-title"
+              >
+                <span className="shrink-0 text-xs font-black text-violet-700">标题</span>
+                <input
+                  className="min-w-0 flex-1 bg-transparent text-lg font-black text-[#46394f] outline-none placeholder:text-[#b8aabd]"
+                  id="daily-reflection-title"
+                  maxLength={120}
+                  value={selectedReflection?.title ?? ""}
+                  onChange={(event) => updateReflectionTitle(event.target.value)}
+                />
+              </label>
+              <button
+                className="shrink-0 rounded-xl px-3 py-2 text-xs font-black text-rose-600 transition hover:bg-rose-50 disabled:opacity-40"
+                disabled={!selectedReflection?.content}
+                type="button"
+                onClick={clearReflection}
+              >
+                清空
+              </button>
+            </div>
+            <ReflectionEditor
+              clearVersion={reflectionClearVersion}
+              initialHtml={
+                selectedReflection?.contentHtml ??
+                plainTextToReflectionHtml(selectedReflection?.content ?? "")
+              }
+              insertRequest={null}
+              key={selectedDate}
+              onChange={updateReflectionContent}
+            />
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs font-bold text-[#85758d]">
+              <span>
+                {reflectionStatus ||
+                  (selectedReflection
+                    ? `已自动保存于 ${formatClockTime(selectedReflection.updatedAt)}`
+                    : "尚未记录")}
+              </span>
+              <span>{selectedReflection?.content.length ?? 0} / 20000 字符</span>
+            </div>
+          </section>
+
+          <section className="flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm font-black text-[#6f5d78]">导出当日日志</p>
+            <div className="flex">
+              <button
+                className="rounded-xl bg-sky-50 px-3 py-2 text-xs font-black text-sky-700 transition hover:bg-sky-100 disabled:opacity-50"
+                disabled={isReflectionExporting}
+                type="button"
+                onClick={() => {
+                  if (selectedReflectionIsProtected) {
+                    openReflectionSecurityAction("export");
+                    return;
+                  }
+
+                  void exportReflectionDocx();
+                }}
+              >
+                {selectedReflectionIsProtected ? "加密 Word" : "导出 Word"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </section>
   );
   const taskFormPanel = (
@@ -15213,9 +16840,22 @@ function App() {
                     onRefresh={() => refreshWeather({ force: true })}
                   />
                   <MoodWidget
-                    entryCount={selectedMoodEntries.length}
+                    hasReflection={Boolean(
+                      selectedReflectionIsProtected ||
+                        selectedReflection?.title.trim() ||
+                        selectedReflection?.content.trim(),
+                    )}
                     latestEntry={latestMoodEntry}
-                    onOpen={() => setIsMoodPanelOpen(true)}
+                    onOpenMood={() => {
+                      lockReflection();
+                      setMoodPanelMode("mood");
+                      setIsMoodPanelOpen(true);
+                    }}
+                    onOpenReflection={() => {
+                      setMoodPanelMode("reflection");
+                      setReflectionStatus("");
+                      setIsMoodPanelOpen(true);
+                    }}
                   />
                 </div>
               }
@@ -15503,7 +17143,23 @@ function App() {
                 className="fixed inset-0 z-[9999] flex items-center justify-center overflow-y-auto bg-[#2d2433]/45 px-4 py-5 backdrop-blur-sm"
                 exit={{ opacity: 0 }}
                 initial={{ opacity: 0 }}
-                onClick={() => setIsMoodPanelOpen(false)}
+                onPointerCancel={() => {
+                  moodBackdropPointerStartedOutside.current = false;
+                }}
+                onPointerDown={(event) => {
+                  moodBackdropPointerStartedOutside.current =
+                    event.target === event.currentTarget;
+                }}
+                onPointerUp={(event) => {
+                  const shouldClose =
+                    moodBackdropPointerStartedOutside.current &&
+                    event.target === event.currentTarget;
+                  moodBackdropPointerStartedOutside.current = false;
+                  if (shouldClose) {
+                    lockReflection();
+                    setIsMoodPanelOpen(false);
+                  }
+                }}
               >
                 <motion.div
                   animate={{ opacity: 1, scale: 1, y: 0 }}

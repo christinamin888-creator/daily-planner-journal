@@ -36,6 +36,70 @@ button:disabled {
   cursor: not-allowed;
 }
 
+.reflection-rich-editor-content {
+  min-height: 22rem;
+  padding: 1rem;
+  color: #46394f;
+  font-size: 15px;
+  font-synthesis: weight style;
+  font-weight: 400;
+  line-height: 1.75;
+  outline: none;
+  overflow-wrap: anywhere;
+}
+
+.reflection-rich-editor-content strong,
+.reflection-rich-editor-content b {
+  font-weight: 800;
+}
+
+.reflection-rich-editor-content p,
+.reflection-rich-editor-content h1,
+.reflection-rich-editor-content h2,
+.reflection-rich-editor-content h3 {
+  margin-top: 0;
+}
+
+.reflection-rich-editor-content h1 {
+  font-size: 2rem;
+  font-weight: 800;
+  line-height: 1.3;
+}
+
+.reflection-rich-editor-content h2 {
+  font-size: 1.5rem;
+  font-weight: 800;
+  line-height: 1.4;
+}
+
+.reflection-rich-editor-content h3 {
+  font-size: 1.2rem;
+  font-weight: 800;
+  line-height: 1.5;
+}
+
+.reflection-rich-editor-content ul,
+.reflection-rich-editor-content ol {
+  margin: 0.75rem 0;
+  padding-left: 1.5rem;
+}
+
+.reflection-rich-editor-content ul {
+  list-style: disc;
+}
+
+.reflection-rich-editor-content ol {
+  list-style: decimal;
+}
+
+.reflection-rich-editor-content p.is-editor-empty:first-child::before {
+  float: left;
+  height: 0;
+  color: #b8aabd;
+  content: attr(data-placeholder);
+  pointer-events: none;
+}
+
 .time-stats-export-mode {
   width: 1120px !important;
   max-width: 1120px !important;
