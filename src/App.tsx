@@ -3999,10 +3999,31 @@ function getComplexProjectsForPayload(complexProjectBook: ComplexProjectBook): C
   return Object.values(normalizeComplexProjectBook(complexProjectBook));
 }
 
+function filterDeletedComplexProjects(
+  complexProjectBook: ComplexProjectBook,
+  deletedItemIds: string[],
+): ComplexProjectBook {
+  const deletedIdSet = new Set(deletedItemIds);
+
+  return Object.entries(normalizeComplexProjectBook(complexProjectBook)).reduce<ComplexProjectBook>(
+    (result, [projectId, project]) => {
+      if (!deletedIdSet.has(projectId)) {
+        result[projectId] = project;
+      }
+
+      return result;
+    },
+    {},
+  );
+}
+
 function loadComplexProjectBook(): ComplexProjectBook {
   try {
     const rawData = window.localStorage.getItem(COMPLEX_PROJECTS_KEY);
-    return normalizeComplexProjectBook(rawData ? JSON.parse(rawData) : {});
+    return filterDeletedComplexProjects(
+      normalizeComplexProjectBook(rawData ? JSON.parse(rawData) : {}),
+      loadDeletedItemIds(),
+    );
   } catch {
     return {};
   }
@@ -4486,21 +4507,25 @@ function mergeUserProfiles(localUserProfile: UserProfile, cloudUserProfile: User
 function mergeComplexProjectBooks(
   localComplexProjectBook: ComplexProjectBook,
   cloudComplexProjectBook: ComplexProjectBook,
+  deletedItemIds: string[] = [],
 ): ComplexProjectBook {
-  return normalizeComplexProjectBook({
-    ...cloudComplexProjectBook,
-    ...localComplexProjectBook,
-    ...Object.values(cloudComplexProjectBook).reduce<ComplexProjectBook>((merged, cloudProject) => {
-      const localProject = localComplexProjectBook[cloudProject.id];
+  return filterDeletedComplexProjects(
+    normalizeComplexProjectBook({
+      ...cloudComplexProjectBook,
+      ...localComplexProjectBook,
+      ...Object.values(cloudComplexProjectBook).reduce<ComplexProjectBook>((merged, cloudProject) => {
+        const localProject = localComplexProjectBook[cloudProject.id];
 
-      merged[cloudProject.id] =
-        !localProject || getComplexProjectTime(cloudProject) > getComplexProjectTime(localProject)
-          ? cloudProject
-          : localProject;
+        merged[cloudProject.id] =
+          !localProject || getComplexProjectTime(cloudProject) > getComplexProjectTime(localProject)
+            ? cloudProject
+            : localProject;
 
-      return merged;
-    }, {}),
-  });
+        return merged;
+      }, {}),
+    }),
+    deletedItemIds,
+  );
 }
 
 function createCloudPayload(
@@ -10591,6 +10616,7 @@ function App() {
         const mergedComplexProjectBook = mergeComplexProjectBooks(
           localComplexProjectBook,
           normalizeComplexProjectBook(cloudPayload.complexProjects),
+          nextDeletedItemIds,
         );
         const mergedPlanBook = mergePlanBooks(
           localPlanBook,
@@ -12282,6 +12308,66 @@ function App() {
     setComplexProjectPhaseMessage("项目已归档，不再显示在每日任务看板上方");
   };
 
+  const deleteComplexProject = (projectId: string) => {
+    const project = complexProjectBook[projectId];
+
+    if (!project) {
+      return;
+    }
+
+    const hasRunningTimer = project.phases.some((phase) =>
+      phase.timeEntries.some((entry) => !entry.endedAt),
+    );
+    const conversionWarning = project.sourceTaskId
+      ? "\n该项目由简单任务转换而来，删除后原简单任务不会恢复。"
+      : "";
+    const timerWarning = hasRunningTimer ? "\n项目中有正在计时的阶段，也会一并删除。" : "";
+
+    if (
+      !window.confirm(
+        `永久删除复杂项目“${project.title}”？\n项目、全部阶段和计时记录都会删除，且无法恢复。${conversionWarning}${timerWarning}`,
+      )
+    ) {
+      return;
+    }
+
+    setComplexProjectBook((currentBook) => {
+      if (!currentBook[projectId]) {
+        return currentBook;
+      }
+
+      const nextBook = { ...currentBook };
+      delete nextBook[projectId];
+      return normalizeComplexProjectBook(nextBook);
+    });
+    setDeletedItemIds((currentIds) => uniqueValues([...currentIds, projectId]));
+
+    if (editingComplexProjectId === projectId) {
+      resetComplexProjectForm();
+    }
+    if (complexProjectPhaseEdit?.projectId === projectId) {
+      resetComplexProjectPhaseForm();
+    }
+    if (phaseTimeDetailTarget?.projectId === projectId) {
+      setPhaseTimeDetailTarget(null);
+    }
+    if (ganttPreviewProjectId === projectId) {
+      setGanttPreviewProjectId(null);
+    }
+    if (ganttExportProjectId === projectId) {
+      setGanttExportProjectId(null);
+    }
+    if (complexProjectFeedback?.projectId === projectId) {
+      if (complexProjectFeedbackTimer.current) {
+        window.clearTimeout(complexProjectFeedbackTimer.current);
+        complexProjectFeedbackTimer.current = null;
+      }
+      setComplexProjectFeedback(null);
+    }
+
+    setComplexProjectPhaseMessage(`“${project.title}”已永久删除，阶段和计时记录已一并移除`);
+  };
+
   const clearTimerNotice = () => {
     if (timerNoticeTimer.current) {
       window.clearTimeout(timerNoticeTimer.current);
@@ -12470,6 +12556,7 @@ function App() {
       const mergedComplexProjectBook = mergeComplexProjectBooks(
         latestComplexProjectBook.current,
         normalizeComplexProjectBook(cloudPayload.complexProjects),
+        nextDeletedItemIds,
       );
       const mergedPlanBook = mergePlanBooks(
         latestPlanBook.current,
@@ -16134,6 +16221,13 @@ function App() {
                     </>
                   ) : null}
                   <button
+                    className="rounded-full bg-rose-50 px-3 py-1.5 text-xs font-black text-rose-600 transition hover:bg-rose-100 focus:outline-none focus:ring-4 focus:ring-rose-100"
+                    type="button"
+                    onClick={() => deleteComplexProject(project.id)}
+                  >
+                    删除项目
+                  </button>
+                  <button
                     className="rounded-full bg-amber-100 px-3 py-1.5 text-xs font-black text-amber-800 transition hover:bg-amber-200"
                     type="button"
                     onClick={() =>
@@ -18241,6 +18335,13 @@ function App() {
                           </div>
                         ) : null}
                         <div className="mt-2 flex flex-wrap gap-1.5">
+                          <button
+                            className="rounded-full bg-rose-50 px-2.5 py-1 text-xs font-black text-rose-600 transition hover:bg-rose-100 focus:outline-none focus:ring-4 focus:ring-rose-100"
+                            type="button"
+                            onClick={() => deleteComplexProject(project.id)}
+                          >
+                            删除项目
+                          </button>
                           <button
                             className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-black text-amber-800 transition hover:bg-amber-200"
                             type="button"
