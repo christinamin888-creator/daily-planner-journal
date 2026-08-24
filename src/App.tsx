@@ -364,6 +364,9 @@ type ComplexProjectPhase = {
   startDate: string;
   endDate: string;
   completed: boolean;
+  targetMinutes?: number;
+  actualMinutes?: number;
+  manualActualDate?: string;
   timeEntries: ComplexProjectPhaseTimeEntry[];
   completedAt?: number;
   updatedAt?: number;
@@ -1425,6 +1428,37 @@ function createComplexProjectFormFromProject(project: ComplexProject): ComplexPr
     note: project.note,
     startDate: project.startDate,
     endDate: project.endDate,
+  };
+}
+
+function getTaskConversionDateRange(item: PlanItem, referenceDate: string) {
+  const dates = [
+    getTaskCreatedDateValue(item),
+    item.date,
+    referenceDate,
+    ...getTaskTimeEntries(item).map((entry) => entry.date),
+  ].filter(Boolean);
+  const sortedDates = dates.sort((left, right) => left.localeCompare(right));
+
+  return {
+    startDate: sortedDates[0] ?? item.date,
+    endDate: sortedDates[sortedDates.length - 1] ?? item.date,
+  };
+}
+
+function createComplexProjectFormFromTask(
+  item: PlanItem,
+  referenceDate: string,
+): ComplexProjectForm {
+  const { endDate, startDate } = getTaskConversionDateRange(item, referenceDate);
+
+  return {
+    title: item.title,
+    category: item.category,
+    priority: normalizePriority(item.priority),
+    note: item.note,
+    startDate,
+    endDate,
   };
 }
 
@@ -3863,6 +3897,9 @@ function normalizeComplexProjectPhase(
     startDate,
     endDate,
     completed: value.completed === true,
+    targetMinutes: normalizeMinutes(value.targetMinutes),
+    actualMinutes: normalizeMinutes(value.actualMinutes),
+    manualActualDate: normalizeDateInputString(value.manualActualDate, "") || undefined,
     timeEntries,
     ...(completedAt ? { completedAt } : {}),
     ...(updatedAt ? { updatedAt } : {}),
@@ -4665,10 +4702,13 @@ function getComplexProjectPhaseTotalSeconds(
   phase: ComplexProjectPhase,
   now = Date.now(),
 ): number {
-  return phase.timeEntries.reduce(
+  const timerSeconds = phase.timeEntries.reduce(
     (totalSeconds, entry) => totalSeconds + getComplexProjectPhaseEntrySeconds(entry, now),
     0,
   );
+  const manualActualSeconds = (phase.actualMinutes ?? 0) * 60;
+
+  return manualActualSeconds > 0 ? manualActualSeconds : timerSeconds;
 }
 
 function getComplexProjectPhaseSecondsForDate(
@@ -4676,9 +4716,33 @@ function getComplexProjectPhaseSecondsForDate(
   dateValue: string,
   now = Date.now(),
 ): number {
-  return phase.timeEntries
+  const timerSecondsForDate = phase.timeEntries
     .filter((entry) => entry.date === dateValue)
     .reduce((totalSeconds, entry) => totalSeconds + getComplexProjectPhaseEntrySeconds(entry, now), 0);
+  const totalTimerSeconds = phase.timeEntries.reduce(
+    (totalSeconds, entry) => totalSeconds + getComplexProjectPhaseEntrySeconds(entry, now),
+    0,
+  );
+  const manualActualSeconds = (phase.actualMinutes ?? 0) * 60;
+
+  if (manualActualSeconds <= 0) {
+    return timerSecondsForDate;
+  }
+
+  const manualAccountingDate = phase.manualActualDate || phase.endDate;
+
+  if (totalTimerSeconds <= 0) {
+    return dateValue === manualAccountingDate ? manualActualSeconds : 0;
+  }
+
+  if (manualActualSeconds >= totalTimerSeconds) {
+    const supplementalSeconds =
+      dateValue === manualAccountingDate ? manualActualSeconds - totalTimerSeconds : 0;
+
+    return timerSecondsForDate + supplementalSeconds;
+  }
+
+  return Math.round(timerSecondsForDate * (manualActualSeconds / totalTimerSeconds));
 }
 
 function getComplexProjectTotalSeconds(project: ComplexProject, now = Date.now()): number {
@@ -9680,6 +9744,7 @@ function App() {
     createEmptyComplexProjectForm(selectedDate),
   );
   const [editingComplexProjectId, setEditingComplexProjectId] = useState<string | null>(null);
+  const [convertingTaskId, setConvertingTaskId] = useState<string | null>(null);
   const [isComplexProjectFormOpen, setIsComplexProjectFormOpen] = useState<boolean>(false);
   const [complexProjectFormError, setComplexProjectFormError] = useState<string>("");
   const [complexProjectPhaseForm, setComplexProjectPhaseForm] =
@@ -11276,6 +11341,7 @@ function App() {
   const resetComplexProjectForm = (dateValue = selectedDate) => {
     setComplexProjectForm(createEmptyComplexProjectForm(dateValue));
     setEditingComplexProjectId(null);
+    setConvertingTaskId(null);
     setComplexProjectFormError("");
     setIsComplexProjectFormOpen(false);
   };
@@ -11328,6 +11394,33 @@ function App() {
     setIsComplexProjectFormOpen(true);
   };
 
+  const startTaskConversion = (item: PlanItem) => {
+    if (item.completed) {
+      showTimerNotice("已完成任务无需转换为复杂项目");
+      return;
+    }
+
+    const existingProject = complexProjects.find(
+      (project) => project.sourceTaskId === item.id,
+    );
+
+    if (existingProject) {
+      setActiveWorkspaceTab("projects");
+      setComplexProjectPhaseMessage(`“${item.title}”已经转换为复杂项目`);
+      return;
+    }
+
+    resetForm();
+    resetComplexProjectPhaseForm();
+    setComplexProjectPhaseMessage("");
+    setEditingComplexProjectId(null);
+    setConvertingTaskId(item.id);
+    setComplexProjectForm(createComplexProjectFormFromTask(item, today));
+    setComplexProjectFormError("");
+    setIsComplexProjectFormOpen(true);
+    setActiveWorkspaceTab("projects");
+  };
+
   const openNewComplexProjectPhaseForm = (project: ComplexProject) => {
     setActiveWorkspaceTab("projects");
     resetForm();
@@ -11361,6 +11454,9 @@ function App() {
     const startDate = complexProjectForm.startDate;
     const endDate = complexProjectForm.endDate;
     const updatedAt = Date.now();
+    const sourceTask = convertingTaskId
+      ? allPlans.find((item) => item.id === convertingTaskId) ?? null
+      : null;
 
     if (!title) {
       setComplexProjectFormError("项目标题不能为空");
@@ -11376,6 +11472,18 @@ function App() {
       setComplexProjectFormError("开始日期不能晚于结束日期");
       return;
     }
+
+    if (convertingTaskId && !sourceTask) {
+      setComplexProjectFormError("原简单任务不存在，无法完成转换");
+      return;
+    }
+
+    if (sourceTask?.completed) {
+      setComplexProjectFormError("已完成任务不能转换为复杂项目");
+      return;
+    }
+
+    const nextProjectId = createId();
 
     setComplexProjectBook((currentBook) => {
       if (editingComplexProjectId) {
@@ -11400,16 +11508,49 @@ function App() {
         });
       }
 
+      if (
+        sourceTask &&
+        Object.values(currentBook).some((project) => project.sourceTaskId === sourceTask.id)
+      ) {
+        return currentBook;
+      }
+
+      const conversionRange = sourceTask
+        ? getTaskConversionDateRange(sourceTask, today)
+        : null;
+      const projectStartDate = conversionRange && conversionRange.startDate < startDate
+        ? conversionRange.startDate
+        : startDate;
+      const projectEndDate = conversionRange && conversionRange.endDate > endDate
+        ? conversionRange.endDate
+        : endDate;
+      const migratedPhase: ComplexProjectPhase | null = sourceTask && conversionRange
+        ? {
+            id: createId(),
+            title: sourceTask.title.slice(0, 64),
+            note: "",
+            startDate: conversionRange.startDate,
+            endDate: conversionRange.endDate,
+            completed: false,
+            targetMinutes: sourceTask.targetMinutes,
+            actualMinutes: sourceTask.actualMinutes,
+            manualActualDate: getTaskCompletedDateValue(sourceTask) ?? sourceTask.date,
+            timeEntries: getTaskTimeEntries(sourceTask).map((entry) => ({ ...entry })),
+            updatedAt,
+          }
+        : null;
+
       const nextProject: ComplexProject = {
-        id: createId(),
+        id: nextProjectId,
         title,
         category,
         priority,
         note,
-        startDate,
-        endDate,
+        startDate: projectStartDate,
+        endDate: projectEndDate,
         status: "active",
-        phases: [],
+        phases: migratedPhase ? [migratedPhase] : [],
+        ...(sourceTask ? { sourceTaskId: sourceTask.id } : {}),
         createdAt: updatedAt,
         updatedAt,
       };
@@ -11419,6 +11560,42 @@ function App() {
         [nextProject.id]: nextProject,
       });
     });
+
+    if (sourceTask) {
+      setPlansByDate((currentBook) =>
+        Object.entries(currentBook).reduce<PlanBook>((nextBook, [date, items]) => {
+          const remainingItems = items.filter((item) => item.id !== sourceTask.id);
+
+          if (remainingItems.length > 0) {
+            nextBook[date] = remainingItems;
+          }
+
+          return nextBook;
+        }, {}),
+      );
+      setDeletedItemIds((current) => uniqueValues([...current, sourceTask.id]));
+      setTaskTimersByTaskId((currentTimers) => {
+        if (!currentTimers[sourceTask.id]) {
+          return currentTimers;
+        }
+
+        const nextTimers = { ...currentTimers };
+        delete nextTimers[sourceTask.id];
+        return nextTimers;
+      });
+      setTaskTimeDetailTarget((currentTarget) =>
+        currentTarget?.itemId === sourceTask.id ? null : currentTarget,
+      );
+      setHistoricalTaskCompletion((currentCompletion) =>
+        currentCompletion?.itemId === sourceTask.id ? null : currentCompletion,
+      );
+      cancelTaskInlineEdit();
+      cancelTaskReschedule();
+      setActualEditId(null);
+      setComplexProjectPhaseMessage(
+        `“${sourceTask.title}”已转为复杂项目，原计时记录已迁入首个阶段`,
+      );
+    }
     resetComplexProjectForm();
   };
 
@@ -11475,6 +11652,15 @@ function App() {
       startDate,
       endDate,
       completed: complexProjectPhaseForm.completed,
+      ...(existingPhase?.targetMinutes
+        ? { targetMinutes: existingPhase.targetMinutes }
+        : {}),
+      ...(existingPhase?.actualMinutes
+        ? { actualMinutes: existingPhase.actualMinutes }
+        : {}),
+      ...(existingPhase?.manualActualDate
+        ? { manualActualDate: existingPhase.manualActualDate }
+        : {}),
       timeEntries: existingPhase?.timeEntries ?? [],
       ...(completedAt ? { completedAt } : {}),
       updatedAt,
@@ -15431,6 +15617,15 @@ function App() {
                           登记完成
                         </button>
                       ) : null}
+                      {!item.completed ? (
+                        <button
+                          className="rounded-full bg-amber-50 px-3 py-1.5 text-xs font-black text-amber-800 shadow-sm transition hover:bg-amber-100 focus:outline-none focus:ring-4 focus:ring-amber-100"
+                          type="button"
+                          onClick={() => startTaskConversion(item)}
+                        >
+                          转为复杂项目
+                        </button>
+                      ) : null}
                       <button
                         className="rounded-full bg-white px-3 py-1.5 text-xs font-black text-sky-700 shadow-sm transition hover:bg-sky-50 focus:outline-none focus:ring-4 focus:ring-sky-100"
                         type="button"
@@ -15602,6 +15797,14 @@ function App() {
           className="mb-5 space-y-2.5 rounded-[1.5rem] border border-amber-100 bg-amber-50/70 p-4"
           onSubmit={handleComplexProjectSubmit}
         >
+          {convertingTaskId ? (
+            <div className="flex flex-col gap-1 rounded-2xl border border-amber-200 bg-white/85 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-sm font-black text-amber-800">将简单任务转为复杂项目</p>
+              <p className="text-xs font-bold text-[#7b6c84]">
+                原任务会成为首个阶段，备注与计时记录将一并保留
+              </p>
+            </div>
+          ) : null}
           <div className="grid gap-3 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,0.8fr)_minmax(0,0.8fr)]">
             <label
               className="min-w-0 text-xs font-black text-[#6f5d78]"
@@ -15756,7 +15959,11 @@ function App() {
               disabled={!complexProjectForm.title.trim()}
               type="submit"
             >
-              {editingComplexProjectId ? "保存项目" : "创建项目"}
+              {editingComplexProjectId
+                ? "保存项目"
+                : convertingTaskId
+                  ? "确认转换"
+                  : "创建项目"}
             </button>
           </div>
         </form>
@@ -15812,6 +16019,11 @@ function App() {
                       >
                         {getComplexProjectStatusLabel(project.status)}
                       </span>
+                      {project.sourceTaskId ? (
+                        <span className="rounded-full bg-amber-50 px-2.5 py-1 text-amber-800">
+                          简单任务转入
+                        </span>
+                      ) : null}
                     </div>
                     <h3 className="break-words text-xl font-black text-[#3f3349]">
                       {project.title}
@@ -16166,6 +16378,20 @@ function App() {
                                 {formatDisplayDate(phase.startDate)} -{" "}
                                 {formatDisplayDate(phase.endDate)}
                               </p>
+                              {phase.targetMinutes || phase.actualMinutes ? (
+                                <div className="mt-1 flex flex-wrap gap-1 text-[10px] font-black text-[#7b6c84]">
+                                  {phase.targetMinutes ? (
+                                    <span className="rounded-full bg-amber-50 px-2 py-0.5">
+                                      原目标 {formatDashboardMinutes(phase.targetMinutes)}
+                                    </span>
+                                  ) : null}
+                                  {phase.actualMinutes ? (
+                                    <span className="rounded-full bg-sky-50 px-2 py-0.5 text-sky-700">
+                                      手动实际 {formatDashboardMinutes(phase.actualMinutes)}
+                                    </span>
+                                  ) : null}
+                                </div>
+                              ) : null}
                             </div>
                             <span
                               className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-black ${
@@ -19516,18 +19742,27 @@ function App() {
                               </button>
                               <div className="inline-flex shrink-0 flex-wrap items-center gap-1">
                                 {!item.completed ? (
-                                  <button
-                                    aria-expanded={isTaskRescheduling}
-                                    className={`inline-flex min-h-7 items-center rounded-full px-1.5 py-0.5 text-[11px] font-bold leading-5 transition ${
-                                      isTaskRescheduling
-                                        ? "bg-amber-100 text-amber-800"
-                                        : "bg-white/80 text-[#6c5e75] hover:bg-white"
-                                    }`}
-                                    type="button"
-                                    onClick={() => startTaskReschedule(item)}
-                                  >
-                                    改期
-                                  </button>
+                                  <>
+                                    <button
+                                      aria-expanded={isTaskRescheduling}
+                                      className={`inline-flex min-h-7 items-center rounded-full px-1.5 py-0.5 text-[11px] font-bold leading-5 transition ${
+                                        isTaskRescheduling
+                                          ? "bg-amber-100 text-amber-800"
+                                          : "bg-white/80 text-[#6c5e75] hover:bg-white"
+                                      }`}
+                                      type="button"
+                                      onClick={() => startTaskReschedule(item)}
+                                    >
+                                      改期
+                                    </button>
+                                    <button
+                                      className="inline-flex min-h-7 items-center rounded-full bg-amber-50 px-1.5 py-0.5 text-[11px] font-bold leading-5 text-amber-800 transition hover:bg-amber-100 focus:outline-none focus:ring-4 focus:ring-amber-100"
+                                      type="button"
+                                      onClick={() => startTaskConversion(item)}
+                                    >
+                                      转为复杂
+                                    </button>
+                                  </>
                                 ) : null}
                                 <button
                                   className="inline-flex min-h-7 items-center rounded-full bg-white/80 px-1 py-0.5 text-[11px] font-bold leading-5 text-[#6c5e75] transition hover:bg-white"
