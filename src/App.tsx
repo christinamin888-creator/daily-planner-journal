@@ -25,9 +25,12 @@ import {
   signOut,
   signUp,
   updatePassword,
-  upsertDailyPlannerUserData,
+  saveDailyPlannerUserData,
 } from "./lib/supabase";
 import type { User as SupabaseUser } from "@supabase/supabase-js";
+import { CloudDownload, Download, RefreshCw } from "lucide-react";
+import { PlannerSyncSession, readCheckpoint, writeCheckpoint, acquireSyncWindow } from "./lib/plannerSyncSession";
+import { sameSnapshot } from "../shared/plannerSync";
 
 const primaryBearNoteSticker = new URL("./assets/export-stickers/primary-bear-note.png", import.meta.url).href;
 const primaryBookPencilSticker = new URL("./assets/export-stickers/primary-book-pencil.png", import.meta.url).href;
@@ -441,6 +444,7 @@ type TaskDropTarget = {
   placement: TaskDropPlacement;
 };
 type CloudPayload = {
+  [key: string]: unknown;
   plansByDate: PlanBook;
   deletedItemIds: string[];
   customCategories: CustomCategory[];
@@ -4334,6 +4338,7 @@ function normalizePayload(payload: unknown): CloudPayload {
     const cloudPayload = payload as Partial<CloudPayload>;
 
     return {
+      ...cloudPayload,
       plansByDate: normalizePlanBook((cloudPayload.plansByDate ?? {}) as PlanBook),
       deletedItemIds: Array.isArray(cloudPayload.deletedItemIds)
         ? cloudPayload.deletedItemIds
@@ -4343,7 +4348,8 @@ function normalizePayload(payload: unknown): CloudPayload {
         normalizeComplexProjectBook(cloudPayload.complexProjects),
       ),
       moodBook: normalizeMoodBook(cloudPayload.moodBook),
-      reflectionBook: normalizeReflectionBook(cloudPayload.reflectionBook),
+      reflectionBook: getPublicReflectionBook(normalizeReflectionBook(cloudPayload.reflectionBook),
+        isReflectionVault(cloudPayload.reflectionVault) ? cloudPayload.reflectionVault : null),
       reflectionVault: isReflectionVault(cloudPayload.reflectionVault)
         ? cloudPayload.reflectionVault
         : null,
@@ -9858,6 +9864,7 @@ function App() {
   const [isAuthBusy, setIsAuthBusy] = useState<boolean>(false);
   const [isAuthChecking, setIsAuthChecking] = useState<boolean>(() => isSupabaseConfigured);
   const [isCloudSaving, setIsCloudSaving] = useState<boolean>(false);
+  const [cloudReloadVersion, setCloudReloadVersion] = useState(0);
   const [isMoodPanelOpen, setIsMoodPanelOpen] = useState<boolean>(false);
   const [moodPanelMode, setMoodPanelMode] = useState<MoodPanelMode>("mood");
   const [moodDraftId, setMoodDraftId] = useState<MoodId>(DEFAULT_MOOD_ID);
@@ -9891,11 +9898,15 @@ function App() {
   const highlightedTaskTimer = useRef<number | null>(null);
   const cloudTimer = useRef<number | null>(null);
   const reflectionEncryptionSequence = useRef<number>(0);
+  const reflectionEncryptionPending = useRef(false);
   const reflectionLockInProgress = useRef<boolean>(false);
   const reflectionVaultKey = useRef<CryptoKey | null>(null);
   const weatherPermissionDenied = useRef<boolean>(false);
   const skipInlineBlurSave = useRef<boolean>(false);
   const cloudReady = useRef<boolean>(false);
+  const cloudSession = useRef<PlannerSyncSession<CloudPayload> | null>(null);
+  const cloudExtras = useRef<Partial<CloudPayload>>({});
+  const cloudDiscardLocal = useRef(false);
   const latestPlanBook = useRef<PlanBook>(plansByDate);
   const latestComplexProjectBook = useRef<ComplexProjectBook>(complexProjectBook);
   const latestMoodBook = useRef<MoodBook>(moodBook);
@@ -9905,6 +9916,73 @@ function App() {
   const latestDeletedItemIds = useRef<string[]>(deletedItemIds);
   const latestCustomCategories = useRef<CustomCategory[]>(customCategories);
   const currentUserId = currentUser?.id ?? null;
+  const latestCloudUserId = useRef(currentUserId);
+  latestCloudUserId.current = currentUserId;
+  latestPlanBook.current = plansByDate;
+  latestComplexProjectBook.current = complexProjectBook;
+  latestMoodBook.current = moodBook;
+  latestReflectionBook.current = reflectionBook;
+  latestReflectionVault.current = reflectionVault;
+  latestUserProfile.current = userProfile;
+  latestDeletedItemIds.current = deletedItemIds;
+  latestCustomCategories.current = customCategories;
+
+  const currentCloudSnapshot = (): CloudPayload => ({
+    ...cloudExtras.current,
+    ...createCloudPayload(latestPlanBook.current, latestDeletedItemIds.current,
+      latestCustomCategories.current, latestComplexProjectBook.current,
+      latestMoodBook.current, latestReflectionBook.current, latestReflectionVault.current,
+      latestUserProfile.current),
+  });
+  const applyCloudSnapshot = (snapshot: CloudPayload) => {
+    const next = normalizePayload(snapshot);
+    const vaultChanged = !sameSnapshot(latestReflectionVault.current, next.reflectionVault);
+    const reflections = !vaultChanged && reflectionVaultKey.current
+      ? { ...next.reflectionBook, ...getProtectedReflectionBook(latestReflectionBook.current, latestReflectionVault.current) }
+      : next.reflectionBook;
+    if (vaultChanged) {
+      reflectionEncryptionSequence.current++;
+      reflectionEncryptionPending.current = false;
+      reflectionVaultKey.current = null;
+      setIsReflectionUnlocked(!next.reflectionVault);
+    }
+    cloudExtras.current = next;
+    latestPlanBook.current = next.plansByDate;
+    latestComplexProjectBook.current = normalizeComplexProjectBook(next.complexProjects);
+    latestMoodBook.current = next.moodBook;
+    latestReflectionBook.current = reflections;
+    latestReflectionVault.current = next.reflectionVault;
+    latestUserProfile.current = next.userProfile;
+    latestDeletedItemIds.current = next.deletedItemIds;
+    latestCustomCategories.current = next.customCategories;
+    setPlansByDate(next.plansByDate);
+    setComplexProjectBook(latestComplexProjectBook.current);
+    setMoodBook(next.moodBook);
+    setReflectionBook(reflections);
+    setReflectionVault(next.reflectionVault);
+    setUserProfile(next.userProfile);
+    setDeletedItemIds(next.deletedItemIds);
+    setCustomCategories(next.customCategories);
+  };
+  const installCloudSession = (userId: string, base: CloudPayload, local: CloudPayload) => {
+    const session: PlannerSyncSession<CloudPayload> = new PlannerSyncSession(userId, { base, local }, {
+      read: async id => (await getDailyPlannerUserData(id))?.payload ?? null,
+      save: async (id, expectedPayload, payload) => saveDailyPlannerUserData({ userId: id, expectedPayload, payload }),
+      normalize: normalizePayload,
+      current: () => {
+        if (reflectionEncryptionPending.current) throw new Error('正在加密保存日志，请稍后同步。');
+        return currentCloudSnapshot();
+      },
+      apply: next => { if (!sameSnapshot(currentCloudSnapshot(), next)) applyCloudSnapshot(next); },
+      persist: checkpoint => writeCheckpoint(window.localStorage, userId, checkpoint),
+      active: () => cloudSession.current === session && latestCloudUserId.current === userId,
+    });
+    writeCheckpoint(window.localStorage, userId, { base, local });
+    cloudSession.current = session;
+    applyCloudSnapshot(local);
+    cloudReady.current = true;
+    return session;
+  };
   const selectedAvatar = getAvatarOption(userProfile.avatarId);
   const ganttExportProject = ganttExportProjectId
     ? complexProjectBook[ganttExportProjectId] ?? null
@@ -10344,6 +10422,7 @@ function App() {
     const key = reflectionVaultKey.current;
     const sequence = ++reflectionEncryptionSequence.current;
     const protectedBook = getProtectedReflectionBook(reflectionBook, reflectionVault);
+    reflectionEncryptionPending.current = true;
 
     void encryptReflectionData(protectedBook, {
       iterations: reflectionVault.iterations,
@@ -10356,11 +10435,13 @@ function App() {
         }
 
         const nextVault = withReflectionProtectedDates(vault, protectedDates);
+        reflectionEncryptionPending.current = false;
         latestReflectionVault.current = nextVault;
         setReflectionVault(nextVault);
       })
       .catch(() => {
         if (sequence === reflectionEncryptionSequence.current) {
+          reflectionEncryptionPending.current = false;
           setReflectionStatus("加密保存失败，请稍后重试");
         }
       });
@@ -10421,6 +10502,20 @@ function App() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!complexProjectPhaseMessage) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setComplexProjectPhaseMessage("");
+    }, 3200);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [complexProjectPhaseMessage]);
 
   useEffect(() => {
     const hasRunningTaskTimer = Object.values(plansByDate).some((items) =>
@@ -10568,156 +10663,63 @@ function App() {
   }, []);
 
   useEffect(() => {
+    cloudReady.current = false;
+    cloudSession.current = null;
+    if (cloudTimer.current) { window.clearTimeout(cloudTimer.current); cloudTimer.current = null; }
     if (!currentUserId) {
-      cloudReady.current = false;
-      if (cloudTimer.current) {
-        window.clearTimeout(cloudTimer.current);
-        cloudTimer.current = null;
-      }
       setCloudStatus(isSupabaseConfigured ? "未登录，本地模式" : "Supabase 环境变量未配置，本地模式");
       return;
     }
-
     let isCancelled = false;
-
+    let releaseWindow: (() => void) | undefined;
     const loadCloudData = async () => {
-      if (!isSupabaseConfigured) {
-        setCloudStatus("Supabase 环境变量未配置，本地模式");
-        return;
-      }
-
-      cloudReady.current = false;
       setIsCloudSaving(true);
-      setCloudStatus("正在合并云端数据...");
-
+      setCloudStatus("正在读取云端记录...");
       try {
+        releaseWindow = await acquireSyncWindow(navigator.locks, currentUserId);
+        if (isCancelled) { releaseWindow(); return; }
         const cloudRecord = await getDailyPlannerUserData(currentUserId);
-        const cloudPayload = normalizePayload(cloudRecord?.payload);
-        const localPlanBook = normalizePlanBook(latestPlanBook.current);
-        const localComplexProjectBook = normalizeComplexProjectBook(
-          latestComplexProjectBook.current,
-        );
-        const localMoodBook = normalizeMoodBook(latestMoodBook.current);
-        const localReflectionBook = normalizeReflectionBook(latestReflectionBook.current);
-        const localReflectionVault = latestReflectionVault.current;
-        const localPublicReflectionBook = getPublicReflectionBook(
-          localReflectionBook,
-          localReflectionVault,
-        );
-        const localUserProfile = normalizeUserProfile(latestUserProfile.current);
-        const nextDeletedItemIds = uniqueValues([
-          ...latestDeletedItemIds.current,
-          ...cloudPayload.deletedItemIds,
-        ]);
-        const nextCustomCategories = mergeCustomCategories(
-          latestCustomCategories.current,
-          cloudPayload.customCategories,
-        );
-        const mergedComplexProjectBook = mergeComplexProjectBooks(
-          localComplexProjectBook,
-          normalizeComplexProjectBook(cloudPayload.complexProjects),
-          nextDeletedItemIds,
-        );
-        const mergedPlanBook = mergePlanBooks(
-          localPlanBook,
-          cloudPayload.plansByDate,
-          nextDeletedItemIds,
-        );
-        const mergedMoodBook = mergeMoodBooks(localMoodBook, cloudPayload.moodBook);
-        const mergedReflectionVault = mergeReflectionVaults(
-          localReflectionVault,
-          cloudPayload.reflectionVault,
-        );
-        const mergedReflectionBook = getPublicReflectionBook(
-          mergeReflectionBooks(localPublicReflectionBook, cloudPayload.reflectionBook),
-          mergedReflectionVault,
-        );
-        const mergedUserProfile = mergeUserProfiles(localUserProfile, cloudPayload.userProfile);
-
-        if (isCancelled) {
-          return;
+        if (isCancelled) return;
+        const remote = normalizePayload(cloudRecord?.payload);
+        const checkpoint = cloudDiscardLocal.current ? null : readCheckpoint<CloudPayload>(window.localStorage, currentUserId);
+        if (!checkpoint && !window.localStorage.getItem("daily-planner-before-sync-v2")) {
+          window.localStorage.setItem("daily-planner-before-sync-v2", JSON.stringify({
+            ownerId: currentUserId, createdAt: Date.now(), payload: currentCloudSnapshot(),
+          }));
         }
-
-        setDeletedItemIds(nextDeletedItemIds);
-        setCustomCategories(nextCustomCategories);
-        setComplexProjectBook(mergedComplexProjectBook);
-        setMoodBook(mergedMoodBook);
-        if (mergedReflectionVault) {
-          reflectionVaultKey.current = null;
-          latestReflectionBook.current = mergedReflectionBook;
-          latestReflectionVault.current = mergedReflectionVault;
-          setReflectionVault(mergedReflectionVault);
-          setReflectionBook(mergedReflectionBook);
-          setIsReflectionUnlocked(false);
-        } else {
-          setReflectionBook(mergedReflectionBook);
-        }
-        setUserProfile(mergedUserProfile);
-        setPlansByDate(mergedPlanBook);
-        await upsertDailyPlannerUserData({
-          userId: currentUserId,
-          payload: createCloudPayload(
-            mergedPlanBook,
-            nextDeletedItemIds,
-            nextCustomCategories,
-            mergedComplexProjectBook,
-            mergedMoodBook,
-            mergedReflectionBook,
-            mergedReflectionVault,
-            mergedUserProfile,
-          ),
-        });
-
-        if (!isCancelled) {
-          cloudReady.current = true;
-          setCloudStatus("已登录，云端数据已合并");
+        const base = checkpoint ? normalizePayload(checkpoint.base) : remote;
+        const local = checkpoint ? normalizePayload(checkpoint.local) : remote;
+        const session = installCloudSession(currentUserId, base, local);
+        cloudDiscardLocal.current = false;
+        const result = await session.sync();
+        if (!isCancelled && result !== "cancelled") {
+          setCloudStatus(result === "pending" ? "本机新修改待同步" : "已与云端同步");
+          if (result === "pending") cloudTimer.current = window.setTimeout(() => { void pushToCloud(currentUserId); }, SYNC_DEBOUNCE_MS);
         }
       } catch (error) {
-        if (!isCancelled) {
-          setCloudStatus(error instanceof Error ? error.message : "云端数据读取失败");
-        }
+        if (!isCancelled) setCloudStatus(error instanceof Error ? error.message : "云端读取失败，本机记录仍然保留");
       } finally {
-        if (!isCancelled) {
-          setIsCloudSaving(false);
-        }
+        if (!isCancelled) setIsCloudSaving(false);
       }
     };
-
     void loadCloudData();
-
-    return () => {
-      isCancelled = true;
-    };
-  }, [currentUserId]);
+    return () => { isCancelled = true; releaseWindow?.(); cloudReady.current = false; cloudSession.current = null; };
+  }, [currentUserId, cloudReloadVersion]);
 
   useEffect(() => {
-    if (!currentUserId || !cloudReady.current) {
+    if (!currentUserId || !cloudReady.current || cloudSession.current?.userId !== currentUserId || reflectionEncryptionPending.current) return;
+    try {
+      cloudSession.current.persistLocal();
+    } catch {
+      setCloudStatus("本机备份保存失败，已暂停云端写入。请先导出备份，勿关闭页面。");
       return;
     }
-
-    if (cloudTimer.current) {
-      window.clearTimeout(cloudTimer.current);
-    }
-
-    cloudTimer.current = window.setTimeout(() => {
-      void pushToCloud(currentUserId);
-    }, SYNC_DEBOUNCE_MS);
-
-    return () => {
-      if (cloudTimer.current) {
-        window.clearTimeout(cloudTimer.current);
-      }
-    };
+    if (cloudTimer.current) window.clearTimeout(cloudTimer.current);
+    cloudTimer.current = window.setTimeout(() => { void pushToCloud(currentUserId); }, SYNC_DEBOUNCE_MS);
+    return () => { if (cloudTimer.current) window.clearTimeout(cloudTimer.current); };
   }, [
-    currentUserId,
-    complexProjectBook,
-    customCategories,
-    deletedItemIds,
-    moodBook,
-    plansByDate,
-    reflectionBook,
-    reflectionVault,
-    userProfile,
+    currentUserId, complexProjectBook, customCategories, deletedItemIds, moodBook,
+    plansByDate, reflectionBook, reflectionVault, userProfile,
   ]);
 
   const updatePlansForSelectedDate = (updater: (current: PlanItem[]) => PlanItem[]) => {
@@ -12534,118 +12536,48 @@ function App() {
   };
 
   const pushToCloud = async (userId: string) => {
-    if (!isSupabaseConfigured) {
-      setCloudStatus("Supabase 环境变量未配置，本地模式");
+    const session = cloudSession.current;
+    if (!session || session.userId !== userId || latestCloudUserId.current !== userId) return;
+    if (reflectionEncryptionPending.current) {
+      setCloudStatus("正在加密保存日志...");
+      cloudTimer.current = window.setTimeout(() => { void pushToCloud(userId); }, SYNC_DEBOUNCE_MS);
       return;
     }
-
     setIsCloudSaving(true);
-    setCloudStatus("正在保存到云端...");
-
+    setCloudStatus("正在同步...");
     try {
-      const cloudRecord = await getDailyPlannerUserData(userId);
-      const cloudPayload = normalizePayload(cloudRecord?.payload);
-      const nextDeletedItemIds = uniqueValues([
-        ...latestDeletedItemIds.current,
-        ...cloudPayload.deletedItemIds,
-      ]);
-      const nextCustomCategories = mergeCustomCategories(
-        latestCustomCategories.current,
-        cloudPayload.customCategories,
-      );
-      const mergedComplexProjectBook = mergeComplexProjectBooks(
-        latestComplexProjectBook.current,
-        normalizeComplexProjectBook(cloudPayload.complexProjects),
-        nextDeletedItemIds,
-      );
-      const mergedPlanBook = mergePlanBooks(
-        latestPlanBook.current,
-        cloudPayload.plansByDate,
-        nextDeletedItemIds,
-      );
-      const mergedMoodBook = mergeMoodBooks(latestMoodBook.current, cloudPayload.moodBook);
-      const localReflectionVault = latestReflectionVault.current;
-      const localPublicReflectionBook = getPublicReflectionBook(
-        latestReflectionBook.current,
-        localReflectionVault,
-      );
-      const mergedReflectionVault = mergeReflectionVaults(
-        localReflectionVault,
-        cloudPayload.reflectionVault,
-      );
-      const mergedPublicReflectionBook = getPublicReflectionBook(
-        mergeReflectionBooks(localPublicReflectionBook, cloudPayload.reflectionBook),
-        mergedReflectionVault,
-      );
-      const cloudReflectionVaultWins = Boolean(
-        mergedReflectionVault &&
-          (!localReflectionVault ||
-            mergedReflectionVault.updatedAt > localReflectionVault.updatedAt),
-      );
-      const mergedReflectionBook =
-        localReflectionVault && reflectionVaultKey.current && !cloudReflectionVaultWins
-          ? mergeReflectionBooks(latestReflectionBook.current, mergedPublicReflectionBook)
-          : mergedPublicReflectionBook;
-      const mergedUserProfile = mergeUserProfiles(
-        latestUserProfile.current,
-        cloudPayload.userProfile,
-      );
-
-      if (!arePlanBooksEqual(latestPlanBook.current, mergedPlanBook)) {
-        setPlansByDate(mergedPlanBook);
-      }
-      if (!areStringArraysEqual(nextDeletedItemIds, latestDeletedItemIds.current)) {
-        setDeletedItemIds(nextDeletedItemIds);
-      }
-      if (JSON.stringify(nextCustomCategories) !== JSON.stringify(latestCustomCategories.current)) {
-        setCustomCategories(nextCustomCategories);
-      }
-      if (
-        !areComplexProjectBooksEqual(
-          latestComplexProjectBook.current,
-          mergedComplexProjectBook,
-        )
-      ) {
-        setComplexProjectBook(mergedComplexProjectBook);
-      }
-      if (JSON.stringify(mergedMoodBook) !== JSON.stringify(latestMoodBook.current)) {
-        setMoodBook(mergedMoodBook);
-      }
-      if (
-        cloudReflectionVaultWins && mergedReflectionVault
-      ) {
-        reflectionVaultKey.current = null;
-        latestReflectionBook.current = mergedPublicReflectionBook;
-        latestReflectionVault.current = mergedReflectionVault;
-        setReflectionVault(mergedReflectionVault);
-        setReflectionBook(mergedPublicReflectionBook);
-        setIsReflectionUnlocked(false);
-      } else if (JSON.stringify(mergedReflectionBook) !== JSON.stringify(latestReflectionBook.current)) {
-        setReflectionBook(mergedReflectionBook);
-      }
-      if (JSON.stringify(mergedUserProfile) !== JSON.stringify(latestUserProfile.current)) {
-        setUserProfile(mergedUserProfile);
-      }
-
-      await upsertDailyPlannerUserData({
-        userId,
-        payload: createCloudPayload(
-          mergedPlanBook,
-          nextDeletedItemIds,
-          nextCustomCategories,
-          mergedComplexProjectBook,
-          mergedMoodBook,
-          mergedReflectionBook,
-          mergedReflectionVault,
-          mergedUserProfile,
-        ),
-      });
-      setCloudStatus("已保存到云端");
+      const result = await session.sync();
+      if (cloudSession.current !== session || result === "cancelled" || result === "busy") return;
+      setCloudStatus(result === "pending" ? "本机新修改待同步" : "已与云端同步");
+      if (result === "pending") cloudTimer.current = window.setTimeout(() => { void pushToCloud(userId); }, SYNC_DEBOUNCE_MS);
     } catch (error) {
-      setCloudStatus(error instanceof Error ? error.message : "云端保存失败");
+      if (cloudSession.current === session) setCloudStatus(error instanceof Error ? error.message : "同步失败，本机记录仍然保留");
     } finally {
-      setIsCloudSaving(false);
+      if (cloudSession.current === session) setIsCloudSaving(false);
     }
+  };
+
+  const backupCloudRecords = () => {
+    if (reflectionEncryptionPending.current) { setCloudStatus("日志正在加密，请完成后再备份。"); return; }
+    let legacy: { ownerId?: string; payload?: unknown } | null = null;
+    try {
+      const oldBackup = window.localStorage.getItem("daily-planner-before-sync-v2");
+      legacy = oldBackup ? JSON.parse(oldBackup) : null;
+    } catch { /* The current in-memory snapshot is still exportable. */ }
+    const content = JSON.stringify({ exportedAt: new Date().toISOString(), payload: currentCloudSnapshot(),
+      ...(legacy?.ownerId === currentUserId ? { beforeUpgrade: legacy.payload } : {}) }, null, 2);
+    const url = URL.createObjectURL(new Blob([content], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `daily-planner-backup-${formatDateInput(new Date())}.json`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  const reloadCloudRecords = () => {
+    if (reflectionEncryptionPending.current) { setCloudStatus("日志正在加密，请完成后再读取云端版本。"); return; }
+    if (isCloudSaving || !window.confirm("读取云端版本将替换本机尚未同步的修改。请先下载备份。确定继续？")) return;
+    cloudDiscardLocal.current = true;
+    setCloudReloadVersion(value => value + 1);
   };
 
   const handleAuthSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -17060,6 +16992,17 @@ function App() {
     return standaloneAuthPage;
   }
 
+  if (!isPreviewMode && currentUserId && cloudSession.current?.userId !== currentUserId) {
+    return <main className="mx-auto flex min-h-screen max-w-lg flex-col justify-center gap-4 px-6 text-[#46394f]">
+      <h1 className="text-2xl font-black">今日计划手帐</h1>
+      <p role="status" className="break-words text-sm">{cloudStatus}</p>
+      <div className="flex gap-3">
+        <button type="button" className="rounded-lg border px-4 py-2" disabled={isCloudSaving} onClick={() => setCloudReloadVersion(v => v + 1)}>重新读取</button>
+        <button type="button" className="rounded-lg border px-4 py-2" disabled={isAuthBusy} onClick={handleSignOut}>退出账号</button>
+      </div>
+    </main>;
+  }
+
   return (
     <main className="min-h-screen bg-[#fff8ef] bg-[linear-gradient(180deg,#fff8ef_0%,#f6f1ff_48%,#edf8ff_100%)] px-4 py-4 text-[#46394f] sm:px-6 lg:px-8">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-0">
@@ -17223,6 +17166,13 @@ function App() {
             </AnimatePresence>
           </div>
         </header>
+
+        {currentUserId && !isPreviewMode ? <div className="flex flex-wrap items-center gap-2 border-y border-violet-100 px-4 py-2 text-xs text-[#7b6c84]">
+          <p role="status" className="min-w-0 flex-1 basis-48 break-words">{cloudStatus}</p>
+          <button type="button" title="同步" aria-label="同步" className="inline-flex h-8 w-8 items-center justify-center rounded-lg hover:bg-violet-50 disabled:opacity-40" disabled={isCloudSaving} onClick={() => void pushToCloud(currentUserId)}><RefreshCw size={16} className={isCloudSaving ? "animate-spin" : ""} /></button>
+          <button type="button" title="备份本机记录" aria-label="备份本机记录" className="inline-flex h-8 w-8 items-center justify-center rounded-lg hover:bg-violet-50" onClick={backupCloudRecords}><Download size={16} /></button>
+          <button type="button" title="读取云端版本" aria-label="读取云端版本" className="inline-flex h-8 w-8 items-center justify-center rounded-lg hover:bg-violet-50 disabled:opacity-40" disabled={isCloudSaving} onClick={reloadCloudRecords}><CloudDownload size={16} /></button>
+        </div> : null}
 
         {createPortal(
           <AnimatePresence>

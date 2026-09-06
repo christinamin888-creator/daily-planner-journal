@@ -2,6 +2,7 @@
 
 import { createClient } from "@supabase/supabase-js";
 import type { AuthChangeEvent, Session, SupabaseClient, User } from "@supabase/supabase-js";
+import { savePlannerSnapshot, type PlannerCloudSave } from "./plannerCloudSave";
 
 export type DailyPlannerUserDataRecord = {
   user_id: string;
@@ -147,25 +148,6 @@ export async function getDailyPlannerUserData(
   return data as DailyPlannerUserDataRecord | null;
 }
 
-export async function upsertDailyPlannerUserData(params: {
-  userId: string;
-  payload: unknown;
-}): Promise<DailyPlannerUserDataRecord | null> {
-  const { data, error } = await getSupabaseClient()
-    .from("daily_planner_user_data")
-    .upsert(
-      {
-        user_id: params.userId,
-        payload: params.payload,
-      },
-      { onConflict: "user_id" },
-    )
-    .select("user_id,payload")
-    .maybeSingle();
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  return data as DailyPlannerUserDataRecord | null;
+export async function saveDailyPlannerUserData(params: PlannerCloudSave): Promise<void> {
+  await savePlannerSnapshot(getSupabaseClient(), params);
 }
